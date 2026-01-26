@@ -1,0 +1,53 @@
+[project]
+name = "pikppo"
+version = "2.0.0"
+description = "Complete video dubbing pipeline: Chinese short drama -> English subtitles + English dubbing with multi-voice support"
+requires-python = ">=3.9"
+dependencies = [
+  "openai-whisper>=20231117",
+  "google-genai>=0.2.0",
+  "ffmpeg-python>=0.2.0",
+  "opencc-python-reimplemented>=0.1.7",
+  "srt>=3.5.3",
+  "pydub>=0.25.1",
+  "tqdm>=4.66.0",
+  "python-dotenv>=1.0.0",
+  "requests>=2.19.1",  # Required for Doubao ASR API
+  "tos>=2.6.0",  # Required for TOS upload (Doubao ASR)
+]
+
+[project.scripts]
+vsd = "video_remix.cli:main"
+vr = "video_remix.cli:main"
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=7.0.0",
+  "black>=23.0.0",
+  "ruff>=0.1.0",
+]
+openai = [
+  "openai>=1.0.0",
+]
+terms = [
+  "pyyaml>=6.0",
+]
+faster = [
+  "faster-whisper>=1.0.0",
+]
+dub = [
+  "demucs>=4.0.0",
+  "google-cloud-speech>=2.21.0",
+  "google-cloud-storage>=2.10.0",  # Required for GCS upload
+  "openai>=1.0.0",
+  "azure-cognitiveservices-speech>=1.32.0",
+  "librosa>=0.10.0",
+  "numpy>=1.24.0,<2.0.0",
+  "torchaudio>=2.0.0",  # Updated for Python 3.13 compatibility
+]
+
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+
