@@ -11,19 +11,19 @@ import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from video_remix.models.doubao import (
+from pikppo.models.doubao import (
     DoubaoASRClient,
     get_preset,
     guess_audio_format,
     parse_utterances,
 )
-from video_remix.models.doubao.presets import RESOURCE_ID
-from video_remix.models.doubao.request_types import (
+from pikppo.models.doubao.presets import RESOURCE_ID
+from pikppo.models.doubao.request_types import (
     DoubaoASRRequest,
     AudioConfig,
     UserInfo,
 )
-from video_remix.utils.logger import info, warning
+from pikppo.utils.logger import info, warning
 
 
 def get_response_path(output_dir: Path, preset: str) -> Path:

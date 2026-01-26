@@ -61,7 +61,7 @@ def get_doubao_config():
             "请在 .env 文件中设置 DOUBAO_ACCESS_TOKEN，或使用: export DOUBAO_ACCESS_TOKEN=your_token"
         )
     
-    from video_remix.utils.logger import info
+    from pikppo.utils.logger import info
     info("豆包 API 配置:")
     info(f"  AppID: {appid}")
     info(f"  Access Token: {access_token[:8]}...{access_token[-4:] if len(access_token) > 12 else ''}")
@@ -117,7 +117,7 @@ def get_audio_url(audio_path_or_url: str) -> str:
         ValueError: 如果无法获取 URL
         RuntimeError: 如果上传失败
     """
-    from video_remix.infra.storage.tos import TosStorage
+    from pikppo.infra.storage.tos import TosStorage
     from pathlib import Path
 
     # 如果是 URL 直接返回，否则上传到 TOS
@@ -163,7 +163,7 @@ def get_llm_preset_config(preset: str = "asr_vad_spk"):
     Returns:
         RequestConfig 实例
     """
-    from video_remix.models.doubao import get_preset
+    from pikppo.models.doubao import get_preset
 
     return get_preset(preset)
 
@@ -197,17 +197,17 @@ def save_results(
     json_path = output_dir / f"{audio_stem}-doubao-segments.json"
     with open(json_path, "w", encoding="utf-8") as f:
         json.dump(segments_with_speaker, f, indent=2, ensure_ascii=False)
-    from video_remix.utils.logger import info
+    from pikppo.utils.logger import info
     info(f"保存 JSON（含 speaker 信息）: {json_path}")
     
     # 保存 SRT
     srt_path = output_dir / f"{audio_stem}.srt"
     try:
-        from video_remix.utils.timecode import write_srt_from_segments
+        from pikppo.utils.timecode import write_srt_from_segments
         write_srt_from_segments(segments, str(srt_path), text_key="text")
         info(f"保存 SRT: {srt_path}")
     except Exception as e:
-        from video_remix.utils.logger import warning
+        from pikppo.utils.logger import warning
         warning(f"保存 SRT 失败: {e}")
         # 如果工具函数失败，手动生成 SRT
         with open(srt_path, "w", encoding="utf-8") as f:
@@ -233,7 +233,7 @@ def save_results(
     if segments:
         total_duration = max(seg.get("end", 0.0) for seg in segments)
         total_chars = sum(len(seg.get("text", "")) for seg in segments)
-        from video_remix.utils.logger import info, warning
+        from pikppo.utils.logger import info, warning
         info("统计信息:")
         info(f"  片段数: {len(segments)}")
         info(f"  总时长: {total_duration:.2f}s")
@@ -251,7 +251,7 @@ def save_results(
 # 所有可用的预设（从 doubao_asr.py 动态获取）
 def get_all_presets() -> List[str]:
     """获取所有可用的预设名称"""
-    from video_remix.models.doubao import get_presets
+    from pikppo.models.doubao import get_presets
     return sorted(get_presets().keys())
 
 
@@ -272,18 +272,18 @@ def _run_asr_once(
     Returns:
         (query_result, utterances)
     """
-    from video_remix.models.doubao import (
+    from pikppo.models.doubao import (
         DoubaoASRClient,
         guess_audio_format,
         parse_utterances,
         RESOURCE_ID,
     )
-    from video_remix.models.doubao.request_types import (
+    from pikppo.models.doubao.request_types import (
         DoubaoASRRequest,
         AudioConfig,
         UserInfo,
     )
-    from video_remix.utils.logger import info
+    from pikppo.utils.logger import info
     
     # 获取预设配置
     request_config = get_llm_preset_config(preset)
@@ -360,7 +360,7 @@ def test_single_preset(
     }
 
     try:
-        from video_remix.utils.logger import info
+        from pikppo.utils.logger import info
         print(f"\n{'=' * 60}")
         info(f"测试预设: {preset}")
         print(f"{'=' * 60}")
@@ -369,7 +369,7 @@ def test_single_preset(
         preset_config = get_llm_preset_config(preset)
         print(f"   ASR preset: {preset}")
         print(f"   Postprofile: {postprofile}")
-        from video_remix.models.doubao import RESOURCE_ID
+        from pikppo.models.doubao import RESOURCE_ID
         print(f"   配置: {RESOURCE_ID}")
         print(f"   VAD: {preset_config.vad_segment}")
         if preset_config.end_window_size:
@@ -382,8 +382,8 @@ def test_single_preset(
             info(f"复用 ASR 结果（预设: {preset}）...")
         
         # 运行时组合：应用后处理策略
-        from video_remix.models.doubao import speaker_aware_postprocess
-        from video_remix.models.doubao.types import Utterance
+        from pikppo.models.doubao import speaker_aware_postprocess
+        from pikppo.models.doubao.types import Utterance
         
         info(f"应用后处理策略: {postprofile}")
         postprocessed_segments = speaker_aware_postprocess(utterances, profile_name=postprofile)
@@ -406,7 +406,7 @@ def test_single_preset(
         if has_speaker:
             speaker_count = len(
                 set(seg.get("speaker", "unknown") for seg in segments if seg.get("speaker") != "unknown"))
-            from video_remix.utils.logger import info, warning
+            from pikppo.utils.logger import info, warning
             info(f"检测到 {speaker_count} 个不同的 speaker")
         else:
             warning("警告：未检测到 speaker 信息")
@@ -443,11 +443,11 @@ def test_single_preset(
         ]
         srt_path = output_dir / f"{combo_prefix}.srt"
         try:
-            from video_remix.utils.timecode import write_srt_from_segments
+            from pikppo.utils.timecode import write_srt_from_segments
             write_srt_from_segments(segments_no_speaker, str(srt_path), text_key="text")
             info(f"已保存 SRT 到: {srt_path}")
         except Exception as e:
-            from video_remix.utils.logger import warning
+            from pikppo.utils.logger import warning
             warning(f"保存 SRT 失败: {e}")
 
         result["output_file"] = str(srt_path)
@@ -458,7 +458,7 @@ def test_single_preset(
         result["asr_preset"] = preset  # 记录 ASR 预设
         result["postprofile"] = postprofile  # 记录后处理策略
 
-        from video_remix.utils.logger import success
+        from pikppo.utils.logger import success
         success(f"组合测试完成 (ASR: {preset}, Post: {postprofile})")
         info(f"  片段数: {len(segments)}")
         info(f"  耗时: {result['duration']:.2f} 秒")
@@ -480,7 +480,7 @@ def test_single_preset(
             if match:
                 result["task_id"] = match.group(1)
         
-        from video_remix.utils.logger import error
+        from pikppo.utils.logger import error
         error(f"预设 {preset} 测试失败: {error_str}")
         if result.get("task_id"):
             print(f"   任务 ID: {result['task_id']}")
@@ -521,7 +521,7 @@ def test_all_presets(
         所有测试结果列表
     """
     # 加载环境变量
-    from video_remix import load_env_file
+    from pikppo import load_env_file
     load_env_file()
     
     # 获取配置
@@ -532,13 +532,13 @@ def test_all_presets(
         postprofiles = ["axis"]
     
     # 生成组合矩阵（不命名组合）
-    from video_remix.models.doubao import POSTPROFILES
+    from pikppo.models.doubao import POSTPROFILES
     available_postprofiles = list(POSTPROFILES.keys())
     
     # 验证后处理策略是否存在
     for postprofile in postprofiles:
         if postprofile not in available_postprofiles:
-            from video_remix.utils.logger import warning
+            from pikppo.utils.logger import warning
             warning(f"未知的后处理策略: {postprofile}，可用策略: {', '.join(available_postprofiles)}")
             warning(f"使用默认策略: axis")
             postprofiles = ["axis"]
@@ -563,7 +563,7 @@ def test_all_presets(
     asr_results_cache = {}  # {preset: (query_result, utterances)}
     
     # 第一步：对每个唯一的 ASR 预设调用一次 API
-    from video_remix.utils.logger import info
+    from pikppo.utils.logger import info
     unique_presets = list(set(presets))
     info(f"需要调用 ASR API 的预设数: {len(unique_presets)} (去重后)")
     
@@ -574,7 +574,7 @@ def test_all_presets(
             asr_results_cache[preset] = (query_result, utterances)
             info(f"✅ ASR 预设 {preset} 调用成功，已缓存结果")
         except Exception as e:
-            from video_remix.utils.logger import error
+            from pikppo.utils.logger import error
             error(f"❌ ASR 预设 {preset} 调用失败: {e}")
             # 即使失败也记录，后续会跳过
             asr_results_cache[preset] = (None, None)
@@ -594,7 +594,7 @@ def test_all_presets(
     ]
     
     if len(valid_test_cases) < len(test_cases):
-        from video_remix.utils.logger import warning
+        from pikppo.utils.logger import warning
         warning(f"跳过 {len(test_cases) - len(valid_test_cases)} 个无效组合（ASR 调用失败）")
 
     if parallel:
@@ -621,7 +621,7 @@ def test_all_presets(
                     result = future.result()
                     results.append(result)
                 except Exception as e:
-                    from video_remix.utils.logger import error
+                    from pikppo.utils.logger import error
                     error(f"组合 (ASR: {preset}, Post: {postprofile}) 执行异常: {e}")
                     results.append({
                         "preset": f"{preset}_{postprofile}",  # 仅用于显示
@@ -668,13 +668,13 @@ def test_6_groups(
         所有测试结果列表
     """
     # 加载环境变量
-    from video_remix import load_env_file
+    from pikppo import load_env_file
     load_env_file()
     
     # 获取配置
     appid, access_token = get_doubao_config()
     
-    from video_remix.utils.logger import info
+    from pikppo.utils.logger import info
     print(f"\n{'=' * 60}")
     print(f"🚀 开始测试6组推荐组合")
     print(f"{'=' * 60}")
@@ -697,7 +697,7 @@ def test_6_groups(
             asr_results_cache[preset] = (query_result, utterances)
             info(f"✅ ASR 预设 {preset} 调用成功，已缓存结果")
         except Exception as e:
-            from video_remix.utils.logger import error
+            from pikppo.utils.logger import error
             error(f"❌ ASR 预设 {preset} 调用失败: {e}")
             asr_results_cache[preset] = (None, None)
     
@@ -709,7 +709,7 @@ def test_6_groups(
     ]
     
     if len(valid_test_cases) < len(test_cases):
-        from video_remix.utils.logger import warning
+        from pikppo.utils.logger import warning
         warning(f"跳过 {len(test_cases) - len(valid_test_cases)} 个无效组合（ASR 调用失败）")
     
     results = []
@@ -738,7 +738,7 @@ def test_6_groups(
                     result = future.result()
                     results.append(result)
                 except Exception as e:
-                    from video_remix.utils.logger import error
+                    from pikppo.utils.logger import error
                     error(f"组合 (ASR: {preset}, Post: {postprofile}) 执行异常: {e}")
                     results.append({
                         "preset": f"{preset}_{postprofile}",
@@ -766,7 +766,7 @@ def test_6_groups(
 
 def print_summary(results: List[Dict[str, Any]]):
     """打印测试结果摘要。"""
-    from video_remix.utils.logger import success, error, info
+    from pikppo.utils.logger import success, error, info
     
     print(f"\n{'=' * 60}")
     print(f"📊 测试结果摘要")
@@ -964,10 +964,10 @@ def main():
         parser.error("必须使用 --llm 参数")
 
     # 提前导入 logger，确保异常处理时可用
-    from video_remix.utils.logger import info, success, error, warning
+    from pikppo.utils.logger import info, success, error, warning
 
     # 加载环境变量
-    from video_remix import load_env_file
+    from pikppo import load_env_file
     load_env_file()
     
     try:
@@ -976,9 +976,9 @@ def main():
             # 获取豆包 API 配置
             appid, access_token = get_doubao_config()
             
-            from video_remix.models.doubao import DoubaoASRClient
+            from pikppo.models.doubao import DoubaoASRClient
             
-            from video_remix.utils.logger import info
+            from pikppo.utils.logger import info
             info(f"查询任务结果（大模型版，Task ID: {args.query}）...")
             
             # 查询时直接使用默认的 resource_id（所有预设都使用 volc.seedasr.auc）
@@ -1007,7 +1007,7 @@ def main():
                     raise TimeoutError(f"任务查询超时：在 {max_wait_s} 秒内未完成")
             
             # 解析结果
-            from video_remix.models.doubao import parse_utterances
+            from pikppo.models.doubao import parse_utterances
             utterances = parse_utterances(result)
             segments = [
                 {
@@ -1030,7 +1030,7 @@ def main():
             prefix = "llm-query"
             save_results(segments, output_dir, f"{prefix}-{args.query}")
             
-            from video_remix.utils.logger import success
+            from pikppo.utils.logger import success
             success(f"查询完成！结果保存在: {output_dir}")
             return
         
@@ -1038,7 +1038,7 @@ def main():
         if args.all_presets:
             # 先检查参数，再获取 API 配置（避免不必要的配置输出）
             if not args.url and not args.audio:
-                from video_remix.utils.logger import error, info
+                from pikppo.utils.logger import error, info
                 error("批量测试模式需要提供音频文件路径或 URL")
                 print()
                 info("使用方式：")
@@ -1071,7 +1071,7 @@ def main():
 
             # 如果指定了 --test-6-groups，使用6组推荐组合（只测试这6组，不是全排列）
             if args.test_6_groups:
-                from video_remix.utils.logger import info, warning
+                from pikppo.utils.logger import info, warning
                 if args.presets != ALL_PRESETS or args.postprofiles is not None:
                     warning("使用 --test-6-groups 时，--presets 和 --postprofiles 参数将被忽略")
                 info("使用5组推荐测试组合（只测试这5组特定组合，不是全排列）...")
@@ -1100,7 +1100,7 @@ def main():
                 )
             else:
                 # 执行批量测试（运行时组合，会生成全排列）
-                from video_remix.utils.logger import warning
+                from pikppo.utils.logger import warning
                 if len(args.presets) > 1 and args.postprofiles and len(args.postprofiles) > 1:
                     total_combinations = len(args.presets) * len(args.postprofiles)
                     warning(f"将生成 {total_combinations} 组全排列组合（{len(args.presets)} 个预设 × {len(args.postprofiles)} 个后处理策略）")
@@ -1150,7 +1150,7 @@ def main():
                 ("asr_spk_semantic", "axis"),
             ]
             
-            from video_remix.utils.logger import info
+            from pikppo.utils.logger import info
             info("使用默认策略组合测试")
             info(f"将测试 {len(default_test_cases)} 组策略组合")
             
@@ -1172,7 +1172,7 @@ def main():
 
         # 模式3: 单个测试模式
         if not args.audio:
-            from video_remix.utils.logger import error, info
+            from pikppo.utils.logger import error, info
             error("单个测试模式需要提供音频文件路径或 URL")
             print()
             info("使用方式：")
@@ -1193,18 +1193,18 @@ def main():
         
         # 获取预设配置
         request_config = get_llm_preset_config(args.preset)
-        from video_remix.utils.logger import info
+        from pikppo.utils.logger import info
         info(f"音频: {audio_url}")
         print(f"   预设配置: {args.preset}")
 
         # 直接使用 doubao_asr.py 的功能
-        from video_remix.models.doubao import (
+        from pikppo.models.doubao import (
             DoubaoASRClient,
             guess_audio_format,
             parse_utterances,
             RESOURCE_ID,
         )
-        from video_remix.models.doubao.request_types import (
+        from pikppo.models.doubao.request_types import (
             DoubaoASRRequest,
             AudioConfig,
             UserInfo,

@@ -11,12 +11,12 @@ from pathlib import Path
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root / "src"))
 
-from video_remix.pipeline._shared.subtitle import (
+from pikppo.pipeline.processors.subtitle import (
     generate_subtitles,
     generate_subtitles_from_preset,
     check_cached_subtitles,
 )
-from video_remix.pipeline.asr import transcribe
+from pikppo.pipeline.processors.asr import transcribe
 
 
 def example_1_check_cache_then_run():
