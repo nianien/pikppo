@@ -1,17 +1,12 @@
 """
-ASR Pipeline 模块
+ASR Processor 模块（唯一公共入口）
 
-职责：
-- ASR 转录（transcribe）：audio_url + preset → utterances
+公共 API：
+- run(): 唯一对外入口（调用 ASR 服务）
 
-注意：
-- Pipeline 只负责编排，不包含模型实现细节
-- 所有模型实现在 models 中
-- 字幕生成功能在 pipeline.processors.subtitle 模块中
-- URL/Path 解析直接使用 storage 层
+内部模块（不直接导入）：
+- impl.py: 内部实现
 """
-from .transcribe import transcribe
+from .processor import run
 
-__all__ = [
-    "transcribe",
-]
+__all__ = ["run"]

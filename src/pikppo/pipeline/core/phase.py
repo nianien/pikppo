@@ -5,7 +5,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from typing import Dict, List
 
-from pikppo.pipeline.core.types import RunContext, PhaseResult, Artifact
+from pikppo.pipeline.core.types import RunContext, PhaseResult, Artifact, ResolvedOutputs
 
 
 class Phase(ABC):
@@ -20,7 +20,7 @@ class Phase(ABC):
         返回该 Phase 需要的 artifact keys（从 manifest.artifacts 获取）。
         
         Returns:
-            artifact keys 列表，例如 ["subs.zh_segments"]
+            artifact keys 列表，例如 ["subs.subtitle_model"]
         """
         pass
 
@@ -30,20 +30,28 @@ class Phase(ABC):
         返回该 Phase 将生成的 artifact keys。
         
         Returns:
-            artifact keys 列表，例如 ["translate.context", "subs.en_segments"]
+            artifact keys 列表，例如 ["translate.context", "subs.subtitle_model"]
         """
         pass
 
     @abstractmethod
-    def run(self, ctx: RunContext, inputs: Dict[str, Artifact]) -> PhaseResult:
+    def run(
+        self,
+        ctx: RunContext,
+        inputs: Dict[str, Artifact],
+        outputs: ResolvedOutputs,
+    ) -> PhaseResult:
         """
         执行 Phase 逻辑。
         
         Args:
             ctx: 运行上下文
             inputs: 已解析的 artifacts（key -> Artifact）
+            outputs: Runner 预分配的输出路径（artifact_key -> absolute Path）
         
         Returns:
-            PhaseResult，包含生成的 artifacts（path 可以是临时路径，runner 会统一 publish）
+            PhaseResult，包含生成的 artifacts
+            - artifacts 的 path 应该使用 outputs.paths 中的路径
+            - runner 会负责原子提交与 manifest 一致性
         """
         pass

@@ -11,7 +11,7 @@ Doubao ASR 数据解析器
 - ❌ speaker 策略
 - ❌ 任何业务规则
 
-注意：返回的 Utterance/Word 使用通用的类型定义（pipeline/processors/subtitle/types），
+注意：返回的 Utterance/Word 使用通用的类型定义（pikppo.schema），
 不绑定到 doubao 特定的类型，以便支持多 provider。
 """
 from typing import Any, Dict, List, Optional
@@ -76,6 +76,10 @@ def parse_utterances(raw: Dict[str, Any]) -> List[Utterance]:
         if not text:
             continue
         
+        # 解析 emotion 和 gender（如果存在）
+        emotion = additions.get("emotion")  # 可能是 None
+        gender = additions.get("gender")  # 可能是 None
+        
         # 解析 words（如果存在）
         words: Optional[List[Word]] = None
         word_list = u.get("words")
@@ -88,6 +92,8 @@ def parse_utterances(raw: Dict[str, Any]) -> List[Utterance]:
             end_ms=et,
             text=text,
             words=words,
+            emotion=str(emotion) if emotion is not None else None,
+            gender=str(gender) if gender is not None else None,
         ))
     # ensure time order
     out.sort(key=lambda x: (x.start_ms, x.end_ms))

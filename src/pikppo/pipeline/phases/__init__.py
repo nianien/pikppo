@@ -3,7 +3,7 @@ Pipeline phases registration.
 """
 from .demux import DemuxPhase
 from .asr import ASRPhase
-from .srt import SubtitlePhase
+from .sub import SubtitlePhase
 from .mt import MTPhase
 from .tts import TTSPhase
 from .mix import MixPhase

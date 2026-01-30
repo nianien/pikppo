@@ -25,6 +25,15 @@ from .types import (
     SegmentList,
     SrtCueList,
 )
+from .subtitle_model import (
+    SubtitleModel,
+    SubtitleCue,
+    SpeakerInfo,
+    EmotionInfo,
+    SourceText,
+    TargetText,
+    SchemaInfo,
+)
 
 __all__ = [
     "Word",
@@ -36,4 +45,12 @@ __all__ = [
     "UtteranceList",
     "SegmentList",
     "SrtCueList",
+    # Subtitle Model v1.1
+    "SubtitleModel",
+    "SubtitleCue",
+    "SpeakerInfo",
+    "EmotionInfo",
+    "SourceText",
+    "TargetText",
+    "SchemaInfo",
 ]

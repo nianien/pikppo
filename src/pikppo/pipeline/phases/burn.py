@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Dict
 
 from pikppo.pipeline.core.phase import Phase
-from pikppo.pipeline.core.types import Artifact, ErrorInfo, PhaseResult, RunContext
+from pikppo.pipeline.core.types import Artifact, ErrorInfo, PhaseResult, RunContext, ResolvedOutputs
 from pikppo.utils.logger import info
 
 
@@ -25,7 +25,12 @@ class BurnPhase(Phase):
         """生成 burn.video。"""
         return ["burn.video"]
     
-    def run(self, ctx: RunContext, inputs: Dict[str, Artifact]) -> PhaseResult:
+    def run(
+        self,
+        ctx: RunContext,
+        inputs: Dict[str, Artifact],
+        outputs: ResolvedOutputs,
+    ) -> PhaseResult:
         """
         执行 Burn Phase。
         
@@ -35,10 +40,10 @@ class BurnPhase(Phase):
         """
         # 获取输入
         mix_audio_artifact = inputs["mix.audio"]
-        mix_path = Path(ctx.workspace) / mix_audio_artifact.path
+        mix_path = Path(ctx.workspace) / mix_audio_artifact.relpath
         
         en_srt_artifact = inputs["subs.en_srt"]
-        srt_path = Path(ctx.workspace) / en_srt_artifact.path
+        srt_path = Path(ctx.workspace) / en_srt_artifact.relpath
         
         if not mix_path.exists():
             return PhaseResult(
@@ -114,17 +119,10 @@ class BurnPhase(Phase):
             
             info(f"Burn completed: {output_video_path.name} (size: {output_video_path.stat().st_size / 1024 / 1024:.2f} MB)")
             
-            # 返回 artifact
+            # 返回 PhaseResult：只声明哪些 outputs 成功
             return PhaseResult(
                 status="succeeded",
-                artifacts={
-                    "burn.video": Artifact(
-                        key="burn.video",
-                        path=f"{episode_stem}-dubbed.mp4",
-                        kind="mp4",
-                        fingerprint="",  # runner 会计算
-                    ),
-                },
+                outputs=["burn.video"],
                 metrics={
                     "output_video_size_mb": output_video_path.stat().st_size / 1024 / 1024,
                 },

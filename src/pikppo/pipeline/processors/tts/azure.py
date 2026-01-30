@@ -184,7 +184,7 @@ def synthesize_tts(
     Synthesize TTS for each segment using Azure Neural TTS with episode-level caching.
     
     Args:
-        en_segments_path: Path to en_segments.json
+        en_segments_path: Path to segments JSON file (临时文件，由 processor 创建)
         voice_assignment_path: Path to voice_assignment.json
         voice_pool_path: Path to voice pool JSON (None = use default)
         output_dir: Output directory (should be .temp_tts)

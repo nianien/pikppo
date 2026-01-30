@@ -552,3 +552,135 @@ inputs["some.key"].path
 	•	让 runner 跑一个最小链：asr -> mt（asr 可 stub）
 
 ⸻
+
+是的，而且你这个阶段必须要有——不然现在这套 Phase / Processor / Model 的分层很快会在“执行方式”上再次塌掉。
+
+我直接给你拍板结论 + 最小可落地设计，不兜圈子。
+
+⸻
+
+你说的“没有统一”，本质是：Phase.run 里现在要手动挑 processor 函数来调，不同 phase 会各写各的调用方式，久了就散。
+
+解决办法不是让 phase 去调“某个 processor 方法”，而是给 Processor 也定义统一的执行入口，让 Phase 永远只调一个方法。
+
+⸻
+
+方案（拍板）：Processor 也做成“有统一入口的可执行单元”
+
+✅ Processor 最小接口
+
+class Processor(Protocol):
+    name: str
+    version: str  # 业务逻辑变更就 bump（可选）
+
+    def run(self, ctx: "RunContext", inputs: "ResolvedInputs") -> "ProcessorResult":
+        ...
+
+然后每个 phase 只做一件事：
+
+拿 inputs → 调 processor.run → 返回结果给 runner
+
+Phase 内部不再出现“各种 processor 函数名”。
+
+⸻
+
+Phase.run 的统一写法（所有 phase 一种模式）
+
+class SomePhase:
+    name = "mt"
+    version = "1"
+
+    processor = MTProcessor()   # 固定绑定，或从 registry 选择
+
+    def run(self, ctx, inputs):
+        pres = self.processor.run(ctx, inputs)
+        return PhaseResult(outputs=pres.outputs, meta=pres.meta)
+
+Phase 彻底变薄：
+	•	不知道 processor 里面有 Stage1/Stage2
+	•	不知道调哪些函数
+	•	只知道 processor.run(...)
+
+这就统一了。
+
+⸻
+
+那 processor 里可以随便拆 Stage 吗？
+
+可以，processor 内部想怎么拆都行：
+
+class MTProcessor:
+    name = "mt"
+    version = "3"
+
+    def run(self, ctx, inputs):
+        ctx_data = build_context(...)
+        translated = translate(...)
+        return ProcessorResult(outputs={...}, meta={...})
+
+
+⸻
+
+Runner 与输出写入：你现在的规则需要再“钉死”一句
+
+你之前说：
+
+runner 原子写 outputs → 更新 manifest
+phase.run 写到指定输出路径
+
+这两条会冲突，必须统一口径（否则“谁写文件”会打架）：
+
+我建议你选其中一种，并且全局一致：
+
+✅ 推荐 A（最干净，runner 原子落盘）
+	•	Phase/Processor 只返回数据（bytes/obj）
+	•	Runner 负责写入到 outputs path（atomic write）
+
+优点：一致性最好，可重试、可回滚
+缺点：大文件（音频/视频）不适合
+
+✅ 推荐 B（媒体工程更现实，producer 写文件，runner 只登记）
+	•	Runner 提前分配 outputs path
+	•	Phase/Processor 写文件到这些 path
+	•	Runner 只做：
+	•	校验文件存在/大小/hash
+	•	原子更新 manifest（不是原子写文件）
+
+这更适合你这种视频管线（大文件、ffmpeg 输出）。
+
+你当前的描述更接近 B，那就把“runner 原子写 outputs”改成
+“runner 原子更新 manifest + 校验 outputs”。
+
+⸻
+
+你要的“统一”最终形态（最少概念）
+	•	Phase：统一 run(ctx, inputs)，内部只调用一个 processor.run
+	•	Processor：统一 run(ctx, inputs)，内部随便拆 stage
+	•	Model：被 processor 调用，不被 phase 直接碰
+
+依赖链：
+
+Runner → Phase.run → Processor.run → Model
+
+⸻
+
+如果你不想再引入 Processor 接口（更轻的替代）
+
+也可以：只要求每个 phase 都有一个固定命名的 processor 函数：
+	•	processors/<phase_name>/main.py 里必须导出 run(ctx, inputs)
+
+然后 phase 统一写成：
+
+from pipeline.processors.mt.main import run as processor_run
+...
+processor_run(ctx, inputs)
+
+这仍然是统一入口，只是不用 Protocol/class。
+
+⸻
+
+最终拍板（你选一个就能统一）
+	1.	更正规：Processor Protocol + processor.run()
+	2.	更轻量：每个 processors//main.py 固定暴露 run()
+
+我建议你现在选 2)：最少概念，落地最快，而且符合你“项目初期别整花活”的原则。

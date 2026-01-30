@@ -5,14 +5,13 @@ import traceback
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from pikppo.pipeline.core.types import Artifact, ErrorInfo, RunContext, Status
+from pikppo.pipeline.core.types import Artifact, ErrorInfo, RunContext, Status, ResolvedOutputs
 from pikppo.pipeline.core.phase import Phase
 from pikppo.pipeline.core.manifest import Manifest, now_iso
 from pikppo.pipeline.core.fingerprints import (
     compute_inputs_fingerprint,
     compute_config_fingerprint,
     hash_file,
-    hash_json,
 )
 from pikppo.pipeline.core.atomic import atomic_copy
 from pikppo.utils.logger import info, warning, error
@@ -79,12 +78,12 @@ class PhaseRunner:
             except ValueError:
                 return True, f"output artifact '{key}' not found"
             
-            # 检查文件是否存在
-            artifact_path = self.workspace / artifact.path
+            # 检查文件是否存在（使用 workspace / relpath）
+            artifact_path = self.workspace / artifact.relpath
             if not artifact_path.exists():
                 return True, f"output artifact '{key}' file not found: {artifact_path}"
             
-            # 检查 fingerprint 是否匹配
+            # 检查 fingerprint 是否匹配（所有 outputs 都是 file，一律 hash_file）
             current_fp = hash_file(artifact_path)
             if artifact.fingerprint != current_fp:
                 return True, f"output artifact '{key}' fingerprint mismatch: {artifact.fingerprint} != {current_fp}"
@@ -111,54 +110,65 @@ class PhaseRunner:
         
         return artifacts
     
+    def allocate_outputs(
+        self,
+        phase: Phase,
+    ) -> ResolvedOutputs:
+        """
+        为 phase 分配输出路径（Runner 负责路径分配）。
+        
+        Args:
+            phase: Phase 实例
+        
+        Returns:
+            ResolvedOutputs，包含 artifact_key -> absolute Path 映射
+        """
+        provided_keys = phase.provides()
+        paths = {}
+        
+        for key in provided_keys:
+            # 使用 manifest 的路径解析逻辑
+            absolute_path = self.manifest._resolve_artifact_path(key, self.workspace)
+            # 确保父目录存在
+            absolute_path.parent.mkdir(parents=True, exist_ok=True)
+            paths[key] = absolute_path
+        
+        return ResolvedOutputs(paths=paths)
+    
+    def _guess_artifact_kind(self, path: Path) -> str:
+        """
+        根据文件路径猜测 artifact kind。
+        
+        Args:
+            path: 文件路径
+        
+        Returns:
+            artifact kind（"json", "srt", "wav", "mp4" 等）
+        """
+        suffix = path.suffix.lower()
+        kind_map = {
+            ".json": "json",
+            ".srt": "srt",
+            ".wav": "wav",
+            ".mp4": "mp4",
+            ".mp3": "mp3",
+        }
+        return kind_map.get(suffix, "file")
+    
+    # 旧的 publish_artifacts 方法已由 run_phase 内逻辑取代，保留空壳以防外部调用。
+    # 新约定：Runner 是唯一提交者，Phase/Processor 只写文件，Runner 直接构造 Artifact 并注册到 manifest。
     def publish_artifacts(
         self,
         artifacts: Dict[str, Artifact],
     ) -> Dict[str, Artifact]:
         """
-        发布 artifacts（从临时路径移动到最终路径，并计算 fingerprint）。
-        
-        Args:
-            artifacts: Phase 返回的 artifacts（path 可能是临时路径）
-        
-        Returns:
-            更新后的 artifacts（包含最终路径和 fingerprint）
+        兼容旧接口的空实现。
+
+        新实现中不再使用该方法，Artifact 的构造和注册在 run_phase 中完成。
         """
-        published = {}
-        
-        for key, artifact in artifacts.items():
-            source_path = self.workspace / artifact.path
-            
-            if not source_path.exists():
-                raise FileNotFoundError(f"Artifact source file not found: {source_path}")
-            
-            # 确定最终路径（如果已经是最终路径，就不移动）
-            # 这里简化处理：假设 artifact.path 已经是最终路径
-            final_path = source_path
-            
-            # 计算 fingerprint
-            if artifact.kind == "json":
-                import json
-                content = json.loads(final_path.read_text(encoding="utf-8"))
-                fingerprint = hash_json(content)
-            else:
-                fingerprint = hash_file(final_path)
-            
-            # 更新 artifact
-            published_artifact = Artifact(
-                key=artifact.key,
-                path=artifact.path,  # 保持相对路径
-                kind=artifact.kind,
-                fingerprint=fingerprint,
-                meta=artifact.meta,
-            )
-            
-            published[key] = published_artifact
-            
-            # 注册到 manifest
-            self.manifest.register_artifact(published_artifact)
-        
-        return published
+        for artifact in artifacts.values():
+            self.manifest.register_artifact(artifact)
+        return artifacts
     
     def run_phase(
         self,
@@ -236,16 +246,50 @@ class PhaseRunner:
         )
         self.manifest.save()
         
+        # 分配输出路径（Runner 负责路径分配）
+        outputs = self.allocate_outputs(phase)
+        
         # 执行 phase
         try:
             info(f"Running phase '{phase.name}'...")
-            result = phase.run(ctx, inputs)
+            result = phase.run(ctx, inputs, outputs)
             
             if result.status == "succeeded":
-                # 发布 artifacts（使用 manifest 的 publish_artifacts）
-                published_artifacts = self.manifest.publish_artifacts(result.artifacts, self.workspace)
+                # 1) 验证所有声明的 outputs 是否都已写入文件
+                published_artifacts: Dict[str, Artifact] = {}
+                for key in result.outputs:
+                    if key not in outputs.paths:
+                        raise ValueError(
+                            f"Phase '{phase.name}' declared output '{key}' "
+                            "which is not in phase.provides() / allocated outputs"
+                        )
+                    abs_path = outputs.paths[key]
+                    if not abs_path.exists():
+                        raise FileNotFoundError(
+                            f"Phase '{phase.name}' did not write output file: {abs_path} "
+                            f"(artifact key: {key})"
+                        )
+                    
+                    relpath = str(abs_path.relative_to(self.workspace))
+                    
+                    # 2) 确定 artifact kind
+                    kind = self._guess_artifact_kind(abs_path)
+                    
+                    # 3) 计算 fingerprint（所有 outputs 都是 file，一律 hash_file）
+                    from pikppo.pipeline.core.fingerprints import hash_file
+                    fingerprint = hash_file(abs_path)
+                    
+                    artifact = Artifact(
+                        key=key,
+                        relpath=relpath,
+                        kind=kind,
+                        fingerprint=fingerprint,
+                    )
+                    # 4) 注册到 manifest
+                    self.manifest.register_artifact(artifact)
+                    published_artifacts[key] = artifact
                 
-                # 更新 manifest
+                # 更新 manifest（写入 phase 级别的 artifacts/metrics 等）
                 self.manifest.update_phase(
                     phase.name,
                     version=phase.version,
@@ -354,7 +398,7 @@ class PhaseRunner:
             outputs = {}
             for key in provides:
                 artifact = self.manifest.get_artifact(key)
-                outputs[key] = str(self.workspace / artifact.path)
+                outputs[key] = str(self.workspace / artifact.relpath)
             return outputs
         else:
             # 返回最后一个 phase 的输出
@@ -363,5 +407,5 @@ class PhaseRunner:
             outputs = {}
             for key in provides:
                 artifact = self.manifest.get_artifact(key)
-                outputs[key] = str(self.workspace / artifact.path)
+                outputs[key] = str(self.workspace / artifact.relpath)
             return outputs

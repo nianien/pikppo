@@ -3,6 +3,7 @@ Pipeline core types: Artifact, PhaseResult, RunContext, etc.
 """
 from __future__ import annotations
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional, Set
 
 Status = Literal["pending", "running", "succeeded", "failed", "skipped"]
@@ -10,11 +11,18 @@ Status = Literal["pending", "running", "succeeded", "failed", "skipped"]
 
 @dataclass(frozen=True)
 class Artifact:
-    """可被其他 Phase 消费的产物。"""
-    key: str                 # e.g. "subs.zh_segments"
-    path: str                # workspace-relative path
-    kind: str                # "json"|"srt"|"wav"|"mp4"
-    fingerprint: str         # e.g. "sha256:..."
+    """
+    可被其他 Phase 消费的产物（只用于 runner / manifest）。
+
+    注意：
+    - relpath 始终是 workspace-relative 的相对路径
+    - 绝对路径只在运行时由 runner 使用 (workspace / relpath)
+    """
+
+    key: str  # e.g. "subs.subtitle_model"
+    relpath: str  # workspace-relative path, e.g. "subs/zh.srt"
+    kind: Literal["json", "srt", "wav", "mp4", "txt", "bin"]
+    fingerprint: str  # e.g. "sha256:..."
     meta: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -28,9 +36,15 @@ class ErrorInfo:
 
 @dataclass
 class PhaseResult:
-    """Phase 执行结果。"""
+    """
+    Phase 执行结果（不直接提交 Artifact，只声明哪些 outputs 成功产出）。
+
+    - status: 仅表示被执行后的结果（成功 / 失败），不包含 skipped
+    - outputs: 本次成功产出的 artifact keys（必须是 phase.provides() 的子集）
+    """
+
     status: Literal["succeeded", "failed"]
-    artifacts: Dict[str, Artifact] = field(default_factory=dict)
+    outputs: List[str] = field(default_factory=list)
     metrics: Dict[str, Any] = field(default_factory=dict)
     warnings: List[str] = field(default_factory=list)
     error: Optional[ErrorInfo] = None
@@ -42,6 +56,23 @@ class RunContext:
     job_id: str
     workspace: str
     config: Dict[str, Any]   # global + phases config
+
+
+@dataclass(frozen=True)
+class ResolvedOutputs:
+    """
+    Runner 预分配的输出路径（artifact_key -> absolute path）。
+    
+    Processor 可以写文件，但只能写到这些预分配的路径。
+    Runner 负责路径分配、原子提交与 manifest 一致性。
+    """
+    paths: Dict[str, Path]  # artifact_key -> absolute Path
+    
+    def get(self, key: str) -> Path:
+        """获取指定 artifact key 的输出路径。"""
+        if key not in self.paths:
+            raise KeyError(f"Output path not allocated for artifact key: {key}")
+        return self.paths[key]
 
 
 @dataclass(frozen=True)

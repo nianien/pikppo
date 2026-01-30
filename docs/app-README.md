@@ -227,16 +227,7 @@ Create a custom `voice_pool.json`:
 
 The pipeline saves all intermediate files. You can modify and rerun specific stages:
 
-```python
-from video_remix import translate_episode
 
-# Rerun translation only
-translate_episode(
-    "xxxx/dub/1/1-zh-segments.json",
-    "xxxx/dub/1/.temp_translate/",
-    model="gpt-4",
-)
-```
 
 ### Quality Control
 

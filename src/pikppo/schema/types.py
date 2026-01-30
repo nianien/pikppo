@@ -44,12 +44,16 @@ class Utterance:
     - end_ms: 结束时间（毫秒）
     - text: 文本内容
     - words: 词级别信息列表（可选，用于 word-gap 切分）
+    - emotion: 情绪标签（可选，如 "sad", "happy"）
+    - gender: 性别标签（可选，如 "male", "female"）
     """
     speaker: str
     start_ms: int
     end_ms: int
     text: str
     words: Optional[List["Word"]] = None  # 可选，用于 word-gap 切分
+    emotion: Optional[str] = None  # 可选，情绪标签
+    gender: Optional[str] = None  # 可选，性别标签
 
 
 @dataclass
@@ -67,16 +71,21 @@ class Segment:
     - start_ms: 开始时间（毫秒）
     - end_ms: 结束时间（毫秒）
     - text: 文本内容（不包含 [speaker] 标签）
+    - emotion: 情绪标签（可选，如 "sad", "happy"）
+    - gender: 性别标签（可选，如 "male", "female"）
     
     规则：
     - 每条 Segment 只对应一个 speaker
     - 不同 speaker 的 Segment 不能合并
     - speaker 字段在转换为 SrtCue 时会被丢弃
+    - emotion/gender 从对应的 Utterance 继承（如果 Segment 由多个 Utterance 合并，使用第一个）
     """
     speaker: str
     start_ms: int
     end_ms: int
     text: str
+    emotion: Optional[str] = None  # 可选，情绪标签
+    gender: Optional[str] = None  # 可选，性别标签
 
 
 # 别名：SubtitleSegment = Segment（语义更清晰）

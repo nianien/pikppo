@@ -51,21 +51,4 @@ burn.video
 
 ## 使用示例
 
-```python
-# Phase 中获取输入
-zh_segments_artifact = inputs["subs.zh_segments"]
-zh_segments_path = Path(ctx.workspace) / zh_segments_artifact.path
 
-# Phase 中返回输出
-return PhaseResult(
-    status="succeeded",
-    artifacts={
-        "subs.en_segments": Artifact(
-            key="subs.en_segments",
-            path="subs/en-segments.json",  # workspace-relative
-            kind="json",
-            fingerprint="",  # runner 会计算
-        ),
-    },
-)
-```

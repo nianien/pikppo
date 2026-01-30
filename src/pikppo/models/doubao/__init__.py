@@ -10,7 +10,7 @@ Doubao ASR 模块
 - 只负责"外部事实采集与还原"
 - 不负责字幕后处理（切句、合并、标点清理等）
 - 不负责字幕渲染（SRT 格式化等）
-- 字幕后处理和渲染由 pipeline/processors/subtitle 负责
+- 字幕后处理和渲染由 pipeline/processors/srt 负责
 """
 from .client import DoubaoASRClient, guess_audio_format
 from .presets import get_preset, get_presets

@@ -5,30 +5,26 @@ ASR Phase: 语音识别（只做识别，不负责字幕后处理）
 - 读取音频文件
 - 上传到 TOS（如果需要）
 - 调用 ASR API
-- 产出 IR（中间表示）：Utterance[] / Word[]
-- 保存原始 ASR 响应（asr.raw_response，可选，用于调试/复现）
+- 保存原始 ASR 响应（asr.raw_response，SSOT）
 
 产出设计：
-- asr.result：IR（Utterance[]，稳定、可替换、可复用）
-- asr.raw_response：raw（可选，用于调试/复现）
+- asr.raw_response：SSOT（原始响应，包含完整语义信息，emotion/gender/score/degree）
 
 不负责：
 - 字幕后处理（由 Subtitle Phase 负责）
 - 切句策略（由 Subtitle Phase 负责）
 
 架构原则：
-- raw 是日志/证据，不是接口契约
+- raw-response 是 SSOT，直接从 raw-response 生成 Subtitle Model
 - pipeline 默认走 IR（稳定、可替换、可复用）
 """
 import json
-import os
 from pathlib import Path
 from typing import Dict
 
 from pikppo.pipeline.core.phase import Phase
-from pikppo.pipeline.core.types import Artifact, ErrorInfo, PhaseResult, RunContext
-from pikppo.pipeline.processors.asr import transcribe
-from pikppo.models.doubao import parse_utterances
+from pikppo.pipeline.core.types import Artifact, ErrorInfo, PhaseResult, RunContext, ResolvedOutputs
+from pikppo.pipeline.processors.asr import run as asr_run
 from pikppo.infra.storage.tos import TosStorage
 from pikppo.utils.logger import info
 
@@ -44,10 +40,15 @@ class ASRPhase(Phase):
         return ["demux.audio"]
     
     def provides(self) -> list[str]:
-        """生成 asr.result（IR：Utterance[]）和 asr.raw_response（可选，用于调试）。"""
-        return ["asr.result", "asr.raw_response"]
+        """生成 asr.raw_response（SSOT：原始响应，包含完整语义信息）。"""
+        return ["asr.raw_response"]
     
-    def run(self, ctx: RunContext, inputs: Dict[str, Artifact]) -> PhaseResult:
+    def run(
+        self,
+        ctx: RunContext,
+        inputs: Dict[str, Artifact],
+        outputs: ResolvedOutputs,
+    ) -> PhaseResult:
         """
         执行 ASR Phase。
         
@@ -60,7 +61,7 @@ class ASRPhase(Phase):
         """
         # 获取输入
         audio_artifact = inputs["demux.audio"]
-        audio_path = Path(ctx.workspace) / audio_artifact.path
+        audio_path = Path(ctx.workspace) / audio_artifact.relpath
         
         if not audio_path.exists():
             return PhaseResult(
@@ -79,10 +80,6 @@ class ASRPhase(Phase):
                     message=f"Audio file is empty: {audio_path}",
                 ),
             )
-        
-        # 获取 episode stem
-        workspace_path = Path(ctx.workspace)
-        episode_stem = workspace_path.name
         
         # 获取配置
         phase_config = ctx.config.get("phases", {}).get("asr", {})
@@ -116,12 +113,16 @@ class ASRPhase(Phase):
                     storage = TosStorage()
                     audio_url = storage.upload(audio_path, prefix=series)
             
-            # 2. 调用 ASR
-            raw_response, utterances = transcribe(
+            # 2. 调用 Processor 层进行 ASR
+            result = asr_run(
                 audio_url=audio_url,
                 preset=preset,
                 hotwords=hotwords,
             )
+            
+            # 从 ProcessorResult 提取数据
+            raw_response = result.data["raw_response"]
+            utterances = result.data["utterances"]
             
             if not utterances:
                 return PhaseResult(
@@ -134,62 +135,21 @@ class ASRPhase(Phase):
             
             info(f"ASR succeeded ({len(utterances)} utterances)")
             
-            # 3. 保存 IR（中间表示）
-            asr_dir = workspace_path / "asr"
-            asr_dir.mkdir(parents=True, exist_ok=True)
-            
-            # 保存 IR：将 Utterance[] 序列化为 JSON
-            result_path = asr_dir / "result.json"
-            result_data = {
-                "utterances": [
-                    {
-                        "speaker": utt.speaker,
-                        "start_ms": utt.start_ms,
-                        "end_ms": utt.end_ms,
-                        "text": utt.text,
-                        "words": [
-                            {
-                                "start_ms": w.start_ms,
-                                "end_ms": w.end_ms,
-                                "text": w.text,
-                                "speaker": w.speaker,
-                            }
-                            for w in (utt.words or [])
-                        ] if utt.words else None,
-                    }
-                    for utt in utterances
-                ],
-            }
-            
-            with open(result_path, "w", encoding="utf-8") as f:
-                json.dump(result_data, f, indent=2, ensure_ascii=False)
-            
-            info(f"Saved ASR IR to: {result_path}")
-            
-            # 4. 保存 raw response（可选，用于调试/复现）
-            raw_response_path = asr_dir / "raw-response.json"
+            # 3. Phase 层负责文件 IO：写入到 runner 预分配的 outputs.paths
+            # 只保存 raw response（SSOT，包含完整语义信息）
+            raw_response_path = outputs.get("asr.raw_response")
+            raw_response_path.parent.mkdir(parents=True, exist_ok=True)
             with open(raw_response_path, "w", encoding="utf-8") as f:
                 json.dump(raw_response, f, indent=2, ensure_ascii=False)
             
-            info(f"Saved raw ASR response to: {raw_response_path}")
+            info(f"Saved raw ASR response (SSOT) to: {raw_response_path}")
             
-            # 返回 artifacts
+            # 返回 PhaseResult：只声明哪些 outputs 成功
             return PhaseResult(
                 status="succeeded",
-                artifacts={
-                    "asr.result": Artifact(
-                        key="asr.result",
-                        path="asr/result.json",
-                        kind="json",
-                        fingerprint="",  # runner 会计算
-                    ),
-                    "asr.raw_response": Artifact(
-                        key="asr.raw_response",
-                        path="asr/raw-response.json",
-                        kind="json",
-                        fingerprint="",  # runner 会计算
-                    ),
-                },
+                outputs=[
+                    "asr.raw_response",  # 只生成 raw_response
+                ],
                 metrics={
                     "utterances_count": len(utterances),
                 },

@@ -1,21 +1,16 @@
 """
-TTS / Dubbing Pipeline 模块
+TTS Processor 模块（唯一公共入口）
 
-职责：
-- Azure TTS
-- TTS 合成
-- 声音分配
-- 时长对齐
-- 音频混合
+公共 API：
+- run(): 唯一对外入口（分配声线并合成语音）
+
+内部模块（不直接导入）：
+- impl.py: 核心业务逻辑（待重构）
+- assign_voices.py: 声线分配实现
+- azure.py: Azure TTS 实现
+- synthesize.py: 向后兼容接口
+- duration_align.py: 时长对齐（内部使用）
 """
-from .azure import synthesize_tts
-from .synthesize import synthesize_subtitle_to_audio as synthesize_dubbing
-from .assign_voices import assign_voices
-from .mix_audio import mix_audio
+from .processor import run
 
-__all__ = [
-    "synthesize_tts",
-    "synthesize_dubbing",
-    "assign_voices",
-    "mix_audio",
-]
+__all__ = ["run"]

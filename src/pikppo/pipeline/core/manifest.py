@@ -75,9 +75,17 @@ class Manifest:
             error_msg += f". Available artifacts: {list(self.data['artifacts'].keys())}"
             raise ValueError(error_msg)
         
+        # 兼容旧版本：旧 manifest 使用 "path" 字段，新版本使用 "relpath"
+        relpath = artifact_data.get("relpath")
+        if relpath is None and "path" in artifact_data:
+            relpath = artifact_data["path"]
+            # 尝试就地升级内存中的结构，后续 save() 会写回新的字段名
+            artifact_data["relpath"] = relpath
+            artifact_data.pop("path", None)
+
         return Artifact(
             key=artifact_data["key"],
-            path=artifact_data["path"],
+            relpath=relpath,
             kind=artifact_data["kind"],
             fingerprint=artifact_data["fingerprint"],
             meta=artifact_data.get("meta", {}),
@@ -87,7 +95,7 @@ class Manifest:
         """注册 artifact 到 registry。"""
         self.data["artifacts"][artifact.key] = {
             "key": artifact.key,
-            "path": artifact.path,
+            "relpath": artifact.relpath,
             "kind": artifact.kind,
             "fingerprint": artifact.fingerprint,
             "meta": artifact.meta,
@@ -147,7 +155,7 @@ class Manifest:
             phase_data["artifacts"] = {
                 key: {
                     "key": artifact.key,
-                    "path": artifact.path,
+                    "relpath": artifact.relpath,
                     "kind": artifact.kind,
                     "fingerprint": artifact.fingerprint,
                     "meta": artifact.meta,
@@ -178,79 +186,12 @@ class Manifest:
             for key in self.data["artifacts"].keys()
         }
     
-    def publish_artifacts(
-        self,
-        artifacts: Dict[str, Artifact],
-        workspace: Path,
-    ) -> Dict[str, Artifact]:
-        """
-        发布 artifacts（原子写 + fingerprint + 注册到 manifest）。
-        
-        流程：
-        1. 确定最终路径（如果 path 是临时路径，则移动到最终位置）
-        2. 计算每个 artifact 的 fingerprint（如果还没有）
-        3. 注册到 manifest.artifacts
-        
-        Args:
-            artifacts: Phase 返回的 artifacts（path 是 workspace-relative，可能是临时路径）
-            workspace: workspace 根目录
-        
-        Returns:
-            更新后的 artifacts（包含最终路径和 fingerprint）
-        """
-        published = {}
-        
-        for key, artifact in artifacts.items():
-            # 1. 确定最终路径
-            # Phase 返回的 path 应该已经是最终路径（workspace-relative）
-            # 但如果 path 包含 "temp/" 或 ".temp_"，说明是临时路径，需要解析最终路径
-            if artifact.path.startswith("temp/") or artifact.path.startswith(".temp_"):
-                # 临时路径，需要移动到最终位置
-                final_path = self._resolve_artifact_path(key, workspace)
-                temp_path = workspace / artifact.path
-                
-                if temp_path.exists():
-                    # 原子移动
-                    atomic_copy(temp_path, final_path)
-                    # 清理临时文件
-                    temp_path.unlink()
-                
-                # 更新 path 为最终路径（workspace-relative）
-                final_relative_path = str(final_path.relative_to(workspace))
-                artifact_path = final_path
-            else:
-                # 已经是最终路径
-                final_relative_path = artifact.path
-                artifact_path = workspace / artifact.path
-            
-            # 2. 计算 fingerprint（如果还没有）
-            if not artifact.fingerprint and artifact_path.exists():
-                fingerprint = hash_file(artifact_path)
-            else:
-                fingerprint = artifact.fingerprint or ""
-            
-            # 3. 创建最终的 Artifact（使用最终路径）
-            final_artifact = Artifact(
-                key=artifact.key,
-                path=final_relative_path,  # workspace-relative 最终路径
-                kind=artifact.kind,
-                fingerprint=fingerprint,
-                meta=artifact.meta,
-            )
-            
-            # 4. 注册到 manifest
-            self.register_artifact(final_artifact)
-            
-            published[key] = final_artifact
-        
-        return published
-    
     def _resolve_artifact_path(self, key: str, workspace: Path) -> Path:
         """
         根据 artifact key 解析最终文件路径。
         
         Args:
-            key: artifact key（如 "subs.zh_segments"）
+            key: artifact key（如 "subs.subtitle_model"）
             workspace: workspace 根目录
         
         Returns:
@@ -270,13 +211,11 @@ class Manifest:
                 "audio": "audio/{episode_stem}.wav",
             },
             "asr": {
-                "result": "asr/result.json",
-                "raw_response": "asr/raw-response.json",
+                "raw_response": "asr/raw-response.json",  # SSOT：原始响应，包含完整语义信息
             },
             "subs": {
-                "zh_segments": "subs/zh-segments.json",
-                "zh_srt": "subs/zh.srt",
-                "en_segments": "subs/en-segments.json",
+                "subtitle_model": "subs/subtitle.model.json",  # SSOT
+                "zh_srt": "subs/zh.srt",                       # 视图（SRT 格式）
                 "en_srt": "subs/en.srt",
             },
             "translate": {

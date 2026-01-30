@@ -7,8 +7,8 @@ from pathlib import Path
 from typing import Dict
 
 from pikppo.pipeline.core.phase import Phase
-from pikppo.pipeline.core.types import Artifact, ErrorInfo, PhaseResult, RunContext
-from pikppo.pipeline.processors.tts import assign_voices, synthesize_tts
+from pikppo.pipeline.core.types import Artifact, ErrorInfo, PhaseResult, RunContext, ResolvedOutputs
+from pikppo.pipeline.processors.tts import run as tts_run
 from pikppo.models.voice_pool import DEFAULT_VOICE_POOL
 from pikppo.utils.logger import info
 
@@ -20,38 +20,44 @@ class TTSPhase(Phase):
     version = "1.0.0"
     
     def requires(self) -> list[str]:
-        """需要 subs.en_segments 和 demux.audio（可选，用于声线分配）。"""
-        return ["subs.en_segments", "demux.audio"]
+        """需要 subs.subtitle_model（SSOT）和 demux.audio（可选，用于声线分配）。"""
+        return ["subs.subtitle_model", "demux.audio"]
     
     def provides(self) -> list[str]:
         """生成 tts.audio, tts.voice_assignment。"""
         return ["tts.audio", "tts.voice_assignment"]
     
-    def run(self, ctx: RunContext, inputs: Dict[str, Artifact]) -> PhaseResult:
+    def run(
+        self,
+        ctx: RunContext,
+        inputs: Dict[str, Artifact],
+        outputs: ResolvedOutputs,
+    ) -> PhaseResult:
         """
         执行 TTS Phase。
         
         流程：
-        1. 分配声线
-        2. TTS 合成
+        1. 从 Subtitle Model 读取 cues（包含 target 翻译）
+        2. 分配声线
+        3. TTS 合成
         """
-        # 获取输入
-        en_segments_artifact = inputs["subs.en_segments"]
-        en_segments_path = Path(ctx.workspace) / en_segments_artifact.path
+        # 获取输入（Subtitle Model SSOT）
+        subtitle_model_artifact = inputs["subs.subtitle_model"]
+        subtitle_model_path = Path(ctx.workspace) / subtitle_model_artifact.relpath
         
-        if not en_segments_path.exists():
+        if not subtitle_model_path.exists():
             return PhaseResult(
                 status="failed",
                 error=ErrorInfo(
                     type="FileNotFoundError",
-                    message=f"English segments not found: {en_segments_path}",
+                    message=f"Subtitle Model not found: {subtitle_model_path}",
                 ),
             )
         
         audio_artifact = inputs.get("demux.audio")
         audio_path = None
         if audio_artifact:
-            audio_path = Path(ctx.workspace) / audio_artifact.path
+            audio_path = Path(ctx.workspace) / audio_artifact.relpath
         
         workspace_path = Path(ctx.workspace)
         episode_stem = workspace_path.name
@@ -74,62 +80,80 @@ class TTSPhase(Phase):
             )
         
         try:
-            # 1. 分配声线
-            voice_assignment_path = workspace_path / "voice-assignment.json"
+            # 读取 Subtitle Model
+            with open(subtitle_model_path, "r", encoding="utf-8") as f:
+                model_data = json.load(f)
             
-            if not voice_assignment_path.exists():
+            cues = model_data.get("cues", [])
+            if not cues:
+                return PhaseResult(
+                    status="failed",
+                    error=ErrorInfo(
+                        type="ValueError",
+                        message="No cues found in Subtitle Model",
+                    ),
+                )
+            
+            # 从 cues 提取 segments（用于 TTS）
+            # 只使用有 target 的 cues（已翻译的）
+            segments = []
+            for cue in cues:
+                target = cue.get("target")
+                if not target or not target.get("text"):
+                    continue  # 跳过未翻译的 cue
+                
+                segments.append({
+                    "id": cue.get("cue_id", ""),
+                    "start": cue.get("start_ms", 0) / 1000.0,  # 毫秒转秒
+                    "end": cue.get("end_ms", 0) / 1000.0,
+                    "text": target.get("text", ""),  # 使用 target.text（英文翻译）
+                    "speaker": cue.get("speaker", ""),
+                    "emotion": cue.get("emotion", {}).get("label") if cue.get("emotion") else None,
+                })
+            
+            # 准备 voice pool
+            if not voice_pool_path:
                 temp_voices_dir = workspace_path / ".temp_voices"
                 temp_voices_dir.mkdir(exist_ok=True)
-                
-                # 准备 voice pool
-                if not voice_pool_path:
-                    pool_file = temp_voices_dir / "voice_pool.json"
-                    with open(pool_file, "w", encoding="utf-8") as f:
-                        json.dump(DEFAULT_VOICE_POOL, f, indent=2, ensure_ascii=False)
-                    voice_pool_path = str(pool_file)
-                
-                # 使用 zh_segments 进行声线分配（如果有）
-                zh_segments_path = workspace_path / "subs" / "zh-segments.json"
-                reference_audio = str(audio_path) if audio_path and audio_path.exists() else None
-                
-                assignment_path_temp = assign_voices(
-                    str(zh_segments_path) if zh_segments_path.exists() else str(en_segments_path),
-                    reference_audio,
-                    voice_pool_path,
-                    str(temp_voices_dir),
-                )
-                
-                if Path(assignment_path_temp).exists():
-                    shutil.move(assignment_path_temp, voice_assignment_path)
-                
-                if temp_voices_dir.exists():
-                    shutil.rmtree(temp_voices_dir, ignore_errors=True)
+                pool_file = temp_voices_dir / "voice_pool.json"
+                with open(pool_file, "w", encoding="utf-8") as f:
+                    json.dump(DEFAULT_VOICE_POOL, f, indent=2, ensure_ascii=False)
+                voice_pool_path = str(pool_file)
             
-            # 2. TTS 合成
+            # 调用 Processor 层（分配声线 + TTS 合成）
+            temp_dir = str(workspace_path / ".temp_tts")
+            Path(temp_dir).mkdir(exist_ok=True)
+            
+            result = tts_run(
+                segments=segments,
+                reference_audio_path=str(audio_path) if audio_path and audio_path.exists() else None,
+                voice_pool_path=voice_pool_path,
+                azure_key=azure_key,
+                azure_region=azure_region,
+                language=azure_language,
+                max_workers=max_workers,
+                temp_dir=temp_dir,
+            )
+            
+            # 从 ProcessorResult 提取数据
+            voice_assignment = result.data["voice_assignment"]
+            audio_path_temp = result.data["audio_path"]
+            
+            # Phase 层负责文件 IO：移动到最终位置
+            voice_assignment_path = workspace_path / "voice-assignment.json"
+            with open(voice_assignment_path, "w", encoding="utf-8") as f:
+                json.dump(voice_assignment, f, indent=2, ensure_ascii=False)
+            
             audio_dir = workspace_path / "audio"
             audio_dir.mkdir(parents=True, exist_ok=True)
             tts_path = audio_dir / "tts.wav"
             
-            if not tts_path.exists():
-                temp_tts_dir = workspace_path / ".temp_tts"
-                temp_tts_dir.mkdir(exist_ok=True)
-                
-                tts_path_temp = synthesize_tts(
-                    str(en_segments_path),
-                    str(voice_assignment_path),
-                    voice_pool_path,
-                    str(temp_tts_dir),
-                    azure_key=azure_key,
-                    azure_region=azure_region,
-                    language=azure_language,
-                    max_workers=max_workers,
-                )
-                
-                if Path(tts_path_temp).exists():
-                    shutil.move(tts_path_temp, tts_path)
-                
-                if temp_tts_dir.exists():
-                    shutil.rmtree(temp_tts_dir, ignore_errors=True)
+            if Path(audio_path_temp).exists():
+                shutil.move(audio_path_temp, tts_path)
+            
+            # 清理临时目录
+            if Path(temp_dir).exists():
+                shutil.rmtree(temp_dir, ignore_errors=True)
             
             if not tts_path.exists():
                 return PhaseResult(
@@ -142,23 +166,13 @@ class TTSPhase(Phase):
             
             info(f"TTS synthesis completed: {tts_path.name}")
             
-            # 返回 artifacts
+            # 返回 PhaseResult：只声明哪些 outputs 成功
             return PhaseResult(
                 status="succeeded",
-                artifacts={
-                    "tts.audio": Artifact(
-                        key="tts.audio",
-                        path="audio/tts.wav",
-                        kind="wav",
-                        fingerprint="",  # runner 会计算
-                    ),
-                    "tts.voice_assignment": Artifact(
-                        key="tts.voice_assignment",
-                        path="voice-assignment.json",
-                        kind="json",
-                        fingerprint="",  # runner 会计算
-                    ),
-                },
+                outputs=[
+                    "tts.audio",
+                    "tts.voice_assignment",
+                ],
                 metrics={
                     "tts_audio_size_mb": tts_path.stat().st_size / 1024 / 1024,
                 },

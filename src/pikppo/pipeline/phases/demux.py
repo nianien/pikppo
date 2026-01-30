@@ -5,8 +5,8 @@ from pathlib import Path
 from typing import Dict
 
 from pikppo.pipeline.core.phase import Phase
-from pikppo.pipeline.core.types import Artifact, ErrorInfo, PhaseResult, RunContext
-from pikppo.pipeline.processors.media import extract_raw_audio
+from pikppo.pipeline.core.types import Artifact, ErrorInfo, PhaseResult, RunContext, ResolvedOutputs
+from pikppo.pipeline.processors.media import run as media_run
 from pikppo.utils.logger import info
 
 
@@ -24,7 +24,12 @@ class DemuxPhase(Phase):
         """生成 demux.audio。"""
         return ["demux.audio"]
     
-    def run(self, ctx: RunContext, inputs: Dict[str, Artifact]) -> PhaseResult:
+    def run(
+        self,
+        ctx: RunContext,
+        inputs: Dict[str, Artifact],
+        outputs: ResolvedOutputs,
+    ) -> PhaseResult:
         """
         执行 Demux Phase。
         
@@ -60,19 +65,15 @@ class DemuxPhase(Phase):
                 ),
             )
         
-        # 从 workspace 提取 episode stem（workspace 名称就是 episode stem）
-        # 例如: videos/dbqsfy/dub/1/ -> episode_stem = "1"
-        workspace_path = Path(ctx.workspace)
-        episode_stem = workspace_path.name
+        # Phase 层负责文件 IO：使用 runner 预分配的 outputs.paths
+        audio_path = outputs.get("demux.audio")
         
-        # 输出路径
-        audio_dir = workspace_path / "audio"
-        audio_dir.mkdir(parents=True, exist_ok=True)
-        audio_path = audio_dir / f"{episode_stem}.wav"
-        
-        # 调用实现函数
+        # 调用 Processor 层提取音频
         try:
-            extract_raw_audio(str(video_path), str(audio_path))
+            result = media_run(
+                video_path=str(video_path),
+                output_path=str(audio_path),
+            )
         except Exception as e:
             return PhaseResult(
                 status="failed",
@@ -103,17 +104,10 @@ class DemuxPhase(Phase):
         
         info(f"Audio extracted: {audio_path.name} (size: {audio_path.stat().st_size / 1024 / 1024:.2f} MB)")
         
-        # 返回 artifact
+        # 返回 PhaseResult：只声明哪些 outputs 成功
         return PhaseResult(
             status="succeeded",
-            artifacts={
-                "demux.audio": Artifact(
-                    key="demux.audio",
-                    path=f"audio/{episode_stem}.wav",
-                    kind="wav",
-                    fingerprint="",  # runner 会计算
-                ),
-            },
+            outputs=["demux.audio"],
             metrics={
                 "audio_size_mb": audio_path.stat().st_size / 1024 / 1024,
             },

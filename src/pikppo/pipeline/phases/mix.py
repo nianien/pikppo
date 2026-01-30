@@ -6,8 +6,8 @@ from pathlib import Path
 from typing import Dict, Optional
 
 from pikppo.pipeline.core.phase import Phase
-from pikppo.pipeline.core.types import Artifact, ErrorInfo, PhaseResult, RunContext
-from pikppo.pipeline.processors.tts import mix_audio
+from pikppo.pipeline.core.types import Artifact, ErrorInfo, PhaseResult, RunContext, ResolvedOutputs
+from pikppo.pipeline.processors.mix import run as mix_run
 from pikppo.utils.logger import info
 
 
@@ -25,7 +25,12 @@ class MixPhase(Phase):
         """生成 mix.audio。"""
         return ["mix.audio"]
     
-    def run(self, ctx: RunContext, inputs: Dict[str, Artifact]) -> PhaseResult:
+    def run(
+        self,
+        ctx: RunContext,
+        inputs: Dict[str, Artifact],
+        outputs: ResolvedOutputs,
+    ) -> PhaseResult:
         """
         执行 Mix Phase。
         
@@ -36,7 +41,7 @@ class MixPhase(Phase):
         """
         # 获取输入
         tts_audio_artifact = inputs["tts.audio"]
-        tts_path = Path(ctx.workspace) / tts_audio_artifact.path
+        tts_path = Path(ctx.workspace) / tts_audio_artifact.relpath
         
         if not tts_path.exists():
             return PhaseResult(
@@ -74,17 +79,17 @@ class MixPhase(Phase):
             accompaniment_path = None
         
         try:
-            # mix_audio 输出视频，我们需要先混音再提取音频
+            # 调用 Processor 层进行混音
             if not mix_path.exists():
                 temp_video = workspace_path / ".temp_mix.mp4"
                 
-                mix_audio(
-                    str(tts_path),
-                    str(accompaniment_path) if accompaniment_path else None,
-                    video_path,
-                    str(temp_video),
+                result = mix_run(
+                    tts_path=str(tts_path),
+                    video_path=video_path,
+                    accompaniment_path=str(accompaniment_path) if accompaniment_path else None,
                     target_lufs=target_lufs,
                     true_peak=true_peak,
+                    output_path=str(temp_video),
                 )
                 
                 # 从视频提取音频
@@ -118,17 +123,10 @@ class MixPhase(Phase):
             
             info(f"Mix completed: {mix_path.name} (size: {mix_path.stat().st_size / 1024 / 1024:.2f} MB)")
             
-            # 返回 artifact
+            # 返回 PhaseResult：只声明哪些 outputs 成功
             return PhaseResult(
                 status="succeeded",
-                artifacts={
-                    "mix.audio": Artifact(
-                        key="mix.audio",
-                        path="audio/mix.wav",
-                        kind="wav",
-                        fingerprint="",  # runner 会计算
-                    ),
-                },
+                outputs=["mix.audio"],
                 metrics={
                     "mix_audio_size_mb": mix_path.stat().st_size / 1024 / 1024,
                 },

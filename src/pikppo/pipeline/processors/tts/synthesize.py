@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 from pikppo.config.settings import PipelineConfig, get_openai_key
-from pikppo.pipeline.processors.subtitle import parse_srt
+from pikppo.pipeline.processors.srt.srt import parse_srt
 from pikppo.schema import SrtCue
 
 
