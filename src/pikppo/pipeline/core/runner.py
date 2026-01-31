@@ -319,8 +319,9 @@ class PhaseRunner:
                 return False
                 
         except Exception as e:
-            # 异常处理
+            # 异常处理：打印完整的错误信息和 traceback
             error(f"Phase '{phase.name}' raised exception: {e}")
+            error(f"Traceback:\n{traceback.format_exc()}")
             self.manifest.update_phase(
                 phase.name,
                 version=phase.version,

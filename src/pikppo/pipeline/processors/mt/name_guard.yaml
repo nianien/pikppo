@@ -1,0 +1,166 @@
+# =========================
+# Name Guard Configuration v2 (定版)
+# 专名保护器：只抓"平安/平安哥"这种真·专名，其它一律放过
+# =========================
+
+# =========================
+# Global strategy
+# =========================
+strategy:
+  threshold: 100
+  require_strong_signal: true
+  
+  # 人名替换标记格式
+  name_placeholder_format: "<<NAME_{index}>>"
+  
+  # 人名渲染策略（MT 后）
+  # - "pinyin": 转换为拼音（如：平安 -> Ping An）
+  # - "keep": 保留中文（如：平安 -> Ping An 或直接保留）
+  render_strategy: "pinyin"
+
+# =========================
+# Known proper names (white list)
+# 命中即通过，不走打分
+# =========================
+special:
+  known_names:
+    - "平安"
+  
+  exclude_names: []
+
+# =========================
+# Candidate generation
+# ⚠️ 只允许从"完整 token"产生候选
+# ⚠️ 禁止 n-gram / 子串滑窗
+# =========================
+candidate_sources:
+  - cue_token           # cue.source.text 作为整体
+  - utterance_start     # utterance 开头 token
+  - after_sep           # <sep> 后第一个 token
+
+# =========================
+# Strong exclusion (先执行)
+# 命中直接淘汰，不进入打分
+# =========================
+strong_exclusion:
+  pronouns:
+    - "我"
+    - "你"
+    - "他"
+    - "她"
+    - "它"
+    - "我们"
+    - "你们"
+    - "他们"
+
+  action_verbs:
+    - "去"
+    - "来"
+    - "走"
+    - "回"
+    - "找"
+    - "看"
+    - "拿"
+    - "放"
+    - "别"
+    - "让"
+    - "给"
+    - "该"
+    - "接"
+
+  numbers_quantifiers:
+    - "一"
+    - "二"
+    - "三"
+    - "十"
+    - "百"
+    - "千"
+    - "张"
+    - "条"
+    - "个"
+    - "岁"
+
+  particles:
+    - "了"
+    - "吗"
+    - "呢"
+    - "吧"
+    - "啊"
+
+  interjections:
+    - "哎"
+    - "哈"
+    - "哈哈"
+    - "嗯"
+    - "呃"
+
+  kinship_roles:        # ⚠️ 这些不算专名
+    - "师傅"
+    - "老师"
+    - "嫂子"
+    - "媳妇"
+    - "叔"
+    - "婶"
+
+# =========================
+# Scoring rules
+# =========================
+rules:
+  # 1) 呼唤位（辅助强信号）
+  call_position:
+    enabled: true
+    weight: 40
+    positions:
+      - utterance_start
+      - after_sep
+
+  # 2) 重复出现（辅助强信号）
+  repetition:
+    enabled: true
+    weight: 40
+    min_occurrences: 2
+
+  # 3) 称呼后缀（⚠️ 只保留"专名型"）
+  honorific_suffix:
+    enabled: true
+    weight: 60
+    patterns:
+      - "哥"
+      - "姐"
+      - "老"     # ⚠️ 只作为弱触发，不能单独过阈值
+
+  # 4) 词性排除规则（负权重）
+  pos_exclusion:
+    enabled: true
+    weight: -30
+    exclude_words:
+      - "到"
+      - "来"
+      - "走"
+      - "回"
+      - "看"
+      - "是"
+      - "有"
+      - "没"
+      - "了"
+      - "的"
+      - "在"
+      - "去"
+
+  # 5) 长度与结构规则（辅助）
+  length_structure:
+    enabled: true
+    weight: 10
+    preferred_lengths: [1, 2, 3]
+    exclude_endings:
+      - "了"
+      - "吗"
+      - "呢"
+      - "啊"
+      - "吧"
+
+# =========================
+# Safety rules
+# =========================
+constraints:
+  lao_prefix_max_len: 1  # 老X 的安全约束：必须是 1 个汉字前缀

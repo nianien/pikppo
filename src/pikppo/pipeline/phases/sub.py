@@ -141,21 +141,19 @@ class SubtitlePhase(Phase):
                         "speech_rate": {
                             "zh_tps": utt.speech_rate.zh_tps,
                         },
+                        "emotion": {
+                            "label": utt.emotion.label,
+                            "confidence": utt.emotion.confidence,
+                            "intensity": utt.emotion.intensity,
+                        } if utt.emotion else None,
                         "cues": [
                             {
-                                "cue_id": cue.cue_id,
                                 "start_ms": cue.start_ms,
                                 "end_ms": cue.end_ms,
-                                "speaker": cue.speaker,
                                 "source": {
                                     "lang": cue.source.lang,
                                     "text": cue.source.text,
                                 },
-                                "emotion": {
-                                    "label": cue.emotion.label,
-                                    "confidence": cue.emotion.confidence,
-                                    "intensity": cue.emotion.intensity,
-                                } if cue.emotion else None,
                             }
                             for cue in utt.cues
                         ],
@@ -177,11 +175,11 @@ class SubtitlePhase(Phase):
             for utt in subtitle_model.utterances:
                 for cue in utt.cues:
                     segments_for_srt.append(Segment(
-                        speaker=cue.speaker,
+                        speaker=utt.speaker,  # 使用 utterance 级别的 speaker
                         start_ms=cue.start_ms,
                         end_ms=cue.end_ms,
                         text=cue.source.text,  # 使用 source.text
-                        emotion=cue.emotion.label if cue.emotion else None,
+                        emotion=utt.emotion.label if utt.emotion else None,  # 使用 utterance 级别的 emotion
                         gender=None,  # v1.2 不再包含 gender
                     ))
             srt_path = outputs.get("subs.zh_srt")

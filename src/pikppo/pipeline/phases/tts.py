@@ -20,8 +20,8 @@ class TTSPhase(Phase):
     version = "1.0.0"
     
     def requires(self) -> list[str]:
-        """需要 subs.subtitle_model（SSOT）和 demux.audio（可选，用于声线分配）。"""
-        return ["subs.subtitle_model", "demux.audio"]
+        """需要 subs.subtitle_align（对齐后的 SSOT，包含英文翻译）和 demux.audio（可选，用于声线分配）。"""
+        return ["subs.subtitle_align", "demux.audio"]
     
     def provides(self) -> list[str]:
         """生成 tts.audio, tts.voice_assignment。"""
@@ -41,16 +41,24 @@ class TTSPhase(Phase):
         2. 分配声线
         3. TTS 合成
         """
-        # 获取输入（Subtitle Model SSOT）
-        subtitle_model_artifact = inputs["subs.subtitle_model"]
-        subtitle_model_path = Path(ctx.workspace) / subtitle_model_artifact.relpath
+        # 获取输入（对齐后的 Subtitle Model，包含英文翻译）
+        subtitle_align_artifact = inputs.get("subs.subtitle_align")
+        if not subtitle_align_artifact:
+            return PhaseResult(
+                status="failed",
+                error=ErrorInfo(
+                    type="ValueError",
+                    message="subs.subtitle_align artifact not found. Make sure align phase completed successfully.",
+                ),
+            )
         
-        if not subtitle_model_path.exists():
+        subtitle_align_path = Path(ctx.workspace) / subtitle_align_artifact.relpath
+        if not subtitle_align_path.exists():
             return PhaseResult(
                 status="failed",
                 error=ErrorInfo(
                     type="FileNotFoundError",
-                    message=f"Subtitle Model not found: {subtitle_model_path}",
+                    message=f"Subtitle align file not found: {subtitle_align_path}",
                 ),
             )
         
@@ -80,52 +88,51 @@ class TTSPhase(Phase):
             )
         
         try:
-            # 读取 Subtitle Model v1.2
-            with open(subtitle_model_path, "r", encoding="utf-8") as f:
-                model_data = json.load(f)
+            # 读取对齐后的 Subtitle Model（包含英文翻译）
+            with open(subtitle_align_path, "r", encoding="utf-8") as f:
+                subtitle_align_data = json.load(f)
             
-            # v1.2: 从 utterances 中提取所有 cues
-            utterances = model_data.get("utterances", [])
-            cues = []
+            # 从 utterances 中提取所有 cues（包含英文翻译）
+            utterances = subtitle_align_data.get("utterances", [])
+            segments = []
+            segment_index = 0  # 用于生成数字 ID（azure.py 需要整数 ID）
+            
             for utt in utterances:
-                cues.extend(utt.get("cues", []))
+                utt_id = utt.get("utt_id", "")
+                utt_speaker = utt.get("speaker", "")
+                utt_emotion = utt.get("emotion")
+                emotion_label = utt_emotion.get("label") if utt_emotion else None
+                
+                for cue_index, cue in enumerate(utt.get("cues", [])):
+                    # 从 cue 的 source 获取英文翻译文本
+                    source = cue.get("source", {})
+                    en_text = source.get("text", "").strip()
+                    
+                    if not en_text:
+                        continue  # 跳过空文本
+                    
+                    # 使用对齐后的时间
+                    start_ms = cue.get("start_ms", 0)
+                    end_ms = cue.get("end_ms", 0)
+                    
+                    segments.append({
+                        "id": segment_index,  # 使用数字索引（azure.py 需要整数 ID 用于 :04d 格式化）
+                        "start": start_ms / 1000.0,  # 毫秒转秒
+                        "end": end_ms / 1000.0,
+                        "text": en_text,  # 英文翻译文本
+                        "speaker": utt_speaker,  # 使用 utterance 级别的 speaker
+                        "emotion": emotion_label,  # 使用 utterance 级别的 emotion
+                    })
+                    segment_index += 1
             
-            if not cues:
+            if not segments:
                 return PhaseResult(
                     status="failed",
                     error=ErrorInfo(
                         type="ValueError",
-                        message="No cues found in Subtitle Model",
+                        message="No segments with translations found in subtitle.align.json.",
                     ),
                 )
-            
-            # v1.2: 从 translate.context.json 读取翻译结果（不写回 SSOT）
-            translate_context_path = workspace_path / "translate.context.json"
-            translations_map = {}
-            if translate_context_path.exists():
-                with open(translate_context_path, "r", encoding="utf-8") as f:
-                    context_data = json.load(f)
-                    for trans in context_data.get("translations", []):
-                        translations_map[trans.get("cue_id", "")] = trans
-            
-            # 从 cues 和 translations 提取 segments（用于 TTS）
-            # 只使用有翻译的 cues
-            segments = []
-            for cue in cues:
-                cue_id = cue.get("cue_id", "")
-                translation = translations_map.get(cue_id)
-                
-                if not translation or not translation.get("text"):
-                    continue  # 跳过未翻译的 cue
-                
-                segments.append({
-                    "id": cue_id,
-                    "start": cue.get("start_ms", 0) / 1000.0,  # 毫秒转秒
-                    "end": cue.get("end_ms", 0) / 1000.0,
-                    "text": translation.get("text", ""),  # 使用翻译文本（英文）
-                    "speaker": cue.get("speaker", ""),
-                    "emotion": cue.get("emotion", {}).get("label") if cue.get("emotion") else None,
-                })
             
             # 准备 voice pool
             if not voice_pool_path:

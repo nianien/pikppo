@@ -1,0 +1,689 @@
+
+在中文口语字幕里，“人名识别”不可能 100% 准。
+但你可以做到 工程上 95% 准 + 100% 可控，而且不靠模型。
+
+下面我给你一套分层、可落地、可回滚的方案——这是字幕系统里真正能跑起来的做法。
+
+⸻
+
+一、先立一个“工程真相”（不立这个会走偏）
+
+中文里这三件事天然模糊：
+	•	人名（平安）
+	•	词语（平安＝safe）
+	•	话语标记（平安＝报平安）
+
+👉 你不可能只靠“词本身”判断。
+👉 必须用“上下文行为特征”来判断。
+
+所以正确思路不是：
+
+“这是不是人名？”
+
+而是：
+
+“这里把它当人名处理，会不会比当普通词更安全？”
+
+字幕系统里，宁可错判为人名，也不要漏判人名。
+
+⸻
+
+二、工程级总策略（拍板）
+
+用“多规则打分 + 阈值”的方式判断是否当作人名处理。
+
+不是 yes/no，而是 score ≥ threshold → 当人名。
+
+⸻
+
+三、你现在就能用的「人名识别五大规则」
+
+下面这 5 条是 字幕场景特化规则，不是 NLP 教科书。
+
+⸻
+
+规则 1️⃣【称呼后缀规则】（权重最高）
+
+命中即 +100 分（几乎必然是人名）
+
+关键词：
+
+哥 / 姐 / 叔 / 婶 / 嫂子 / 老师 / 师傅 / 大爷 / 阿姨
+
+例子：
+	•	平安哥 ✅
+	•	王师傅 ✅
+	•	老李 ✅
+
+👉 这是中文口语里最强的人名信号。
+
+⸻
+
+规则 2️⃣【呼唤位规则】（权重很高）
+
+出现在 utterance 开头，或 <sep> 后第一个词
+
+例子：
+
+平安，过来一下
+平安 <sep> 你听我说
+
+这种位置 极大概率是叫人。
+
+⸻
+
+规则 3️⃣【重复出现规则】（权重高）
+
+同一 utterance 内出现 ≥2 次
+
+尤其是：
+
+平安，平安，别这样
+
+👉 正常词很少在一句话里被这样重复“点名”。
+
+⸻
+
+规则 4️⃣【词性排除规则】（负权重）
+
+如果一个词明显是动作/状态核心，则减分：
+
+负样例词（示例）：
+
+到 / 来 / 走 / 回 / 看 / 是 / 有 / 没
+
+例子：
+	•	到家了 ❌（不是人名）
+	•	来了 ❌
+
+⸻
+
+规则 5️⃣【长度与结构规则】（辅助）
+	•	1–3 个汉字，更像人名
+	•	不带明显语法助词（了 / 吗 / 呢）结尾
+
+例子：
+	•	平安 ✅
+	•	张三 ✅
+	•	平安了 ❌
+
+⸻
+
+四、把规则变成一个“打分器”（核心）
+
+示例打分（你的 case）
+
+词：平安
+
+规则	命中	分数
+称呼后缀	平安哥	+100
+呼唤位	utterance 开头	+50
+重复出现	≥2 次	+30
+词性排除	否	0
+长度规则	2 字	+10
+总分		190 → 判定人名
+
+阈值你可以定：
+	•	>= 60 → 当人名
+	•	< 60 → 当普通文本
+
+⸻
+
+五、为什么“宁可多判人名，也不要漏判”
+
+因为：
+	•	多判：
+→ 最多把一个普通词拼音化（还能接受）
+	•	漏判：
+→ 平安 → safe
+→ 语义灾难，不可逆
+
+字幕系统追求的是：
+
+“不犯大错”，而不是“偶尔很聪明”。
+
+⸻
+
+六、你现在这条 pipeline 里的最终形态（定版）
+
+在 mt_input 之前：
+	1.	从 cues 合并文本
+	2.	扫描潜在人名（按规则打分）
+	3.	score ≥ threshold：
+	•	替换为 <<NAME_i>>
+	•	记录 name_map
+
+再送进 MT
+
+MT 后：
+	•	按策略（拼音 / 保留）渲染人名
+
+⸻
+
+
+行，那我直接给你一份可直接替换的 name_guard.yaml v2（定版），不改字段名、不改接口，只收紧规则，目标就是：只抓“平安/平安哥”这种真·专名，其它一律放过。
+
+⸻
+
+✅ name_guard.yaml（v2 定版）
+
+# =========================
+# Global strategy
+# =========================
+threshold: 100
+require_strong_signal: true
+
+# =========================
+# Known proper names (white list)
+# 命中即通过，不走打分
+# =========================
+known_names:
+  - "平安"
+
+# =========================
+# Candidate generation
+# ⚠️ 只允许从“完整 token”产生候选
+# ⚠️ 禁止 n-gram / 子串滑窗
+# =========================
+candidate_sources:
+  - cue_token           # cue.source.text 作为整体
+  - utterance_start     # utterance 开头 token
+  - after_sep           # <sep> 后第一个 token
+
+# =========================
+# Strong exclusion (先执行)
+# 命中直接淘汰，不进入打分
+# =========================
+strong_exclusion:
+  pronouns:
+    - "我"
+    - "你"
+    - "他"
+    - "她"
+    - "它"
+    - "我们"
+    - "你们"
+    - "他们"
+
+  action_verbs:
+    - "去"
+    - "来"
+    - "走"
+    - "回"
+    - "找"
+    - "看"
+    - "拿"
+    - "放"
+    - "别"
+    - "让"
+    - "给"
+    - "该"
+    - "接"
+
+  numbers_quantifiers:
+    - "一"
+    - "二"
+    - "三"
+    - "十"
+    - "百"
+    - "千"
+    - "张"
+    - "条"
+    - "个"
+    - "岁"
+
+  particles:
+    - "了"
+    - "吗"
+    - "呢"
+    - "吧"
+    - "啊"
+
+  interjections:
+    - "哎"
+    - "哈"
+    - "哈哈"
+    - "嗯"
+    - "呃"
+
+  kinship_roles:        # ⚠️ 这些不算专名
+    - "师傅"
+    - "老师"
+    - "嫂子"
+    - "媳妇"
+    - "叔"
+    - "婶"
+
+# =========================
+# Scoring rules
+# =========================
+
+# 1) 呼唤位（辅助强信号）
+call_position:
+  enabled: true
+  weight: 40
+  positions:
+    - utterance_start
+    - after_sep
+
+# 2) 重复出现（辅助强信号）
+repetition:
+  enabled: true
+  weight: 40
+  min_occurrences: 2
+
+# 3) 称呼后缀（⚠️ 只保留“专名型”）
+honorific_suffix:
+  enabled: true
+  weight: 60
+  patterns:
+    - "哥"
+    - "姐"
+    - "老"     # ⚠️ 只作为弱触发，不能单独过阈值
+
+# =========================
+# Safety rules
+# =========================
+
+# 老X 的安全约束：必须是 1 个汉字前缀
+# 防止 老实 / 老婆 / 老慢 之类
+constraints:
+  lao_prefix_max_len: 1
+
+
+⸻
+
+🔍 这版 为什么稳
+
+1️⃣ 候选来源被“锁死”
+	•	❌ 不再扫整句 n-gram
+	•	✅ 只从 cue / 呼唤位 / <sep> 后拿 token
+→ 坐牢十 / 我被冤 / 该去找 这类直接消失
+
+⸻
+
+2️⃣ “师傅 / 嫂子 / 媳妇”彻底踢出 Name Guard
+	•	这些是 称谓/角色，不是专名
+	•	不再污染人名识别
+	•	你之前日志里一半误判来自这里
+
+⸻
+
+3️⃣ 强规则不能“一刀过阈值”
+	•	honorific_suffix.weight = 60
+	•	call_position + repetition = 40 + 40
+	•	至少两个强信号叠加才能 ≥100
+→ 不会再出现“只因为一个哥就当人名”
+
+⸻
+
+4️⃣ 白名单仍然是“王炸”
+	•	known_names: ["平安"]
+→ 命中直接通过
+→ 短剧主角名这是最稳的一层
+
+⸻
+
+🧪 用你的日志做一个快速 sanity check
+
+会被识别（✅ 正确）
+	•	平安
+	•	平安哥
+
+会被过滤（❌ 正确）
+	•	坐牢十
+	•	我被冤
+	•	该去找
+	•	慢点走
+	•	都三十
+	•	哈哈
+	•	哎
+	•	师傅
+	•	嫂子
+	•	媳妇
+
+⸻
+
+🧠 一句话定版结论
+
+v2 的 Name Guard 是“专名保护器”，
+不是“所有称呼/短语的冻结器”。
+只保护你翻错会出大事的东西，其它一律放过。
+
+⸻
+
+如果你愿意，下一步我可以直接帮你做两件事之一（都很快）：
+	1.	把 name_guard.py 的候选生成函数改成“严格版伪代码”（对齐这份 yaml）
+	2.	给你一份 before / after 的对比日志预期，方便你跑一集快速验证
+
+你选一个。
+
+可以，而且这是最实用、最工业化的一条路：
+
+“NameMap 作为强约束 + LLM 作为补全器 + 结果回写缓存”
+做对了能同时拿到：一致性、可控、自动扩展。
+
+下面给你一套可落地的设计（含 prompt 结构、更新策略、冲突处理），你拿去就能写代码。
+
+⸻
+
+1) 核心思路
+
+你要的系统其实是一个增量字典（Incremental Lexicon）：
+	•	输入文本里识别到人名 src_name
+	•	先查 name_map[src_name]
+	•	有 → 直接替换成 target_name（强一致）
+	•	没有 → 调用模型翻译，拿到 target_name 后：
+	•	写入 name_map
+	•	后续所有地方复用
+
+这就解决了「每集每句都可能翻不一致」的问题。
+
+⸻
+
+2) NameMap 数据结构（建议这样存）
+
+别只存 src->tgt 一条，建议存“可审计”的对象：
+
+{
+  "老张": {
+    "target": "Mr. Zhang",
+    "style": "honorific+surname",
+    "confidence": 0.86,
+    "source": "llm",
+    "first_seen_vid": "v039...",
+    "first_seen_ts": 135090,
+    "last_seen_ts": 288400,
+    "count": 17,
+    "alternatives": ["Lao Zhang", "Zhang"],
+    "notes": "older male, respectful"
+  }
+}
+
+为什么要这么多字段？
+	•	你后面一定会遇到：同名异人、称谓变化、风格切换、模型抽风
+	•	不留痕迹你就没法 debug、也没法回滚
+
+⸻
+
+3) Pipeline 设计（最简但靠谱）
+
+Phase A：NER + 标注
+
+把人名提取出来，并在正文里做可逆标注：
+	•	原文：老张今天来了
+	•	标注：<<NAME:老张>>今天来了
+
+（你也可以用 ID：<<NAME_0:老张>>，但关键是要带原文。）
+
+Phase B：NameMap 强替换
+
+对所有 <<NAME:xxx>>：
+	•	如果 xxx in name_map：替换为 <<NAME_EN:Mr. Zhang>>（或直接替换成英文，但我建议保留标签到最后一步）
+
+Phase C：LLM 补全缺失项（只针对未命中的名字）
+
+把“缺失名字列表”一次性发给模型，让它只做名字翻译，不要让它碰正文。
+
+Phase D：更新 NameMap（写回）
+
+把模型给的输出写回 name_map，并记录来源/置信度。
+
+Phase E：正文翻译（名字已固定）
+
+再翻正文（此时名字要么是 <<NAME_EN:...>>，要么直接是英文），保证一致。
+
+⸻
+
+4) 给模型的 Prompt（建议格式）
+
+重点：禁止西化瞎编、明确风格、输出 JSON、并允许 “keep” 策略。
+
+输入：
+	•	target_locale: en-US / en-AU（你在澳洲就 en-AU 更自然）
+	•	style_rules: 你想要的命名风格
+	•	existing_map: 当前已有映射（只给相关片段，别把整本字典塞进去）
+	•	missing_names: 需要翻译的名字列表
+	•	context_hint（可选）：角色性别/年龄/身份、说话人等
+
+规则（关键几条）：
+	•	不要把中文名翻成英文语义词（平安≠Peace）
+	•	默认：拼音或姓氏 + 称谓（老/小/阿要按规则转）
+	•	不要发明 Western first name
+	•	输出必须是 JSON，键为原文
+
+输出示例：
+
+{
+  "平安": {"target": "Ping An", "confidence": 0.74, "style": "pinyin"},
+  "老张": {"target": "Mr. Zhang", "confidence": 0.86, "style": "honorific+surname"},
+  "阿强": {"target": "Qiang", "confidence": 0.62, "style": "given-name"}
+}
+
+
+⸻
+
+5) “翻译完就更新 map” 的坑：你必须做冲突治理
+
+否则你会把字典污染到不可用。
+
+冲突类型
+	1.	同一个 src 被翻成不同 tgt
+例：阿强 -> Qiang vs Ah Qiang
+	2.	一个 src 可能是公司/品牌
+例：平安 有时是人名，有时是 Ping An (Group)
+	3.	同名不同人（多集短剧经常发生）
+例：两个不同角色都叫 小李
+
+最小可行的冲突策略（强烈建议）
+	•	name_map 按 (src_name, speaker_id) 或 (src_name, entity_id) 分层
+	•	如果你没有 speaker_id，就先用 vid + scene 近似
+	•	对同一个 key 的更新：
+	•	如果新翻译和旧翻译相同 → 更新 count/last_seen
+	•	如果不同：
+	•	若旧的 confidence 高且出现次数多 → 拒绝覆盖，放入 alternatives
+	•	若旧的是低置信且只出现 1 次 → 允许覆盖
+	•	或者触发“人工审核队列”（哪怕是简单日志）
+
+⸻
+
+6) 你说“后面每次翻译都会更新 map”
+
+我建议改成更安全的一句话：
+
+“每次翻译都会尝试更新 map，但默认不覆盖已有高置信映射，只追加证据/备选。”
+
+这样你：
+	•	越用越准（count、context 越多）
+	•	又不会越用越脏
+
+⸻
+
+7) 额外加分：让模型帮你“判定是否人名”
+
+有些词（平安/小米/王者）很容易歧义。你可以让模型在补全时同时输出：
+	•	entity_type: person / org / product / ambiguous
+	•	如果 ambiguous：给两个方案 + 建议默认
+
+⸻
+
+你这套方案的最终形态
+
+NameMap = 你系统的“记忆”
+LLM = 你系统的“新词发现器”
+这就是让翻译系统从“每次都像第一次”变成“越翻越像人”的关键。
+
+⸻
+
+好，我们彻底收敛，给你一套 “极简、不可变、first-write-wins” 的最终方案。
+没有状态机、没有发布点、没有复杂治理，工程上干净到不能再干净。
+
+⸻
+
+✅ 设计前提（你已经明确）
+	•	第一次翻译出来的人名，假定一定会被用到
+	•	一旦出现并翻译，整个项目内永不替换
+	•	不关心“更优翻译”，一致性 > 最优
+	•	NameMap 是全项目唯一实例
+
+⸻
+
+1️⃣ 极简 NameMap Schema（最终版）
+
+这是你真正需要的最小集合，再少就没法 debug，再多就是浪费。
+
+{
+  "阿强": {
+    "target": "Qiang",
+    "style": "given-name",
+    "first_seen": "ep01",
+    "source": "llm",
+    "alternatives": []
+  },
+
+  "老张": {
+    "target": "Mr. Zhang",
+    "style": "honorific+surname",
+    "first_seen": "ep01",
+    "source": "llm",
+    "alternatives": []
+  }
+}
+
+字段解释（只有必要的）
+	•	target
+→ 唯一生效的英文名（永不变）
+	•	style
+→ 只是为了你以后 debug / 人工检查
+	•	first_seen
+→ 排查问题用，不参与逻辑
+	•	source
+→ llm | rule | manual（可选，但很便宜）
+	•	alternatives
+→ 只记录，不使用
+
+❌ 没有：
+	•	confidence
+	•	status
+	•	published
+	•	lock_scope
+	•	version
+
+因为：你根本不需要它们来做决策
+
+⸻
+
+2️⃣ Pipeline（极简但正确）
+
+Step 1：人名识别 + 标注
+
+老张今天来了 → <<NAME:老张>>今天来了
+
+
+⸻
+
+Step 2：NameMap 查表（强一致）
+
+if src_name in name_map:
+    use name_map[src_name]["target"]
+
+
+⸻
+
+Step 3：首次出现 → 调模型翻译 → 立刻写入并锁死
+
+if src_name not in name_map:
+    target = llm_translate_name(src_name)
+
+    name_map[src_name] = {
+        "target": target,
+        "style": inferred_style,
+        "first_seen": context_id,
+        "source": "llm",
+        "alternatives": []
+    }
+
+这一刻起，这个名字在全项目内不可变。
+
+⸻
+
+Step 4：正文翻译（名字已确定）
+
+<<NAME:老张>>今天来了
+→
+Mr. Zhang came today.
+
+
+⸻
+
+3️⃣ LLM 只负责一件事：翻“第一次出现的名字”
+
+补全 Prompt（极简版）
+
+Translate the following Chinese personal name into English.
+
+Rules:
+- Do NOT invent Western names.
+- Do NOT translate meaning.
+- Prefer pinyin or surname-based forms.
+- Return only the translated name.
+
+Name:
+{{src_name}}
+
+示例：
+
+Input: 老张
+Output: Mr. Zhang
+
+
+⸻
+
+4️⃣ 如果后面模型“翻得更好”，怎么办？
+
+答案：不用。
+
+你可以记录，但绝不使用：
+
+if new_target != entry["target"]:
+    entry["alternatives"].append(new_target)
+
+alternatives 的唯一作用：
+给人类看，不给系统用
+
+⸻
+
+5️⃣ 这个方案为什么是对的（而且比复杂版更好）
+
+✅ 工程上
+	•	没有不可判定条件（是否会用到）
+	•	没有时序依赖（发布点）
+	•	没有状态机
+	•	NameMap 永远单调增长（append-only）
+
+✅ 业务上
+	•	名字 = 世界观设定
+	•	一旦出现，永不改
+	•	前后 100% 一致
+
+✅ 心理上
+	•	不纠结
+	•	不 roll
+	•	不“如果当初换个翻译就好了”
+
+⸻
+
+6️⃣ 一句话总结（这是你的系统哲学）
+
+名字不是翻译结果，
+是第一次出现时被“命名”的设定。
+
+设定一旦成立，全项目服从。
+
+⸻
+
+如果你愿意，下一步我可以直接帮你：
+	•	把这套 极简 NameMap 嵌进你现在的 <<NAME>> + <sep> 流水线
+	•	或给你一份 30 行以内的 Python reference implementation
+
+你现在这个方案，已经是**“够用 + 不后悔”**的最优解了。

@@ -5,6 +5,7 @@ from .demux import DemuxPhase
 from .asr import ASRPhase
 from .sub import SubtitlePhase
 from .mt import MTPhase
+from .align import AlignPhase
 from .tts import TTSPhase
 from .mix import MixPhase
 from .burn import BurnPhase
@@ -14,7 +15,8 @@ ALL_PHASES = [
     DemuxPhase(),
     ASRPhase(),          # ASR 识别（只做识别，输出原始响应）
     SubtitlePhase(),     # 字幕后处理（从 ASR raw 生成字幕）
-    MTPhase(),           # 机器翻译（依赖字幕）
+    MTPhase(),           # 机器翻译（只调模型，输出英文整段文本）
+    AlignPhase(),        # 时间对齐与重断句（不调模型，生成 en.srt）
     TTSPhase(),          # 语音合成
     MixPhase(),          # 混音
     BurnPhase(),         # 烧录字幕

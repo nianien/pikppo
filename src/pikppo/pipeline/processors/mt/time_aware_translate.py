@@ -276,10 +276,10 @@ def translate_cues_time_aware(
     
     Args:
         cues: Cue 列表，每个包含：
-            - cue_id: 字幕单元 ID
             - start_ms: 开始时间（毫秒）
             - end_ms: 结束时间（毫秒）
             - source: {"lang": "zh", "text": "..."}
+            - 注意：v1.3 已移除 cue_id，使用索引即可
         translate_fn: 翻译函数，接受 prompt 字符串，返回翻译结果
         cps_limit: CPS 限制（默认 15）
         max_retries: 最大重试次数（默认 2）
@@ -287,7 +287,7 @@ def translate_cues_time_aware(
     Returns:
         翻译结果列表，每个包含：
         {
-            "cue_id": "cue_0001",
+            "cue_index": 0,  # v1.3: 使用索引而不是 cue_id
             "text": "翻译文本",
             "max_chars": 19,
             "actual_chars": 18,
@@ -298,8 +298,7 @@ def translate_cues_time_aware(
     """
     results = []
     
-    for cue in cues:
-        cue_id = cue.get("cue_id", "")
+    for i, cue in enumerate(cues):
         start_ms = cue.get("start_ms", 0)
         end_ms = cue.get("end_ms", 0)
         source = cue.get("source", {})
@@ -307,7 +306,7 @@ def translate_cues_time_aware(
         
         if not zh_text:
             results.append({
-                "cue_id": cue_id,
+                "cue_index": i,  # v1.3: 使用索引而不是 cue_id
                 "text": "",
                 "max_chars": 0,
                 "actual_chars": 0,
@@ -325,7 +324,7 @@ def translate_cues_time_aware(
             cps_limit=cps_limit,
             max_retries=max_retries,
         )
-        result["cue_id"] = cue_id
+        result["cue_index"] = i  # v1.3: 使用索引而不是 cue_id
         results.append(result)
     
     return results

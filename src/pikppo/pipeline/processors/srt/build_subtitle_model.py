@@ -260,55 +260,43 @@ def build_subtitle_model(
                 ))
             zh_tps = calculate_speech_rate_zh_tps(words)
         
-        # 构建 cues
-        cues: List[SubtitleCue] = []
-        for i, seg in enumerate(segs):
-            # 规范化 speaker ID
-            seg_normalized_speaker = normalize_speaker_id(seg.speaker)
-            
-            # 尝试从 raw_response 中提取完整的 emotion 信息
-            emotion_label = seg.emotion
-            emotion_score = None
-            emotion_degree = None
-            
-            # 从原始 utterance 的 additions 中提取 emotion 信息
+        # 直接从原始 utterance 的 additions 中提取 emotion（emotion 本来就是 utterance 级别的）
+        utterance_emotion: Optional[EmotionInfo] = None
+        if raw_utt:
             additions = raw_utt.get("additions") or {}
-            if additions.get("emotion"):
-                emotion_label = additions.get("emotion")
+            emotion_label = additions.get("emotion")
+            if emotion_label:
                 emotion_score = additions.get("emotion_score")
                 if emotion_score:
                     try:
                         emotion_score = float(emotion_score)
                     except (ValueError, TypeError):
                         emotion_score = None
+                else:
+                    emotion_score = None
                 emotion_degree = additions.get("emotion_degree")
-            
-            # 构建 emotion info（可选）
-            emotion_info: Optional[EmotionInfo] = None
-            if emotion_label:
-                emotion_info = build_emotion_info(
+                utterance_emotion = build_emotion_info(
                     emotion_label=emotion_label,
                     emotion_score=emotion_score,
                     emotion_degree=emotion_degree,
                 )
-            
-            # 生成 cue_id
-            cue_id = f"cue_{len(cues) + 1:04d}"
-            
+        
+        # 构建 cues（不包含 emotion、speaker 和 cue_id，都在 utterance 级别或使用索引）
+        cues: List[SubtitleCue] = []
+        for i, seg in enumerate(segs):
             # 构建 source text（asr_post 阶段填写）
             source = SourceText(
                 lang=source_lang,
                 text=seg.text,
             )
             
-            # v1.2: 不包含 target（翻译信息不属于 SSOT）
+            # v1.3: cue 不再包含 emotion、speaker 和 cue_id
+            # - emotion 和 speaker 在 utterance 级别
+            # - cue_id 不需要，使用 utterance 内的索引即可
             cues.append(SubtitleCue(
-                cue_id=cue_id,
                 start_ms=seg.start_ms,
                 end_ms=seg.end_ms,
-                speaker=seg_normalized_speaker,
                 source=source,
-                emotion=emotion_info,  # 可选，用于 TTS style hint
             ))
         
         # 确保 utterance 时间范围正确
@@ -316,7 +304,7 @@ def build_subtitle_model(
             utt_start = cues[0].start_ms
             utt_end = cues[-1].end_ms
         
-        # 构建 utterance
+        # 构建 utterance（包含聚合后的 emotion）
         utt_id = f"utt_{utt_index + 1:04d}"
         utterances.append(SubtitleUtterance(
             utt_id=utt_id,
@@ -324,6 +312,7 @@ def build_subtitle_model(
             start_ms=utt_start,
             end_ms=utt_end,
             speech_rate=SpeechRate(zh_tps=zh_tps),
+            emotion=utterance_emotion,  # 从 cues 聚合的 emotion
             cues=cues,
         ))
         

@@ -214,12 +214,14 @@ class Manifest:
                 "asr_result": "asr/asr-result.json",  # SSOT：原始响应，包含完整语义信息
             },
             "subs": {
-                "subtitle_model": "subs/subtitle.model.json",  # SSOT
+                "subtitle_model": "subs/subtitle.model.json",  # SSOT（中文）
+                "subtitle_align": "subs/subtitle.align.json",  # 对齐后的 SSOT（英文翻译）
                 "zh_srt": "subs/zh.srt",                       # 视图（SRT 格式）
                 "en_srt": "subs/en.srt",
             },
-            "translate": {
-                "context": "subs/translation-context.json",
+            "mt": {
+                "mt_input": "mt/mt_input.jsonl",
+                "mt_output": "mt/mt_output.jsonl",
             },
             "tts": {
                 "audio": "audio/tts.wav",

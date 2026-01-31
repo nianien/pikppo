@@ -89,24 +89,20 @@ class SubtitleCue:
     字幕单元（Subtitle Model 中的核心结构）。
     
     字段：
-    - cue_id: 字幕单元 ID（唯一标识）
     - start_ms: 开始时间（毫秒）
     - end_ms: 结束时间（毫秒）
-    - speaker: 说话人标识（规范化后，如 "spk_1"）
     - source: 源文本（原文，asr_post 阶段填写）
-    - emotion: 情绪信息（可选，用于 TTS style hint）
     
     注意：
     - source 必须存在（asr_post 阶段填写）
-    - emotion 可选（无/低置信度就省略）
     - v1.2: 移除 target 字段（翻译信息不属于 SSOT）
+    - v1.3: 移除 emotion 字段（emotion 已提升到 utterance 维度）
+    - v1.3: 移除 speaker 字段（speaker 已提升到 utterance 维度）
+    - v1.3: 移除 cue_id 字段（使用 utterance 内的索引即可）
     """
-    cue_id: str
     start_ms: int
     end_ms: int
-    speaker: str
     source: SourceText
-    emotion: Optional[EmotionInfo] = None
 
 
 @dataclass
@@ -137,6 +133,7 @@ class SubtitleUtterance:
     - start_ms: 开始时间（毫秒）
     - end_ms: 结束时间（毫秒）
     - speech_rate: 语速信息（zh_tps）
+    - emotion: 情绪信息（可选，用于 TTS style hint，从该 utterance 的所有 cues 中聚合）
     - cues: 该 utterance 包含的 cues 列表
     
     约束（硬规则）：
@@ -148,12 +145,14 @@ class SubtitleUtterance:
     注意：
     - 这是 Subtitle Model v1.2 中的 Utterance，与 schema/types.py 中的 Utterance（ASR 原始响应）不同
     - 为避免命名冲突，使用 SubtitleUtterance 名称
+    - emotion 从该 utterance 的所有 cues 中聚合（选择最常见的或置信度最高的）
     """
     utt_id: str
     speaker: str
     start_ms: int
     end_ms: int
     speech_rate: SpeechRate
+    emotion: Optional[EmotionInfo] = None
     cues: List["SubtitleCue"] = field(default_factory=list)
 
 

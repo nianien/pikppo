@@ -1,5 +1,10 @@
 """
-MT Phase: 机器翻译（只编排与IO，调用 models.openai.translate）
+MT Phase: 机器翻译（只调模型，输出英文整段文本）
+
+职责：
+- 按 utterance 粒度翻译
+- 输出 mt_input.jsonl 和 mt_output.jsonl
+- 不处理时间轴、不生成 SRT
 """
 import json
 from pathlib import Path
@@ -7,25 +12,34 @@ from typing import Dict
 
 from pikppo.pipeline.core.phase import Phase
 from pikppo.pipeline.core.types import Artifact, ErrorInfo, PhaseResult, RunContext, ResolvedOutputs
-from pikppo.pipeline.processors.mt import run as mt_run
+from pikppo.pipeline.processors.mt.utterance_translate import (
+    pick_k,
+    estimate_en_duration_ms,
+    translate_utterance_with_retry,
+)
+from pikppo.pipeline.processors.mt.time_aware_impl import create_translate_fn
+from pikppo.pipeline.processors.mt.name_guard import NameGuard, load_config
+from pikppo.pipeline.processors.mt.dict_loader import DictLoader
+from pikppo.pipeline.processors.mt.name_map_complete import (
+    complete_names_with_llm,
+)
 from pikppo.config.settings import get_openai_api_key
-from pikppo.utils.timecode import write_srt_from_segments
-from pikppo.utils.logger import info
+from pikppo.utils.logger import info, error, warning
 
 
 class MTPhase(Phase):
-    """机器翻译 Phase。"""
+    """机器翻译 Phase（只调模型）。"""
     
     name = "mt"
     version = "1.0.0"
     
     def requires(self) -> list[str]:
-        """需要 subs.subtitle_model（SSOT）。"""
-        return ["subs.subtitle_model"]
+        """需要 subs.subtitle_model（SSOT）和 asr.asr_result（用于整集上下文）。"""
+        return ["subs.subtitle_model", "asr.asr_result"]
     
     def provides(self) -> list[str]:
-        """生成 translate.context, subs.en_srt。"""
-        return ["translate.context", "subs.en_srt"]
+        """生成 mt.mt_input, mt.mt_output。"""
+        return ["mt.mt_input", "mt.mt_output"]
     
     def run(
         self,
@@ -38,12 +52,11 @@ class MTPhase(Phase):
         
         流程：
         1. 读取 subtitle.model.json（SSOT）
-        2. Stage 1: 生成翻译上下文
-        3. Stage 2: 翻译 cues
-        4. 更新 Subtitle Model 的 target 字段
-        5. 生成 en.srt
+        2. 生成 mt_input.jsonl（包含约束信息）
+        3. 调用翻译模型
+        4. 生成 mt_output.jsonl（只包含英文整段文本）
         """
-        # 获取输入（Subtitle Model SSOT）
+        # 获取输入（Subtitle Model SSOT 和 ASR Result）
         subtitle_model_artifact = inputs["subs.subtitle_model"]
         subtitle_model_path = Path(ctx.workspace) / subtitle_model_artifact.relpath
         
@@ -56,133 +69,515 @@ class MTPhase(Phase):
                 ),
             )
         
+        # 读取 ASR Result（用于整集上下文）
+        asr_result_artifact = inputs["asr.asr_result"]
+        asr_result_path = Path(ctx.workspace) / asr_result_artifact.relpath
+        
+        if not asr_result_path.exists():
+            return PhaseResult(
+                status="failed",
+                error=ErrorInfo(
+                    type="FileNotFoundError",
+                    message=f"ASR Result file not found: {asr_result_path}",
+                ),
+            )
+        
+        # 读取 ASR Result 获取整集上下文
+        with open(asr_result_path, "r", encoding="utf-8") as f:
+            asr_data = json.load(f)
+        
+        # 提取整集上下文：episode_context_text = asr.result.text
+        episode_context_text = ""
+        if "result" in asr_data and "text" in asr_data["result"]:
+            episode_context_text = asr_data["result"]["text"]
+            info(f"Loaded episode context: {len(episode_context_text)} characters")
+        else:
+            warning("ASR result.text not found, proceeding without episode context")
+        
         # 读取 Subtitle Model v1.2
         with open(subtitle_model_path, "r", encoding="utf-8") as f:
             model_data = json.load(f)
         
-        # v1.2: 从 utterances 中提取所有 cues
         utterances = model_data.get("utterances", [])
-        cues = []
-        for utt in utterances:
-            cues.extend(utt.get("cues", []))
         
-        if not cues:
+        if not utterances:
             return PhaseResult(
                 status="failed",
                 error=ErrorInfo(
                     type="ValueError",
-                    message="No cues found in Subtitle Model",
-                ),
-            )
-        
-        # 获取 API key
-        api_key = get_openai_api_key()
-        if not api_key:
-            return PhaseResult(
-                status="failed",
-                error=ErrorInfo(
-                    type="RuntimeError",
-                    message="OpenAI API key not found. Please set OPENAI_API_KEY environment variable.",
+                    message="No utterances found in Subtitle Model",
                 ),
             )
         
         # 获取配置
         phase_config = ctx.config.get("phases", {}).get("mt", {})
-        model = phase_config.get("model", ctx.config.get("openai_model", "gpt-4o-mini"))
-        temperature = phase_config.get("temperature", ctx.config.get("openai_temperature", 0.3))
-        cps_limit = float(phase_config.get("cps_limit", ctx.config.get("mt_cps_limit", 15.0)))
-        max_retries = int(phase_config.get("max_retries", ctx.config.get("mt_max_retries", 2)))
-        use_time_aware = phase_config.get("use_time_aware", ctx.config.get("mt_use_time_aware", True))
         
-        # 调用 Processor 层进行时间感知翻译（cue-level）
+        # ============================================================
+        # 翻译引擎选择：支持 Gemini 和 OpenAI 两套独立方案
+        # ============================================================
+        # 配置优先级：
+        # 1. phase_config.get("engine") - 显式指定引擎（"gemini" 或 "openai"）
+        # 2. phase_config.get("model") - 通过模型名称推断（gemini-* 或 gpt-*）
+        # 3. ctx.config.get("mt_engine") - 全局配置
+        # 4. 默认：根据模型名称推断，如果都没有则使用 "gemini"
+        
+        # 方法1：显式指定引擎
+        engine = phase_config.get("engine")
+        if not engine:
+            # 方法2：通过模型名称推断
+            model_name = phase_config.get("model", ctx.config.get("mt_model", ""))
+            if model_name.startswith("gemini"):
+                engine = "gemini"
+            elif model_name.startswith("gpt") or model_name.startswith("o1"):
+                engine = "openai"
+            else:
+                # 方法3：全局配置
+                engine = ctx.config.get("mt_engine", "gemini")  # 默认使用 Gemini
+        
+        engine = engine.lower()
+        if engine not in ["gemini", "openai"]:
+            return PhaseResult(
+                status="failed",
+                error=ErrorInfo(
+                    type="ValueError",
+                    message=f"Invalid translation engine: {engine}. Must be 'gemini' or 'openai'.",
+                ),
+            )
+        
+        is_gemini = (engine == "gemini")
+        
+        # 根据引擎选择模型和 API key
+        if is_gemini:
+            # Gemini 方案
+            from pikppo.config.settings import get_gemini_key
+            # 默认使用最新的模型（gemini-2.0-flash 或 gemini-1.5-flash）
+            model = phase_config.get("model", ctx.config.get("mt_model", ctx.config.get("gemini_model", "gemini-1.5-flash")))
+            api_key = phase_config.get("api_key") or get_gemini_key()
+            if not api_key:
+                return PhaseResult(
+                    status="failed",
+                    error=ErrorInfo(
+                        type="RuntimeError",
+                        message="Gemini API key not found. Please set GEMINI_API_KEY environment variable.",
+                    ),
+                )
+            default_temp = 0.4
+            info(f"Using Gemini translation engine: {model}")
+        else:
+            # OpenAI 方案
+            model = phase_config.get("model", ctx.config.get("mt_model", ctx.config.get("openai_model", "gpt-4o-mini")))
+            api_key = phase_config.get("api_key") or get_openai_api_key()
+            if not api_key:
+                return PhaseResult(
+                    status="failed",
+                    error=ErrorInfo(
+                        type="RuntimeError",
+                        message="OpenAI API key not found. Please set OPENAI_API_KEY environment variable.",
+                    ),
+                )
+            default_temp = 0.3
+            info(f"Using OpenAI translation engine: {model}")
+        
+        # Fallback 配置（可选，默认关闭）
+        # 推荐：保持 fallback_enabled=False，使用单引擎 + 同引擎重试策略
+        fallback_enabled = phase_config.get("fallback_enabled", False)
+        fallback_api_key = None
+        fallback_model = None
+        if fallback_enabled:
+            # Fallback 使用另一个引擎
+            if is_gemini:
+                # 主引擎是 Gemini，fallback 使用 OpenAI
+                fallback_api_key = phase_config.get("fallback_api_key") or get_openai_api_key()
+                fallback_model = phase_config.get("fallback_model", ctx.config.get("openai_model", "gpt-4o-mini"))
+            else:
+                # 主引擎是 OpenAI，fallback 使用 Gemini
+                from pikppo.config.settings import get_gemini_key
+                fallback_api_key = phase_config.get("fallback_api_key") or get_gemini_key()
+                fallback_model = phase_config.get("fallback_model", ctx.config.get("gemini_model", "gemini-pro"))
+            
+            if fallback_api_key:
+                warning(f"Fallback enabled: {'OpenAI' if is_gemini else 'Gemini'} ({fallback_model}) - Note: This may cause output inconsistency")
+            else:
+                warning("Fallback enabled but API key not found, disabling fallback")
+                fallback_enabled = False
+        
+        # 温度参数
+        temperature = phase_config.get("temperature", ctx.config.get("mt_temperature", default_temp))
+        
+        max_retries = int(phase_config.get("max_retries", ctx.config.get("mt_max_retries", 3)))
+        enable_name_guard = phase_config.get("enable_name_guard", ctx.config.get("mt_enable_name_guard", True))
+        enable_name_map = phase_config.get("enable_name_map", ctx.config.get("mt_enable_name_map", True))
+        target_locale = phase_config.get("target_locale", ctx.config.get("mt_target_locale", "en-US"))
+        
+        # 初始化 Name Guard（如果启用）
+        name_guard = None
+        if enable_name_guard:
+            name_guard_config_path = phase_config.get("name_guard_config_path")
+            if name_guard_config_path:
+                name_guard_config = load_config(Path(name_guard_config_path))
+            else:
+                name_guard_config = load_config()  # 使用默认路径
+            name_guard = NameGuard(name_guard_config)
+            info("Name Guard enabled: 人名识别已启用")
+        
+        # 确定 dict_dir（dub/dict 目录）
+        video_path_str = ctx.config.get("video_path")
+        if video_path_str:
+            video_path = Path(video_path_str)
+            dict_dir = video_path.parent / "dub" / "dict"  # dub/dict 目录（如 videos/dbqsfy/dub/dict/）
+        else:
+            # 降级方案：从 workspace 推导
+            # workspace = videos/dbqsfy/dub/1/ → dict_dir = videos/dbqsfy/dub/dict/
+            workspace_path = Path(ctx.workspace)
+            dict_dir = workspace_path.parent / "dict"  # 跳过 episode_stem，得到 dub/dict 目录
+        
+        # 初始化字典加载器（统一管理所有字典）
+        dict_loader = DictLoader(dict_dir)
+        
+        # 兼容旧版 NameMap（如果启用）
+        name_map_instance = None
+        if enable_name_map:
+            # 从 dict_loader 同步 names 到旧版 NameMap（向后兼容）
+            # 注意：这里主要是为了兼容现有的 name_map_complete 逻辑
+            # 未来可以完全迁移到 DictLoader
+            from pikppo.pipeline.processors.mt.name_map import NameMap
+            names_path = dict_dir / "names.json"
+            name_map_instance = NameMap(names_path)
+            # 同步 dict_loader.names 到 name_map_instance
+            for src_name, target in dict_loader.names.items():
+                if not name_map_instance.has(src_name):
+                    name_map_instance.add(
+                        src_name=src_name,
+                        target=target,
+                        style="dict",
+                        first_seen=ctx.job_id,
+                        source="dict",
+                    )
+            info(f"DictLoader enabled: names={len(dict_loader.names)}, slang={len(dict_loader.slang)}")
+        
+        # 生成 mt_input.jsonl（先收集所有人名）
+        mt_input_path = outputs.get("mt.mt_input")
+        mt_input_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        mt_input_lines = []
+        all_src_names = set()  # 收集所有人名（用于批量查询 NameMap）
+        
+        for utterance in utterances:
+            utt_id = utterance.get("utt_id", "")
+            start_ms = utterance.get("start_ms", 0)
+            end_ms = utterance.get("end_ms", 0)
+            speech_rate = utterance.get("speech_rate", {})
+            zh_tps = speech_rate.get("zh_tps", 0.0)
+            cues = utterance.get("cues", [])
+            
+            # 合并中文文本，使用 <sep> 标记 cue 边界
+            # <sep> = 轻微停顿 / 语义弱边界，用于诱导模型产生可切分结构
+            cue_texts = []
+            for cue in cues:
+                cue_text = cue.get("source", {}).get("text", "").strip()
+                if cue_text:
+                    cue_texts.append(cue_text)
+            zh_merged = " <sep> ".join(cue_texts)
+            
+            # Step 1: Name Guard - 提取并替换人名
+            placeholder_to_name = {}  # {placeholder: src_name}（临时变量，用于收集 src_names）
+            if name_guard and zh_merged:
+                zh_merged, name_map_dict = name_guard.extract_and_replace_names(zh_merged)
+                # name_map_dict 已经是 {placeholder: src_name}，例如：{"<<NAME_0>>": "平安"}
+                placeholder_to_name = name_map_dict
+                if placeholder_to_name:
+                    all_src_names.update(placeholder_to_name.values())
+                    info(f"  {utt_id}: 识别到 {len(placeholder_to_name)} 个人名: {list(placeholder_to_name.values())}")
+            
+            # Step 2: 输入格式化 - 将占位符格式化为 <<NAME_0:平安>> 格式（让模型能看到人名信息）
+            # 注意：这里不替换为英文名，模型输出会保留 <<NAME_0>> 占位符
+            # 占位符已经是自描述的，不需要额外的 name_map 字段
+            if placeholder_to_name:
+                for placeholder, src_name in placeholder_to_name.items():
+                    # 使用 <<NAME_0:平安>> 格式（让模型知道这是人名，但输出时保留占位符）
+                    annotated_placeholder = f"<<{placeholder[2:-2]}:{src_name}>>"  # <<NAME_0>> -> <<NAME_0:平安>>
+                    zh_merged = zh_merged.replace(placeholder, annotated_placeholder)
+            
+            # 计算预算
+            window_ms = end_ms - start_ms
+            from pikppo.pipeline.processors.mt.utterance_translate import pick_k
+            k = pick_k(zh_tps)
+            budget_ms = window_ms * k
+            
+            mt_input_lines.append({
+                "utt_id": utt_id,
+                "source": {
+                    "lang": "zh",
+                    "text": zh_merged,  # 自描述占位符：<<NAME_0:平安>>，slang 标记：<SLANG:key>
+                },
+                "constraints": {
+                    "window_ms": window_ms,
+                    "zh_tps": zh_tps,
+                    "k": k,
+                    "budget_ms": budget_ms,
+                },
+            })
+        
+        # 创建翻译函数（单引擎 + 可选 fallback）
         try:
-            result = mt_run(
-                cues=cues,  # 直接传递 cues（来自 Subtitle Model）
+            translate_fn = create_translate_fn(
                 api_key=api_key,
                 model=model,
                 temperature=temperature,
-                cps_limit=cps_limit,
-                max_retries=max_retries,
-                use_time_aware=use_time_aware,
+                fallback_enabled=fallback_enabled,
+                fallback_api_key=fallback_api_key,
+                fallback_model=fallback_model,
             )
         except Exception as e:
+            error_msg = f"Failed to create translation function: {e}"
+            error(error_msg)
+            # 如果是 Gemini 引擎失败，提供切换到 OpenAI 的建议
+            if is_gemini:
+                error("")
+                error("=" * 60)
+                error("Gemini engine failed. To switch to OpenAI:")
+                error("  Set in config: phases.mt.engine = 'openai'")
+                error("  Or set environment: mt_engine=openai")
+                error("=" * 60)
             return PhaseResult(
                 status="failed",
                 error=ErrorInfo(
                     type=type(e).__name__,
-                    message=str(e),
+                    message=error_msg,
                 ),
             )
         
-        # 从 ProcessorResult 提取翻译结果
-        translations = result.data["translations"]
-        
-        # 构建 cue_id -> translation 映射
-        translation_map = {t["cue_id"]: t for t in translations}
-        
-        # v1.2: 翻译结果不写回 SSOT，单独保存到 translate.context.json
-        # 构建翻译上下文（包含翻译结果和 metrics）
-        context = {
-            "translations": [],
-        }
-        
-        # 生成英文 segments（用于 SRT）
-        en_segments = []
-        for cue in cues:
-            cue_id = cue.get("cue_id", "")
-            translation = translation_map.get(cue_id)
-            
-            if translation and translation.get("text"):
-                # 保存翻译结果到 context（不写回 SSOT）
-                context["translations"].append({
-                    "cue_id": cue_id,
-                    "lang": "en",
-                    "text": translation["text"],
-                    "metrics": {
-                        "max_chars": translation["max_chars"],
-                        "actual_chars": translation["actual_chars"],
-                        "cps": round(translation["cps"], 2),
-                    },
-                    "provider": "mt_v1",
-                    "status": translation["status"],
-                })
+        # Phase B: LLM 补全缺失项（只针对未命中的名字，first-write-wins）
+        # 统一使用与翻译相同的模型（Gemini 或 OpenAI）
+        if all_src_names:
+            missing_names = [name for name in all_src_names if not dict_loader.has_name(name)]
+            if missing_names:
+                info(f"DictLoader 缺失 {len(missing_names)} 个人名，调用 LLM 补全: {missing_names}")
                 
-                # 生成英文 segments（用于 SRT）
-                en_seg = {
-                    "id": cue_id,
-                    "start": cue.get("start_ms", 0) / 1000.0,  # 毫秒转秒
-                    "end": cue.get("end_ms", 0) / 1000.0,
-                    "text": cue.get("source", {}).get("text", ""),  # 保留中文原文
-                    "en_text": translation["text"],
-                    "speaker": cue.get("speaker", ""),
-                }
-                en_segments.append(en_seg)
+                # 调用 LLM 补全（使用与翻译相同的模型）
+                llm_results = complete_names_with_llm(
+                    missing_names=missing_names,
+                    translate_fn=translate_fn,  # 使用统一的翻译函数
+                    is_gemini=is_gemini,  # 传入模型类型
+                )
+                
+                # Phase D: 添加到 DictLoader（first-write-wins：立刻写入并锁死）
+                for src_name, result in llm_results.items():
+                    success = dict_loader.add_name(src_name, result["target"])
+                    if success:
+                        info(f"  DictLoader 添加: '{src_name}' -> '{result['target']}' (style: {result['style']})")
+                    else:
+                        # 已存在（不应该发生，但防御性检查）
+                        warning(f"  DictLoader 已存在: '{src_name}'，跳过添加")
+                
+                # 保存 names.json
+                dict_loader.save_names()
+                info(f"DictLoader names.json 已保存: {len(dict_loader.names)} 个条目")
+                
+                # 同步到旧版 NameMap（向后兼容）
+                if name_map_instance:
+                    for src_name, result in llm_results.items():
+                        if dict_loader.has_name(src_name):
+                            target = dict_loader.resolve_name(src_name)
+                            if target:
+                                name_map_instance.add(
+                                    src_name=src_name,
+                                    target=target,
+                                    style=result["style"],
+                                    first_seen=ctx.job_id,
+                                    source="llm",
+                                )
+                    name_map_instance.save()
         
-        # Phase 层负责文件 IO：写入到 runner 预分配的 outputs.paths
-        # translate.context.json（翻译结果单独保存，不写回 SSOT）
-        context_path = outputs.get("translate.context")
-        context_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(context_path, "w", encoding="utf-8") as f:
-            json.dump(context, f, indent=2, ensure_ascii=False)
-        info(f"Saved translation context to: {context_path}")
+        # 写入 mt_input.jsonl
+        with open(mt_input_path, "w", encoding="utf-8") as f:
+            for line in mt_input_lines:
+                f.write(json.dumps(line, ensure_ascii=False) + "\n")
+        info(f"Saved mt_input.jsonl: {len(mt_input_lines)} utterances")
         
-        # subs.en.srt
-        en_srt_path = outputs.get("subs.en_srt")
-        write_srt_from_segments(en_segments, str(en_srt_path), text_key="en_text")
+        # 名字一致性缓存（first-write-wins，内存级）
+        # key: 中文名（如 "平安"），value: 英文名（如 "Ping An"）
+        name_en_cache: Dict[str, str] = {}
         
-        # 返回 PhaseResult：只声明哪些 outputs 成功
+        # 从 DictLoader 预加载已有翻译
+        for src_name in all_src_names:
+            target = dict_loader.resolve_name(src_name)
+            if target:
+                name_en_cache[src_name] = target
+                info(f"  DictLoader 预加载: '{src_name}' -> '{target}'")
+        
+        # 获取剧情简介（可选，从配置读取）
+        plot_overview = phase_config.get("plot_overview", "")
+        if not plot_overview:
+            # 默认剧情简介（可以后续从配置或元数据读取）
+            plot_overview = "于平安蒙冤背负杀亲罪名，在狱中度过十年。出狱后，他决心查明真相，洗刷冤屈。"
+        
+        # 翻译每个 utterance
+        mt_output_lines = []
+        ok_count = 0
+        failed_count = 0
+        total_retries = 0
+        
+        for mt_input in mt_input_lines:
+            utt_id = mt_input["utt_id"]
+            zh_text = mt_input["source"]["text"]
+            budget_ms = mt_input["constraints"]["budget_ms"]
+            
+            if not zh_text:
+                # 空文本，跳过
+                mt_output_lines.append({
+                    "utt_id": utt_id,
+                    "target": {
+                        "lang": "en",
+                        "text": "",
+                    },
+                    "stats": {
+                        "en_est_ms": 0.0,
+                        "budget_ms": budget_ms,
+                        "retries": 0,
+                    },
+                })
+                continue
+            
+            # 翻译（带重试 + 轻量 glossary 校验）
+            slang_glossary_text = dict_loader.get_slang_glossary_text()
+            try:
+                en_text, retries = translate_utterance_with_retry(
+                    zh_text=zh_text,
+                    budget_ms=budget_ms,
+                    translate_fn=translate_fn,
+                    max_retries=max_retries,
+                    episode_context=episode_context_text,
+                    plot_overview=plot_overview,
+                    slang_glossary_text=slang_glossary_text,
+                    dict_loader=dict_loader,  # 传入用于校验
+                    is_gemini=is_gemini,  # 传入模型类型
+                )
+            except Exception as e:
+                error_msg = (
+                    f"Translation failed for utterance {utt_id}: {e}\n"
+                    f"Source text: {zh_text[:200]}"
+                )
+                error(error_msg)
+                return PhaseResult(
+                    status="failed",
+                    error=ErrorInfo(
+                        type=type(e).__name__,
+                        message=error_msg,
+                    ),
+                )
+            
+            # 轻量 glossary 校验（如果违反，重试一次）
+            if dict_loader.slang:
+                violations = dict_loader.check_glossary_violation(zh_text, en_text)
+                if violations and retries < max_retries:
+                    warning(
+                        f"  {utt_id}: Glossary violation detected: {violations}. "
+                        f"Retrying with stricter prompt..."
+                    )
+                    # 重试一次，使用更严格的 prompt
+                    from typing import List
+                    en_text_retry, _ = translate_utterance_with_retry(
+                        zh_text=zh_text,
+                        budget_ms=budget_ms,
+                        translate_fn=translate_fn,
+                        max_retries=1,  # 只重试一次
+                        episode_context=episode_context_text,
+                        plot_overview=plot_overview,
+                        slang_glossary_text=slang_glossary_text,
+                        dict_loader=dict_loader,
+                        is_retry=True,  # 标记为重试
+                        violations=violations,  # 传入违反的术语
+                        is_gemini=is_gemini,  # 传入模型类型
+                    )
+                    if en_text_retry:
+                        en_text = en_text_retry
+                        retries += 1
+                        info(f"  {utt_id}: Retry successful after glossary violation")
+            
+            # 反作弊校验：确保输出没有占位符、<sep>、中文（这是最终输出，不允许系统痕迹）
+            import re
+            has_placeholder = re.search(r"<<NAME_\d+", en_text)
+            has_sep = "<sep>" in en_text
+            has_chinese = re.search(r"[\u4e00-\u9fff]", en_text)  # 检测中文字符
+            
+            if has_placeholder or has_sep or has_chinese:
+                issues = []
+                if has_placeholder:
+                    issues.append("NAME placeholder")
+                if has_sep:
+                    issues.append("<sep> marker")
+                if has_chinese:
+                    issues.append("Chinese characters")
+                error_msg = (
+                    f"LLM output still contains {', '.join(issues)} for utterance {utt_id}. "
+                    f"This is not allowed - the output must be clean English with no placeholders, <sep>, or Chinese. "
+                    f"Output: {en_text[:200]}"
+                )
+                error(error_msg)
+                return PhaseResult(
+                    status="failed",
+                    error=ErrorInfo(
+                        type="RuntimeError",
+                        message=error_msg,
+                    ),
+                )
+            
+            # 估算英文时长
+            en_est_ms = estimate_en_duration_ms(en_text)
+            
+            if en_text:
+                ok_count += 1
+            else:
+                failed_count += 1
+            
+            total_retries += retries
+            
+            # mt_output.jsonl = 最终用户可见文本
+            # 模型必须一次性产出"干净英文"，不允许占位符
+            # 反作弊校验已在 translate_utterance_with_retry 中完成
+            
+            mt_output_lines.append({
+                "utt_id": utt_id,
+                "target": {
+                    "lang": "en",
+                    "text": en_text,  # 纯英文，无占位符（已通过反作弊校验）
+                },
+                "stats": {
+                    "en_est_ms": en_est_ms,
+                    "budget_ms": budget_ms,
+                    "retries": retries,
+                },
+            })
+        
+        # 写入 mt_output.jsonl（写入前再次校验）
+        mt_output_path = outputs.get("mt.mt_output")
+        mt_output_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        # 强制校验：确保所有输出都不含占位符、<sep>、中文
+        import re
+        for line in mt_output_lines:
+            en_text = line.get("target", {}).get("text", "")
+            assert "<<NAME_" not in en_text, f"Output contains NAME placeholder: {en_text[:200]}"
+            assert "<sep>" not in en_text, f"Output contains <sep> marker: {en_text[:200]}"
+            assert not re.search(r"[\u4e00-\u9fff]", en_text), f"Output contains Chinese characters: {en_text[:200]}"
+        
+        with open(mt_output_path, "w", encoding="utf-8") as f:
+            for line in mt_output_lines:
+                f.write(json.dumps(line, ensure_ascii=False) + "\n")
+        info(f"Saved mt_output.jsonl: {len(mt_output_lines)} utterances (all validated: no placeholders, no <sep>, no <SLANG>, no Chinese)")
+        
+        # 返回 PhaseResult
         return PhaseResult(
             status="succeeded",
             outputs=[
-                "translate.context",
-                "subs.en_srt",
+                "mt.mt_input",
+                "mt.mt_output",
             ],
             metrics={
-                "cues_count": len(cues),
-                "translated_count": len(context["translations"]),
-                "ok_count": result.metrics.get("ok_count", 0),
-                "compressed_count": result.metrics.get("compressed_count", 0),
-                "failed_count": result.metrics.get("failed_count", 0),
-                "cps_limit": cps_limit,
+                "utterances_count": len(utterances),
+                "ok_count": ok_count,
+                "failed_count": failed_count,
+                "total_retries": total_retries,
             },
         )

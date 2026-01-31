@@ -1,0 +1,157 @@
+下面给你一份可直接放进代码里的 “slang 提取器” 规范：
+输入整集内容（asr.result.text）→ 输出 slang 字典，并且每条包含：
+	•	en：英文等价
+	•	confidence：0–1
+	•	evidence：例句片段（从原文截取）
+	•	domain：可选（gambling/card/mahjong/idiom）
+	•	notes：可选（为什么不是字面翻）
+
+同时我给你一个严格 prompt 模板 + 输出 JSON Schema，保证机器可解析。
+
+⸻
+
+1) 输出格式（你要的“再加一层”）
+
+示例输出（slang_dict.json）
+
+{
+  "meta": {
+    "source": "episode_text",
+    "lang": "zh",
+    "domain_hint": "gambling/card-game",
+    "version": 1
+  },
+  "items": {
+    "三条": {
+      "en": "three of a kind",
+      "confidence": 0.96,
+      "evidence": "…没事，哥。三条。胡了！哈哈哈，给钱给钱！…",
+      "domain": "card/mahjong slang",
+      "notes": "Literal translation would be unnatural; refers to a winning pattern."
+    },
+    "胡了": {
+      "en": "I've won!",
+      "confidence": 0.93,
+      "evidence": "…三条。胡了！哈哈哈，给钱给钱！…",
+      "domain": "mahjong slang",
+      "notes": "Winning declaration; not 'finished'."
+    },
+    "给钱给钱": {
+      "en": "Pay up! Pay up!",
+      "confidence": 0.91,
+      "evidence": "…胡了！哈哈哈，给钱给钱！…",
+      "domain": "gambling table talk",
+      "notes": "Demanding others pay the pot."
+    }
+  }
+}
+
+你后面写入 dub/dict/slang.json 时，可以只取 items[zh].en，
+但这份 richer 输出适合你快速审核。
+
+⸻
+
+2) JSON Schema（机器校验用，尽量简单）
+
+{
+  "type": "object",
+  "required": ["meta", "items"],
+  "properties": {
+    "meta": {
+      "type": "object",
+      "required": ["source", "lang", "version"],
+      "properties": {
+        "source": { "type": "string" },
+        "lang": { "type": "string", "enum": ["zh"] },
+        "domain_hint": { "type": "string" },
+        "version": { "type": "integer" }
+      }
+    },
+    "items": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["en", "confidence", "evidence"],
+        "properties": {
+          "en": { "type": "string", "minLength": 1 },
+          "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+          "evidence": { "type": "string", "minLength": 1 },
+          "domain": { "type": "string" },
+          "notes": { "type": "string" }
+        }
+      }
+    }
+  }
+}
+
+
+⸻
+
+3) “slang 提取器” Prompt 模板（可直接用）
+
+System
+
+You are a bilingual linguist specializing in subtitles and spoken dialogue.
+
+Task: Extract Chinese slang/idioms/domain-specific terms that would sound unnatural if translated word-by-word into English, and provide natural English equivalents.
+
+Output MUST be valid JSON and follow the required schema.
+
+Rules:
+- Only include phrases that clearly require non-literal translation.
+- Prefer short phrases (1–10 Chinese characters).
+- Do NOT include ordinary words that translate literally.
+- Provide:
+  - en: natural English equivalent suitable for subtitles
+  - confidence: 0.00–1.00 (how certain this is a slang/term + translation)
+  - evidence: a short snippet copied from the input containing the phrase (20–80 chars)
+  - domain: optional
+  - notes: optional (why literal translation is wrong)
+- Return 10–30 items max (keep it concise).
+
+User
+
+Domain hint: gambling / card-game / table talk.
+
+Episode text:
+{{episode_text}}
+
+
+⸻
+
+4) 你后续怎么用（最省事的写入策略）
+
+阈值建议
+	•	confidence >= 0.85：自动进入候选词表（待你快速扫一眼）
+	•	confidence >= 0.92：可直接自动写入 dub/dict/slang.json（你愿意的话）
+
+写入目标（你之前的强制词表）
+
+dub/dict/slang.json 只保留最简映射：
+
+{
+  "三条": "three of a kind",
+  "胡了": "I've won!",
+  "给钱给钱": "Pay up! Pay up!"
+}
+
+
+⸻
+
+5) 两个很实用的“防胡来”约束（强烈建议加）
+
+A) evidence 必须包含原词
+
+你可以在代码里校验：
+	•	assert zh_phrase in evidence
+
+B) 输出里不能含中文解释段落
+
+只允许 JSON，不允许夹杂说明。
+
+⸻
+
+如果你把这次的整集文本（你那段）直接喂进去跑一次，你基本能立刻得到：
+	•	三条 / 胡了 / 给钱给钱 / 刀子嘴豆腐心 / 不墨迹 / 锣鼓队 / 蓝道中人 / 嫩了点 等候选
+
+你要我也可以直接基于你那段文本，按这个格式给你产一份 slang_dict.json（含置信度和 evidence），你拿去直接落库。
