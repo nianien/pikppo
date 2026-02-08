@@ -52,7 +52,9 @@ def config_to_dict(config: PipelineConfig) -> dict:
         "azure_tts_key": config.azure_tts_key,
         "azure_tts_region": config.azure_tts_region,
         "azure_tts_language": config.azure_tts_language,
+        "tts_engine": config.tts_engine,  # TTS 引擎选择："azure" 或 "volcengine"
         "tts_max_workers": config.tts_max_workers,
+        "tts_mute_original": config.tts_mute_original,
         "voice_pool_path": config.voice_pool_path,
         "dub_target_lufs": config.dub_target_lufs,
         "dub_true_peak": config.dub_true_peak,

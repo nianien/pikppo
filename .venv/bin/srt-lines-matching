@@ -1,4 +1,4 @@
-#!/Users/skyfalling/Workspace/express/python/pikppo/.venv/bin/python
+#!/Users/skyfalling/Workspace/express/python/pikppo/.venv/bin/python3.11
 
 """Filter subtitles that match or don't match a particular pattern."""
 

@@ -158,6 +158,15 @@ class AlignPhase(Phase):
                 # 空翻译，跳过
                 continue
             
+            # 检查文本是否只包含标点符号/空白字符（没有实际单词）
+            import re
+            text_without_punc = re.sub(r'[^\w\s]', '', en_text.strip())
+            text_without_punc = re.sub(r'\s+', '', text_without_punc)
+            if not text_without_punc:
+                # 只包含标点符号/空白字符，跳过该 utterance
+                warning(f"  {utt_id}: Translation contains only punctuation/whitespace: {repr(en_text)}, skipping")
+                continue
+            
             # 反作弊校验：确保输入没有占位符（防御性检查）
             if re.search(r"<<NAME_\d+", en_text):
                 warning(
@@ -166,60 +175,26 @@ class AlignPhase(Phase):
                     f"Text: {en_text[:200]}"
                 )
             
-            # 获取预算和估算时长
+            # 获取预算和估算时长（仅用于统计，不再拉长 utterance）
             stats = mt_output.get("stats", {})
             budget_ms = stats.get("budget_ms", 0)
             en_est_ms = stats.get("en_est_ms", 0)
             
-            # 计算 end 延长
-            next_utterance = utterances[i + 1] if i + 1 < len(utterances) else None
-            next_start_ms = next_utterance.get("start_ms") if next_utterance else None
-            
+            # 关键修正：不再修改 utterance 的时间窗，end_ms_final 固定为 SSOT / ASR 原始值。
+            # 之前为每句英文“额外争取时间”，长句会把 end_ms 往后推，所有句子叠加，
+            # 最终导致 tts.wav 总长度远大于原视频（你看到的 4 分多钟）。
             extend_ms = 0.0
             end_ms_final = end_ms_src
             
-            if en_est_ms > budget_ms:
-                # 需要额外时间
-                need_ms = en_est_ms - budget_ms
-                # 先计算不重叠的最大扩展
-                no_overlap_cap_ms = None
-                if next_start_ms is not None:
-                    no_overlap_cap_ms = next_start_ms - end_ms_src - safety_gap_ms
-                    if no_overlap_cap_ms < 0:
-                        no_overlap_cap_ms = 0
-                
-                # 计算最终可扩展时间
-                extend_ms = min(need_ms, max_extend_ms)
-                if no_overlap_cap_ms is not None:
-                    extend_ms = min(extend_ms, no_overlap_cap_ms)
-                extend_ms = max(0.0, extend_ms)
-                
-                if extend_ms > 0:
-                    end_ms_final = int(end_ms_src + extend_ms)
-                    total_extend_ms += extend_ms
-                else:
-                    # 无法延长，标记需要重试
-                    need_retry_utts.append({
-                        "utt_id": utt_id,
-                        "reason": "cannot_extend",
-                        "need_ms": need_ms,
-                        "en_est_ms": en_est_ms,
-                        "budget_ms": budget_ms,
-                    })
-            
-            # 检查延长后是否仍超限
-            if en_est_ms > (budget_ms + extend_ms):
-                # 延长后仍超限，标记需要重试
-                need_retry_utts.append({
-                    "utt_id": utt_id,
-                    "reason": "still_too_long_after_extend",
-                    "en_est_ms": en_est_ms,
-                    "budget_ms": budget_ms,
-                    "extend_ms": extend_ms,
-                })
-            
-            # 重断句（不跨 utterance 边界）- 与 en.srt 生成逻辑一致
-            segments = resegment_utterance(en_text, cues, end_ms_final)
+            # 重断句（不跨 utterance 边界）
+            # 重要：不使用 SSOT 的 cue 时间，只使用 utterance 时间预算
+            # 基于语速模型在 utt 时间窗内重新分配时间轴
+            segments = resegment_utterance(
+                en_text=en_text,
+                utt_start_ms=start_ms,
+                utt_end_ms=end_ms_final,
+                target_wps=2.5,  # 目标语速：words per second（可配置）
+            )
             
             # 构建对齐后的 cues（包含英文翻译，格式与 SSOT 一致）
             aligned_cues = []
@@ -233,14 +208,27 @@ class AlignPhase(Phase):
                     },
                 })
             
+            # 计算英文语速（words per second）
+            # 基于英文文本和实际时间窗口
+            en_word_count = len(en_text.split())  # 简单方法：按空格分割
+            utt_duration_sec = (end_ms_final - start_ms) / 1000.0
+            en_wps = en_word_count / utt_duration_sec if utt_duration_sec > 0 else 0.0
+            
+            # 更新 speech_rate 为英文语速（格式保持一致，但内容为英文语速）
+            en_speech_rate = {
+                "en_wps": en_wps,  # 英文 words per second
+            }
+            
             # 构建对齐后的 utterance（格式与 SSOT 一致）
+            # 添加 text 字段：utterance 维度的完整英文文本（用于 TTS 合成）
             aligned_utterance = {
                 "utt_id": utt_id,
                 "speaker": speaker,
                 "start_ms": start_ms,
                 "end_ms": end_ms_final,  # 使用延长后的时间
-                "speech_rate": speech_rate,
+                "speech_rate": en_speech_rate,  # 英文语速
                 "emotion": emotion,
+                "text": en_text,  # utterance 维度的完整英文文本（用于 TTS 合成）
                 "cues": aligned_cues,
             }
             aligned_utterances.append(aligned_utterance)

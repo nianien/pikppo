@@ -18,7 +18,7 @@ class MixPhase(Phase):
     version = "1.0.0"
     
     def requires(self) -> list[str]:
-        """需要 tts.audio 和 video（从 config 获取）。"""
+        """需要 tts.audio（sep.accompaniment / sep.vocals 可选，在 run 中手动检查）。"""
         return ["tts.audio"]
     
     def provides(self) -> list[str]:
@@ -52,6 +52,29 @@ class MixPhase(Phase):
                 ),
             )
         
+        # 获取 accompaniment（可选，从 manifest 手动查找）
+        accompaniment_path = None
+        vocals_path = None
+        workspace_path = Path(ctx.workspace)
+        try:
+            from pikppo.pipeline.core.manifest import Manifest
+            manifest_path = workspace_path / "manifest.json"
+            manifest = Manifest(manifest_path)
+            accompaniment_artifact = manifest.get_artifact("sep.accompaniment", required_by=None)
+            accompaniment_path = workspace_path / accompaniment_artifact.relpath
+            if not accompaniment_path.exists():
+                accompaniment_path = None
+
+            # 优先使用 sep.vocals 作为“原声人声”轨道，用于 ducking
+            vocals_artifact = manifest.get_artifact("sep.vocals", required_by=None)
+            vocals_path = workspace_path / vocals_artifact.relpath
+            if not vocals_path.exists():
+                vocals_path = None
+        except (ValueError, FileNotFoundError):
+            # accompaniment 不存在，使用 None（只混 TTS）
+            accompaniment_path = None
+            vocals_path = None
+        
         # 获取 video_path（从 config）
         video_path = ctx.config.get("video_path")
         if not video_path:
@@ -63,20 +86,25 @@ class MixPhase(Phase):
                 ),
             )
         
-        workspace_path = Path(ctx.workspace)
-        audio_dir = workspace_path / "audio"
-        audio_dir.mkdir(parents=True, exist_ok=True)
-        mix_path = audio_dir / "mix.wav"
+        # 使用预分配的输出路径
+        mix_path = outputs.get("mix.audio")
+        mix_path.parent.mkdir(parents=True, exist_ok=True)
         
-        # 获取配置
+        # 获取配置（仅响度相关）；混音策略固定为：BGM + 英文 TTS，不要中文对白。
         phase_config = ctx.config.get("phases", {}).get("mix", {})
         target_lufs = phase_config.get("target_lufs", ctx.config.get("dub_target_lufs", -16.0))
         true_peak = phase_config.get("true_peak", ctx.config.get("dub_true_peak", -1.0))
-        
-        # 检查是否有 accompaniment（可选）
-        accompaniment_path = workspace_path / "audio" / "accompaniment.wav"
-        if not accompaniment_path.exists():
-            accompaniment_path = None
+        # 按你的要求：默认不要中文对话，只保留背景音乐 + 英文译音。
+        # 允许通过 phases.mix.mute_original 显式关闭（例如调试时想听原声）。
+        mute_original = bool(phase_config.get("mute_original", True))
+        mix_mode = phase_config.get("mode", "ducking")
+        tts_volume = float(phase_config.get("tts_volume", 1.0))
+        accompaniment_volume = float(phase_config.get("accompaniment_volume", 0.8))
+        vocals_volume = float(phase_config.get("vocals_volume", 0.15))
+        duck_threshold = float(phase_config.get("duck_threshold", 0.05))
+        duck_ratio = float(phase_config.get("duck_ratio", 10.0))
+        duck_attack_ms = float(phase_config.get("duck_attack_ms", 20.0))
+        duck_release_ms = float(phase_config.get("duck_release_ms", 400.0))
         
         try:
             # 调用 Processor 层进行混音
@@ -87,6 +115,16 @@ class MixPhase(Phase):
                     tts_path=str(tts_path),
                     video_path=video_path,
                     accompaniment_path=str(accompaniment_path) if accompaniment_path else None,
+                    vocals_path=str(vocals_path) if vocals_path else None,
+                    mute_original=mute_original,
+                    mix_mode=mix_mode,
+                    tts_volume=tts_volume,
+                    accompaniment_volume=accompaniment_volume,
+                    vocals_volume=vocals_volume,
+                    duck_threshold=duck_threshold,
+                    duck_ratio=duck_ratio,
+                    duck_attack_ms=duck_attack_ms,
+                    duck_release_ms=duck_release_ms,
                     target_lufs=target_lufs,
                     true_peak=true_peak,
                     output_path=str(temp_video),

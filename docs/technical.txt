@@ -135,8 +135,8 @@ video_id 推荐用：文件名（需要唯一）。
 	•	audio_raw.wav
 
 输出：
-	•	separation/vocals.wav
-	•	separation/accompaniment.wav
+	•	audio/vocals.wav
+	•	audio/accompaniment.wav
 
 说明：Demucs 作为 v1 的“质量补丁”，会显著提升 ASR、diarization、混音观感。
 

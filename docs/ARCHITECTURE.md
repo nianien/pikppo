@@ -41,15 +41,6 @@
    - 版本稳定
    - 可回放
 
-### ❌ asr_post.py 绝对不该做的
-
-- ❌ 生成 .srt 文件
-- ❌ 生成 .vtt 文件
-- ❌ 写任何字幕文件
-- ❌ 关心播放器 / 样式
-- ❌ 为 TTS 直接拼 payload
-
-**一句话**：`asr_post` 不产"文件"，只产"模型"
 
 ---
 
@@ -73,25 +64,7 @@ Subtitle Model (Segment[])  ← SSOT，唯一真相
 
 ## Subtitle Model Schema
 
-**当前实现**：`pikppo.schema.Segment`
 
-```python
-@dataclass
-class Segment:
-    speaker: str              # 说话人标识（规范化后）
-    start_ms: int            # 开始时间（毫秒）
-    end_ms: int              # 结束时间（毫秒）
-    text: str                # 文本内容（已清理）
-    emotion: Optional[str]   # 情绪标签（sad/happy/neutral）
-    gender: Optional[str]    # 性别标签（male/female）
-```
-
-**版本化规则**：
-- Segment 结构变更必须通过版本号标识
-- 旧版本 Segment 必须能自动迁移到新版本
-- 迁移逻辑放在 `asr_post.py` 中
-
----
 
 ## 模块职责划分
 

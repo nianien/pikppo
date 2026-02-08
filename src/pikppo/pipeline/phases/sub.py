@@ -18,7 +18,7 @@ Sub Phase: 字幕后处理（从 ASR raw-response 生成字幕）
 """
 import json
 from pathlib import Path
-from typing import Dict
+from typing import Dict, Any, Optional, List
 
 from pikppo.pipeline.core.phase import Phase
 from pikppo.pipeline.core.types import Artifact, ErrorInfo, PhaseResult, RunContext, ResolvedOutputs
@@ -26,11 +26,72 @@ from pikppo.pipeline.processors.srt import run as srt_run
 from pikppo.utils.logger import info
 
 
+def _get_utterance_text_from_raw_response(
+    utt: "SubtitleUtterance",
+    raw_utterances: List[Dict[str, Any]],
+) -> str:
+    """
+    从 raw_response 的 utterances 中获取对应 utterance 的 text。
+    
+    通过匹配 start_ms 和 end_ms 来找到对应的 raw utterance。
+    """
+    for raw_utt in raw_utterances:
+        raw_start = int(raw_utt.get("start_time", 0))
+        raw_end = int(raw_utt.get("end_time", raw_start))
+        # 匹配时间范围（允许小的误差）
+        if abs(raw_start - utt.start_ms) <= 10 and abs(raw_end - utt.end_ms) <= 10:
+            text = str(raw_utt.get("text", "")).strip()
+            if text:
+                return text
+    
+    # 如果找不到，回退到合并 cues 的文本
+    return "".join(cue.source.text for cue in utt.cues)
+
+
 class SubtitlePhase(Phase):
     """字幕后处理 Phase。"""
     
     name = "sub"
     version = "1.0.0"
+    
+    @staticmethod
+    def _extract_gender_from_raw_response(
+        start_ms: int,
+        end_ms: int,
+        raw_utt_map: Dict[str, Dict[str, Any]],
+    ) -> Optional[str]:
+        """
+        从 raw_response 中提取 gender 信息。
+        
+        Args:
+            start_ms: utterance 开始时间
+            end_ms: utterance 结束时间
+            raw_utt_map: 原始 utterance 映射（key: "{start}_{end}"）
+        
+        Returns:
+            gender 字符串（如 "male", "female"），如果不存在则返回 None
+        """
+        # 尝试匹配原始 utterance（使用时间范围）
+        key = f"{start_ms}_{end_ms}"
+        raw_utt = raw_utt_map.get(key)
+        if raw_utt:
+            additions = raw_utt.get("additions") or {}
+            gender = additions.get("gender")
+            if gender:
+                return str(gender).strip()
+        
+        # 如果精确匹配失败，尝试模糊匹配（找到包含此时间范围的 utterance）
+        for key, raw_utt in raw_utt_map.items():
+            utt_start = int(key.split("_")[0])
+            utt_end = int(key.split("_")[1])
+            # 检查时间范围是否重叠
+            if start_ms >= utt_start and end_ms <= utt_end:
+                additions = raw_utt.get("additions") or {}
+                gender = additions.get("gender")
+                if gender:
+                    return str(gender).strip()
+        
+        return None
     
     def requires(self) -> list[str]:
         """需要 asr.asr_result（SSOT：原始响应，包含完整语义信息）。"""
@@ -125,6 +186,22 @@ class SubtitlePhase(Phase):
             # Phase 层负责文件 IO：写入到 runner 预分配的 outputs.paths
             
             # 1. 保存 Subtitle Model JSON v1.2（SSOT）
+            # 从 raw_response 中提取 utterance 信息（用于序列化时获取 text 和 gender）
+            result = raw_response.get("result") or {}
+            raw_utterances = result.get("utterances") or []
+            # 构建 utterance 索引映射（按顺序，用于匹配）
+            raw_utt_by_index: Dict[int, Dict[str, Any]] = {}
+            for i, raw_utt in enumerate(raw_utterances):
+                raw_utt_by_index[i] = raw_utt
+            
+            # 构建时间范围映射（用于提取 gender）
+            raw_utt_map: Dict[str, Dict[str, Any]] = {}
+            for raw_utt in raw_utterances:
+                utt_start = int(raw_utt.get("start_time", 0))
+                utt_end = int(raw_utt.get("end_time", utt_start))
+                key = f"{utt_start}_{utt_end}"
+                raw_utt_map[key] = raw_utt
+            
             model_path = outputs.get("subs.subtitle_model")
             model_dict = {
                 "schema": {
@@ -136,8 +213,8 @@ class SubtitlePhase(Phase):
                     {
                         "utt_id": utt.utt_id,
                         "speaker": utt.speaker,
-                        "start_ms": utt.start_ms,
-                        "end_ms": utt.end_ms,
+                        "start_ms": utt.start_ms,  # 取自 asr-result.json
+                        "end_ms": utt.end_ms,  # 取自 asr-result.json
                         "speech_rate": {
                             "zh_tps": utt.speech_rate.zh_tps,
                         },
@@ -146,6 +223,13 @@ class SubtitlePhase(Phase):
                             "confidence": utt.emotion.confidence,
                             "intensity": utt.emotion.intensity,
                         } if utt.emotion else None,
+                        # utterance 维度的 text 字段：以 cues 为准（SSOT 自洽）
+                        # 重要：SSOT 生成阶段可能会按“超长停顿”拆分 utterance，因此不能再依赖 raw_utterance 精确匹配。
+                        "text": "".join(cue.source.text for cue in utt.cues),
+                        # 从 raw_response 提取 gender 信息
+                        "gender": SubtitlePhase._extract_gender_from_raw_response(
+                            utt.start_ms, utt.end_ms, raw_utt_map
+                        ),
                         "cues": [
                             {
                                 "start_ms": cue.start_ms,

@@ -15,9 +15,12 @@
 - 安全间隔：60ms（防止与下一句重叠）
 """
 import re
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
 
 from pikppo.utils.logger import info, warning
+
+if TYPE_CHECKING:
+    from pikppo.pipeline.processors.mt.dict_loader import DictLoader
 
 
 # 语速分档阈值（可配置）
@@ -38,6 +41,41 @@ SAFETY_GAP_MS = 60  # 安全间隔（防止重叠）
 
 # 重翻译最大次数
 MAX_RETRIES = 3
+
+
+def clean_translation_output(text: str) -> str:
+    """
+    清理翻译输出，移除所有系统标记。
+    
+    移除：
+    - <sep> 标记
+    - <<NAME_x>> 占位符
+    - <<NAME_x:...>> 占位符
+    - <SLANG:...> 标记
+    
+    Args:
+        text: 原始翻译输出
+    
+    Returns:
+        清理后的文本
+    """
+    if not text:
+        return text
+    
+    # 移除 <sep> 标记（可能带空格）
+    text = re.sub(r'\s*<sep>\s*', ' ', text)
+    
+    # 移除 NAME 占位符（<<NAME_0>> 或 <<NAME_0:...>>）
+    text = re.sub(r'<<NAME_\d+(?::[^>]*)?>>', '', text)
+    
+    # 移除 SLANG 标记（<SLANG:key>）
+    text = re.sub(r'<SLANG:[^>]+>', '', text)
+    
+    # 清理多余空格
+    text = re.sub(r'\s+', ' ', text)
+    text = text.strip()
+    
+    return text
 
 
 def pick_k(zh_tps: float) -> float:
@@ -292,6 +330,10 @@ def translate_utterance_with_retry(
         if not en_text:
             continue
         
+        # 注意：这里不再调用 clean_translation_output。
+        # 占位符（<<NAME_x>> / <<NAME_x:...>>）、<sep> 等系统标记由 MT Phase 统一处理：
+        # 1）先用 DictLoader / placeholder_to_name 替换人名占位符为英文名
+        # 2）再在 MT Phase 里调用 clean_translation_output 移除系统标记
         en_est_ms = estimate_en_duration_ms(en_text)
         if en_est_ms <= budget_ms:
             return en_text, retry
@@ -309,21 +351,28 @@ def translate_utterance_with_retry(
 
 def resegment_utterance(
     en_text: str,
-    cues: List[Dict[str, Any]],
-    end_ms_final: int,
+    utt_start_ms: int,
+    utt_end_ms: int,
+    target_wps: float = 2.5,  # 目标语速：words per second（经验值 2.5-3.0）
 ) -> List[Dict[str, Any]]:
     """
     在 utterance 时间窗口内重断句（不跨 utterance 边界）。
     
-    重要：
-    - 确保单词完整性，不会将单词切分到不同 segment 中
-    - 优先在英文标点处切分（由 <sep> 诱导产生的自然停顿结构）
-    - <sep> 的作用：在翻译阶段诱导模型产生可切分结构（, . ? ! — 等）
+    核心原则（非常重要）：
+    - ❌ 不使用 SSOT 的 cue.start/end（那是中文语音事实切片，不适用于英文）
+    - ✅ 只使用 utterance 的 start/end 作为总时间预算
+    - ✅ 基于语速模型重新分配时间轴
+    
+    时间分配算法（三步法）：
+    1. 锁定 utterance 总时间窗：[utt_start_ms, utt_end_ms]（不可动的硬边界）
+    2. 根据英文文本 + 目标语速，计算每个 segment 的理论发音时长
+    3. 在 utt 时间窗内，按比例重新分配时间轴
     
     Args:
         en_text: 英文整句/整段（可能包含由 <sep> 诱导产生的标点）
-        cues: 原始 cues（提供窗口骨架）
-        end_ms_final: utterance 的最终结束时间（可能已扩展）
+        utt_start_ms: utterance 开始时间（毫秒，来自 SSOT）
+        utt_end_ms: utterance 结束时间（毫秒，可能已扩展）
+        target_wps: 目标语速（words per second，默认 2.5）
     
     Returns:
         segments[]（英文字幕段），每个包含：
@@ -331,138 +380,133 @@ def resegment_utterance(
             "start_ms": int,
             "end_ms": int,
             "text": str,
-            "cue_index": int,  # 对应原始 cue 在 utterance 内的索引（从 0 开始）
         }
     """
-    if not cues:
+    if not en_text or not en_text.strip():
         return []
     
-    utt_start_ms = cues[0].get("start_ms", 0)
-    utt_end_ms = end_ms_final
-    total_ms = utt_end_ms - utt_start_ms
-    
-    if total_ms <= 0:
+    utt_duration_ms = utt_end_ms - utt_start_ms
+    if utt_duration_ms <= 0:
         return []
     
-    # 如果只有一个 cue，直接返回
-    if len(cues) == 1:
-        return [{
-            "start_ms": utt_start_ms,
-            "end_ms": end_ms_final,
-            "text": en_text,
-            "cue_index": 0,  # 第一个（也是唯一一个）cue 的索引
-        }]
-    
-    # 计算每个 cue 的窗口占比
-    cue_windows = []
-    total_cue_ms = 0
-    for cue in cues:
-        cue_start = cue.get("start_ms", 0)
-        cue_end = cue.get("end_ms", 0)
-        cue_ms = max(1, cue_end - cue_start)  # 至少 1ms，避免除零
-        cue_windows.append((cue_start, cue_end, cue_ms))
-        total_cue_ms += cue_ms
-    
-    # 策略：优先在英文标点处切分（由 <sep> 诱导产生的自然停顿）
+    # Step 1: 在英文文本中找自然切分点（标点、空格）
     # 优先级：标点（, . ? ! — ; :） > 空格 > 单词边界
-    
-    # 1. 找到所有标点位置（优先切分点）
-    # 标点符号：, . ? ! — ; :
     punctuation_pattern = r'[,\.\?!—;:]\s*'
     punctuation_positions = []
     for match in re.finditer(punctuation_pattern, en_text):
         pos = match.end()  # 标点后的位置（包含后续空格）
         punctuation_positions.append(pos)
     
-    # 2. 计算每个 cue 应分配的字符数（目标）
-    en_text_chars = len(en_text)
-    char_offsets = [0]  # 每个 cue 的目标字符偏移
-    for i, (_, _, cue_ms) in enumerate(cue_windows):
-        if i == len(cue_windows) - 1:
-            char_offsets.append(en_text_chars)  # 最后一个到结尾
-        else:
-            quota = int(en_text_chars * (cue_ms / total_cue_ms))
-            char_offsets.append(char_offsets[-1] + quota)
-    
-    # 3. 按目标字符偏移分配文本，优先在标点处切分
-    segments = []
+    # Step 2: 按自然切分点切分文本（语义断句）
+    text_segments = []
     current_pos = 0
     
-    for i, (cue_start, cue_end, _) in enumerate(cue_windows):
-        target_end = char_offsets[i + 1]
-        
-        # 最后一个 cue，包含剩余所有文本
-        if i == len(cue_windows) - 1:
-            segment_text = en_text[current_pos:].strip()
-            if segment_text:
-                segments.append({
-                    "start_ms": cue_start,
-                    "end_ms": end_ms_final,
-                    "text": segment_text,
-                    "cue_index": i,  # cue 在 utterance 内的索引
-                })
-            break
-        
-        # 找到目标位置附近的最佳切分点
-        # 优先选择：标点位置 > 目标位置附近的空格 > 目标位置（单词边界）
-        best_cut_pos = target_end
-        
-        # 查找目标位置附近的标点
+    # 辅助函数：检查文本是否只包含标点符号/空白字符
+    def is_only_punctuation(text: str) -> bool:
+        """检查文本是否只包含标点符号和空白字符（没有实际单词）。"""
+        if not text:
+            return True
+        # 移除所有标点符号和空白字符，检查是否还有内容
+        import re
+        text_without_punc = re.sub(r'[^\w\s]', '', text)
+        text_without_punc = re.sub(r'\s+', '', text_without_punc)
+        return not text_without_punc
+    
+    # 优先在标点处切分
+    if punctuation_positions:
         for punc_pos in punctuation_positions:
-            if current_pos < punc_pos <= target_end:
-                # 标点在目标范围内，使用标点位置
-                best_cut_pos = punc_pos
-                break
-            elif target_end < punc_pos <= target_end + 50:  # 允许稍微超过目标位置
-                # 标点稍微超过目标位置，但很近，也可以使用
-                best_cut_pos = punc_pos
-                break
+            if punc_pos > current_pos:
+                segment_text = en_text[current_pos:punc_pos].strip()
+                # 过滤掉只包含标点符号的 segment
+                if segment_text and not is_only_punctuation(segment_text):
+                    text_segments.append(segment_text)
+                current_pos = punc_pos
         
-        # 如果没找到标点，尝试在目标位置附近找空格
-        if best_cut_pos == target_end:
-            # 在目标位置前后 20 个字符内找空格
-            search_start = max(current_pos, target_end - 20)
-            search_end = min(len(en_text), target_end + 20)
-            search_text = en_text[search_start:search_end]
-            
-            # 找最接近目标位置的空格
-            space_pos = search_text.rfind(' ', 0, target_end - search_start)
-            if space_pos >= 0:
-                best_cut_pos = search_start + space_pos + 1  # +1 包含空格
+        # 添加最后一段
+        if current_pos < len(en_text):
+            segment_text = en_text[current_pos:].strip()
+            # 过滤掉只包含标点符号的 segment
+            if segment_text and not is_only_punctuation(segment_text):
+                text_segments.append(segment_text)
+    else:
+        # 没有标点，按空格切分（但保持合理长度）
+        words = en_text.split()
+        if not words:
+            return []
         
-        # 确保切分位置在单词边界（不切分单词）
-        # 如果 best_cut_pos 在单词中间，找到单词结束位置
-        if best_cut_pos < len(en_text):
-            # 检查 best_cut_pos 是否在单词中间
-            if best_cut_pos > 0 and best_cut_pos < len(en_text):
-                char_before = en_text[best_cut_pos - 1]
-                char_at = en_text[best_cut_pos] if best_cut_pos < len(en_text) else ' '
-                
-                # 如果前一个字符是字母/数字，当前位置也是字母/数字，说明在单词中间
-                if char_before.isalnum() and char_at.isalnum():
-                    # 找到单词结束位置
-                    word_end_match = re.search(r'\W', en_text[best_cut_pos:])
-                    if word_end_match:
-                        best_cut_pos = best_cut_pos + word_end_match.start()
-                    else:
-                        # 没找到，说明到文本末尾
-                        best_cut_pos = len(en_text)
+        # 简单策略：每 8-12 个词一段（或根据总时长动态调整）
+        words_per_segment = max(8, min(12, int(len(words) / max(1, utt_duration_ms / 2000))))  # 每段约 2 秒
         
-        # 提取 segment 文本
-        segment_text = en_text[current_pos:best_cut_pos].strip()
-        
-        # 最后一个 cue 的 end_ms 使用 end_ms_final
-        segment_end_ms = end_ms_final if i == len(cue_windows) - 1 else cue_end
-        
-        if segment_text:  # 只添加非空文本
+        for i in range(0, len(words), words_per_segment):
+            segment_text = " ".join(words[i:i + words_per_segment])
+            if segment_text:
+                text_segments.append(segment_text)
+    
+    if not text_segments:
+        # 如果无法切分，整个 utterance 作为一个 segment
+        text_segments = [en_text.strip()]
+    
+    # Step 3: 计算每个 segment 的理论发音时长（基于语速模型）
+    # 使用单词数估算（更准确）
+    segment_estimates = []
+    total_est_ms = 0.0
+    
+    for seg_text in text_segments:
+        # 计算单词数（简单方法：空格数 + 1）
+        word_count = len(seg_text.split())
+        # 理论时长 = 单词数 / 目标语速（words per second）
+        est_seconds = word_count / target_wps if target_wps > 0 else 0.5
+        est_ms = est_seconds * 1000.0
+        segment_estimates.append({
+            "text": seg_text,
+            "est_ms": est_ms,
+            "word_count": word_count,
+        })
+        total_est_ms += est_ms
+    
+    # Step 4: 在 utt 时间窗内，按比例重新分配时间轴
+    # scale = utt_duration / total_est
+    if total_est_ms <= 0:
+        # 如果估算失败，平均分配
+        scale = utt_duration_ms / len(text_segments) if text_segments else 0
+        segments = []
+        current_time = utt_start_ms
+        for seg_text in text_segments:
+            segment_duration = scale
             segments.append({
-                "start_ms": cue_start,
-                "end_ms": segment_end_ms,
-                "text": segment_text,
-                "cue_index": i,  # cue 在 utterance 内的索引
+                "start_ms": int(current_time),
+                "end_ms": int(current_time + segment_duration),
+                "text": seg_text,
             })
+            current_time += segment_duration
+        return segments
+    
+    scale = utt_duration_ms / total_est_ms
+    
+    segments = []
+    current_time = utt_start_ms
+    
+    for seg_info in segment_estimates:
+        # 映射到真实时间轴
+        segment_duration = seg_info["est_ms"] * scale
+        segment_start = int(current_time)
+        segment_end = int(current_time + segment_duration)
         
-        current_pos = best_cut_pos
+        # 确保不超过 utterance 边界
+        if segment_end > utt_end_ms:
+            segment_end = utt_end_ms
+        
+        segments.append({
+            "start_ms": segment_start,
+            "end_ms": segment_end,
+            "text": seg_info["text"],
+        })
+        
+        current_time = segment_end
+    
+    # 确保最后一个 segment 的 end 正好是 utt_end_ms
+    if segments:
+        segments[-1]["end_ms"] = utt_end_ms
     
     return segments
 
@@ -491,12 +535,11 @@ def translate_utterance(
         {
             "utt_id": str,
             "end_ms_final": int,  # 原始 end_ms 或延长后
-            "segments": [  # 英文字幕段
+            "segments": [  # 英文字幕段（时间轴基于语速模型重新分配）
                 {
-                    "start_ms": int,
-                    "end_ms": int,
+                    "start_ms": int,  # 基于语速模型在 utt 时间窗内重新计算
+                    "end_ms": int,     # 不再使用 SSOT cue 的时间
                     "text": str,
-                    "cue_index": int,  # v1.3: 使用索引而不是 cue_id
                 },
                 ...
             ],
@@ -573,7 +616,13 @@ def translate_utterance(
                 en_est_ms = estimate_en_duration_ms(en_text)
     
     # 6. 重断句（不跨 utterance 边界）
-    segments = resegment_utterance(en_text, cues, end_ms_final)
+    # 重要：不使用 SSOT 的 cue 时间，只使用 utterance 时间预算
+    segments = resegment_utterance(
+        en_text=en_text,
+        utt_start_ms=start_ms,
+        utt_end_ms=end_ms_final,
+        target_wps=2.5,  # 目标语速：words per second
+    )
     
     return {
         "utt_id": utt_id,

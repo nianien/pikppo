@@ -261,6 +261,8 @@ class MTPhase(Phase):
         
         mt_input_lines = []
         all_src_names = set()  # 收集所有人名（用于批量查询 NameMap）
+        # 保存每个 utterance 的 placeholder_to_name 映射，用于后续替换
+        utt_placeholder_map: Dict[str, Dict[str, str]] = {}  # {utt_id: {placeholder: src_name}}
         
         for utterance in utterances:
             utt_id = utterance.get("utt_id", "")
@@ -268,35 +270,34 @@ class MTPhase(Phase):
             end_ms = utterance.get("end_ms", 0)
             speech_rate = utterance.get("speech_rate", {})
             zh_tps = speech_rate.get("zh_tps", 0.0)
-            cues = utterance.get("cues", [])
             
-            # 合并中文文本，使用 <sep> 标记 cue 边界
-            # <sep> = 轻微停顿 / 语义弱边界，用于诱导模型产生可切分结构
-            cue_texts = []
-            for cue in cues:
-                cue_text = cue.get("source", {}).get("text", "").strip()
-                if cue_text:
-                    cue_texts.append(cue_text)
-            zh_merged = " <sep> ".join(cue_texts)
+            # 直接使用 utterance 的 text 字段（从 asr-result.json 获取，与 subtitle.model.json 对齐）
+            zh_text = utterance.get("text", "").strip()
+            if not zh_text:
+                # 如果 utterance.text 不存在，跳过该 utterance
+                warning(f"  {utt_id}: utterance.text 为空，跳过")
+                continue
             
-            # Step 1: Name Guard - 提取并替换人名
+            # Name Guard - 提取并替换人名
             placeholder_to_name = {}  # {placeholder: src_name}（临时变量，用于收集 src_names）
-            if name_guard and zh_merged:
-                zh_merged, name_map_dict = name_guard.extract_and_replace_names(zh_merged)
+            if name_guard and zh_text:
+                zh_text, name_map_dict = name_guard.extract_and_replace_names(zh_text)
                 # name_map_dict 已经是 {placeholder: src_name}，例如：{"<<NAME_0>>": "平安"}
                 placeholder_to_name = name_map_dict
                 if placeholder_to_name:
                     all_src_names.update(placeholder_to_name.values())
                     info(f"  {utt_id}: 识别到 {len(placeholder_to_name)} 个人名: {list(placeholder_to_name.values())}")
+                    # 保存映射，用于后续替换
+                    utt_placeholder_map[utt_id] = placeholder_to_name
             
-            # Step 2: 输入格式化 - 将占位符格式化为 <<NAME_0:平安>> 格式（让模型能看到人名信息）
+            # 输入格式化 - 将占位符格式化为 <<NAME_0:平安>> 格式（让模型能看到人名信息）
             # 注意：这里不替换为英文名，模型输出会保留 <<NAME_0>> 占位符
             # 占位符已经是自描述的，不需要额外的 name_map 字段
             if placeholder_to_name:
                 for placeholder, src_name in placeholder_to_name.items():
                     # 使用 <<NAME_0:平安>> 格式（让模型知道这是人名，但输出时保留占位符）
                     annotated_placeholder = f"<<{placeholder[2:-2]}:{src_name}>>"  # <<NAME_0>> -> <<NAME_0:平安>>
-                    zh_merged = zh_merged.replace(placeholder, annotated_placeholder)
+                    zh_text = zh_text.replace(placeholder, annotated_placeholder)
             
             # 计算预算
             window_ms = end_ms - start_ms
@@ -308,7 +309,7 @@ class MTPhase(Phase):
                 "utt_id": utt_id,
                 "source": {
                     "lang": "zh",
-                    "text": zh_merged,  # 自描述占位符：<<NAME_0:平安>>，slang 标记：<SLANG:key>
+                    "text": zh_text,  # 自描述占位符：<<NAME_0:平安>>，slang 标记：<SLANG:key>
                 },
                 "constraints": {
                     "window_ms": window_ms,
@@ -494,6 +495,91 @@ class MTPhase(Phase):
                         en_text = en_text_retry
                         retries += 1
                         info(f"  {utt_id}: Retry successful after glossary violation")
+            
+            # 在清理之前，先替换占位符为实际人名
+            # 如果模型输出了占位符（<<NAME_0>> 或 <<NAME_0:平安>>），需要替换为英文名
+            placeholder_to_name = utt_placeholder_map.get(utt_id, {})
+            if placeholder_to_name and en_text:
+                import re
+                # 匹配 <<NAME_0>> 或 <<NAME_0:平安>> 格式的占位符
+                placeholder_pattern = r'<<NAME_(\d+)(?::[^>]*)?>>'
+                matches = list(re.finditer(placeholder_pattern, en_text))
+                if matches:
+                    # 从后往前替换（避免位置偏移）
+                    for match in reversed(matches):
+                        placeholder_index = int(match.group(1))
+                        placeholder = f"<<NAME_{placeholder_index}>>"
+                        # 从 placeholder_to_name 中查找对应的中文名
+                        if placeholder in placeholder_to_name:
+                            src_name = placeholder_to_name[placeholder]
+                            # 从 name_en_cache 或 dict_loader 中查找英文名
+                            en_name = name_en_cache.get(src_name)
+                            if not en_name:
+                                en_name = dict_loader.resolve_name(src_name)
+                            if en_name:
+                                # 替换占位符为英文名
+                                en_text = en_text[:match.start()] + en_name + en_text[match.end():]
+                                info(f"  {utt_id}: 替换占位符 {placeholder} ({src_name}) -> {en_name}")
+                            else:
+                                # 如果找不到英文名，这是严重错误，应该报错
+                                error_msg = (
+                                    f"占位符 {placeholder} ({src_name}) 未找到英文名。"
+                                    f"这不应该发生，因为所有名字都应该在翻译前被补全。"
+                                    f"请检查 DictLoader 和 name_en_cache。"
+                                )
+                                error(error_msg)
+                                return PhaseResult(
+                                    status="failed",
+                                    error=ErrorInfo(
+                                        type="RuntimeError",
+                                        message=error_msg,
+                                    ),
+                                )
+                        else:
+                            # 占位符不在 placeholder_to_name 中，这也不应该发生
+                            warning(f"  {utt_id}: 占位符 {placeholder} 不在 placeholder_to_name 映射中")
+            
+            # 自动清理：移除所有系统标记（防御性，即使模型输出了也要清理）
+            from pikppo.pipeline.processors.mt.utterance_translate import clean_translation_output, is_only_punctuation
+            en_text = clean_translation_output(en_text)
+
+            # 兜底：如果该 utterance 含有人名占位符，但清理后只剩标点/空白，
+            # 说明上游模型输出质量极差；至少保证字典人名能带入，避免生成 ", !" 这种结果。
+            if placeholder_to_name and (not en_text or is_only_punctuation(en_text)):
+                # 保持占位符顺序（NAME_0, NAME_1 ...），并去重
+                def _placeholder_index(ph: str) -> int:
+                    # ph: "<<NAME_0>>"
+                    import re
+                    m = re.search(r"<<NAME_(\d+)>>", ph)
+                    return int(m.group(1)) if m else 0
+
+                ordered_placeholders = sorted(
+                    placeholder_to_name.keys(),
+                    key=_placeholder_index,
+                )
+                seen = set()
+                en_names = []
+                for ph in ordered_placeholders:
+                    src_name = placeholder_to_name.get(ph, "")
+                    if not src_name or src_name in seen:
+                        continue
+                    seen.add(src_name)
+                    en_name = name_en_cache.get(src_name) or dict_loader.resolve_name(src_name) or ""
+                    if en_name:
+                        en_names.append(en_name)
+                base = ", ".join(en_names).strip()
+                if base:
+                    # 简单称呼词兜底
+                    suffix = ""
+                    if "哥" in zh_text:
+                        suffix = "bro"
+                    elif "姐" in zh_text or "嫂子" in zh_text:
+                        suffix = "sis"
+                    if suffix:
+                        base = f"{base}, {suffix}"
+                    end_punct = "!" if ("！" in zh_text or "!" in zh_text) else "."
+                    en_text = f"{base}{end_punct}"
+                    info(f"  {utt_id}: MT 输出仅标点，兜底用字典名生成: {en_text}")
             
             # 反作弊校验：确保输出没有占位符、<sep>、中文（这是最终输出，不允许系统痕迹）
             import re

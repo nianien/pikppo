@@ -210,6 +210,11 @@ class Manifest:
             "demux": {
                 "audio": "audio/{episode_stem}.wav",
             },
+            "sep": {
+                "vocals": "audio/{episode_stem}-vocals.wav",
+                "vocals_16k": "audio/{episode_stem}-vocals-16k.wav",
+                "accompaniment": "audio/{episode_stem}-accompaniment.wav",
+            },
             "asr": {
                 "asr_result": "asr/asr-result.json",  # SSOT：原始响应，包含完整语义信息
             },
@@ -224,11 +229,12 @@ class Manifest:
                 "mt_output": "mt/mt_output.jsonl",
             },
             "tts": {
-                "audio": "audio/tts.wav",
+                "audio": "audio/{episode_stem}-tts.wav",
                 "voice_assignment": "voice-assignment.json",
+                "sentence": "tts/sentence.json",  # TTS 时间戳/字幕数据
             },
             "mix": {
-                "audio": "audio/mix.wav",
+                "audio": "audio/{episode_stem}-mix.wav",
             },
             "burn": {
                 "video": "{episode_stem}-dubbed.mp4",

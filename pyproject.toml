@@ -43,7 +43,8 @@ dub = [
   "azure-cognitiveservices-speech>=1.32.0",
   "librosa>=0.10.0",
   "numpy>=1.24.0,<2.0.0",
-  "torchaudio>=2.0.0",  # Updated for Python 3.13 compatibility
+  "torchaudio==2.0.2",  # Locked to avoid torchcodec dependency issues
+  "soundfile>=0.12.0",  # Required for torchaudio 2.0.2 to save audio files
 ]
 
 [build-system]

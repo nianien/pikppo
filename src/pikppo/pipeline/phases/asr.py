@@ -36,7 +36,7 @@ class ASRPhase(Phase):
     version = "1.0.0"
     
     def requires(self) -> list[str]:
-        """需要 demux.audio。"""
+        """需要 demux.audio（原始音频，16kHz mono 格式，符合 ASR API 要求）。"""
         return ["demux.audio"]
     
     def provides(self) -> list[str]:
@@ -59,7 +59,7 @@ class ASRPhase(Phase):
         4. 解析为 IR（Utterance[]）
         5. 保存 IR 和 raw response
         """
-        # 获取输入
+        # 获取输入（使用原始音频，16kHz mono 格式，符合 ASR API 要求）
         audio_artifact = inputs["demux.audio"]
         audio_path = Path(ctx.workspace) / audio_artifact.relpath
         

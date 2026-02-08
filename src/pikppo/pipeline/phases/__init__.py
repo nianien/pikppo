@@ -2,6 +2,7 @@
 Pipeline phases registration.
 """
 from .demux import DemuxPhase
+from .sep import SepPhase
 from .asr import ASRPhase
 from .sub import SubtitlePhase
 from .mt import MTPhase
@@ -12,7 +13,8 @@ from .burn import BurnPhase
 
 # 顺序即依赖顺序（线性链）
 ALL_PHASES = [
-    DemuxPhase(),
+    DemuxPhase(),        # 从视频提取音频
+    SepPhase(),          # 人声分离（Demucs，已锁）
     ASRPhase(),          # ASR 识别（只做识别，输出原始响应）
     SubtitlePhase(),     # 字幕后处理（从 ASR raw 生成字幕）
     MTPhase(),           # 机器翻译（只调模型，输出英文整段文本）

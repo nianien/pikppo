@@ -1,4 +1,4 @@
-#!/Users/skyfalling/Workspace/express/python/pikppo/.venv/bin/python
+#!/Users/skyfalling/Workspace/express/python/pikppo/.venv/bin/python3.11
 
 """Takes a badly formatted SRT file and outputs a strictly valid one."""
 

@@ -145,11 +145,14 @@ class PipelineConfig:
     translator_list: list[str] = None  # 按顺序尝试的翻译器列表（默认：["gemini", "noop"]）
     translate_chunk_size: int = 50  # 批量翻译的块大小
     # TTS 设置
+    tts_engine: str = "volcengine"  # TTS 引擎选择："azure" 或 "volcengine"（火山引擎，默认）
     tts_target_lufs: float = -16.0  # TTS 响度归一化目标（-16 LUFS 适合 TikTok/短剧，-14 适合 YouTube）
     tts_mix_mode: str = "ducking"  # 混音模式：ducking（侧链压缩，推荐）或 simple（简单混合）
     tts_scene_type: str = "quiet"  # 场景类型：quiet（安静，更激进，默认）、normal（正常）、intense（激烈）
     tts_volume: float = 1.4  # TTS 音频音量（默认 1.4，稍微放大确保清晰）
-    tts_mute_original: bool = False  # 完全静音原音频（只保留 TTS，会丢失 BGM/环境声）
+    # 默认：保留背景音乐 + 英文译音 + 原声气息（原声人声做强烈 ducking，而不是完全静音）
+    # 说明：tts_mute_original 仍保留给旧的 synthesize_subtitle_to_audio 用，但在新 pipeline 的 mix 阶段默认不使用。
+    tts_mute_original: bool = False
     tts_max_workers: int = 4  # TTS 并发 worker 数量（默认 4，可根据网络/配额调整）
 
     # 豆包大模型 ASR 配置（当前使用的 ASR 引擎）

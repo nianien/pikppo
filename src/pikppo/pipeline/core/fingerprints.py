@@ -9,6 +9,26 @@ from typing import Any, Dict, List
 from pikppo.pipeline.core.types import Artifact
 
 
+def _remove_none_and_empty(obj: Any) -> Any:
+    """递归移除 None 值和空字典/列表。"""
+    if isinstance(obj, dict):
+        result = {}
+        for k, v in obj.items():
+            v_cleaned = _remove_none_and_empty(v)
+            if v_cleaned is not None and v_cleaned != {} and v_cleaned != []:
+                result[k] = v_cleaned
+        return result
+    elif isinstance(obj, list):
+        result = []
+        for item in obj:
+            item_cleaned = _remove_none_and_empty(item)
+            if item_cleaned is not None and item_cleaned != {} and item_cleaned != []:
+                result.append(item_cleaned)
+        return result
+    else:
+        return obj
+
+
 def canonicalize_json(obj: Any) -> str:
     """
     规范化 JSON（排序 key、去 null、稳定浮点格式）。
@@ -19,8 +39,10 @@ def canonicalize_json(obj: Any) -> str:
     Returns:
         规范化后的 JSON 字符串
     """
+    # 先移除 None 和空值
+    cleaned = _remove_none_and_empty(obj)
     return json.dumps(
-        obj,
+        cleaned,
         sort_keys=True,
         ensure_ascii=False,
         separators=(',', ':'),

@@ -3,7 +3,7 @@ PhaseRunner: 执行协议 + should_run 决策
 """
 import traceback
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from pikppo.pipeline.core.types import Artifact, ErrorInfo, RunContext, Status, ResolvedOutputs
 from pikppo.pipeline.core.phase import Phase
@@ -29,6 +29,7 @@ class PhaseRunner:
         phase: Phase,
         *,
         force: bool = False,
+        config: Optional[Dict[str, Any]] = None,
     ) -> tuple[bool, Optional[str]]:
         """
         判断 phase 是否需要运行。
@@ -45,48 +46,55 @@ class PhaseRunner:
         if phase_data is None:
             return True, "not in manifest"
         
-        # 2. phase.status != succeeded
-        if phase_data.get("status") != "succeeded":
-            return True, f"status is {phase_data.get('status')}"
-        
-        # 3. phase.version 变化
+        # 2. phase.version 变化
         if phase_data.get("version") != phase.version:
             return True, f"version changed: {phase_data.get('version')} -> {phase.version}"
         
-        # 4. inputs_fingerprint 变化
+        # 3. 检查输入文件（requires）是否存在
         required_keys = phase.requires()
-        artifacts = self.manifest.get_all_artifacts()
-        
-        try:
-            current_inputs_fp = compute_inputs_fingerprint(required_keys, artifacts)
-            stored_inputs_fp = phase_data.get("inputs_fingerprint")
-            if stored_inputs_fp != current_inputs_fp:
-                return True, f"inputs_fingerprint changed: {stored_inputs_fp} -> {current_inputs_fp}"
-        except ValueError as e:
-            # 缺少必需的 artifact
-            return True, f"missing required artifact: {e}"
-        
-        # 5. config_fingerprint 变化
-        # 需要从 manifest 中获取 config（这里简化处理，实际应该从 RunContext 获取）
-        # 暂时跳过，因为 RunContext 不在 should_run 参数中
-        
-        # 6. provides 的输出 artifact 不存在或 fingerprint 不匹配
-        provides_keys = phase.provides()
-        for key in provides_keys:
+        for key in required_keys:
             try:
                 artifact = self.manifest.get_artifact(key)
             except ValueError:
-                return True, f"output artifact '{key}' not found"
+                return True, f"required input artifact '{key}' not found in manifest"
+            
+            # 检查输入文件是否存在
+            artifact_path = self.workspace / artifact.relpath
+            if not artifact_path.exists():
+                return True, f"required input artifact '{key}' file not found: {artifact_path}"
+        
+        # 4. 检查输出文件是否存在和 fingerprint 是否匹配
+        # 核心逻辑：检查上次执行的结果（manifest 中 phase 的 artifacts）有没有被变动
+        # 只检查上次实际生成的 artifact，不检查 provides() 声明的所有 artifact
+        phase_artifacts = phase_data.get("artifacts", {})
+        if not phase_artifacts:
+            # 如果上次没有生成任何 artifact，需要重新运行
+            return True, "no artifacts found in phase data"
+        
+        for key, artifact_data in phase_artifacts.items():
+            # 从 phase 的 artifacts 中获取 artifact 信息
+            relpath = artifact_data.get("relpath")
+            if not relpath:
+                return True, f"output artifact '{key}' has no relpath in phase data"
             
             # 检查文件是否存在（使用 workspace / relpath）
-            artifact_path = self.workspace / artifact.relpath
+            artifact_path = self.workspace / relpath
             if not artifact_path.exists():
                 return True, f"output artifact '{key}' file not found: {artifact_path}"
             
             # 检查 fingerprint 是否匹配（所有 outputs 都是 file，一律 hash_file）
+            # 如果 fingerprint 不匹配，说明文件被变动了，需要重新运行
+            stored_fp = artifact_data.get("fingerprint")
+            if not stored_fp:
+                return True, f"output artifact '{key}' has no fingerprint in phase data"
+            
             current_fp = hash_file(artifact_path)
-            if artifact.fingerprint != current_fp:
-                return True, f"output artifact '{key}' fingerprint mismatch: {artifact.fingerprint} != {current_fp}"
+            if stored_fp != current_fp:
+                return True, f"output artifact '{key}' fingerprint mismatch: stored={stored_fp[:16]}... current={current_fp[:16]}..."
+        
+        # 5. 如果 status 不是 "succeeded"，也需要重新运行
+        if phase_data.get("status") != "succeeded":
+            return True, f"status is {phase_data.get('status')} (expected 'succeeded')"
         
         # 所有检查通过，可以 skip
         return False, "all checks passed"
@@ -184,7 +192,7 @@ class PhaseRunner:
             是否成功
         """
         # 检查是否需要运行
-        should_run, reason = self.should_run(phase, force=force)
+        should_run, reason = self.should_run(phase, force=force, config=ctx.config)
         
         if not should_run:
             info(f"Phase '{phase.name}' skipped: {reason}")
