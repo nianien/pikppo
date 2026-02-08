@@ -65,3 +65,4 @@ temp/
 .gcp
 /videos/
 /test_output/
+/.venv/
