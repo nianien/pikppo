@@ -11,7 +11,7 @@ from pikppo.pipeline.core.manifest import Manifest, now_iso
 from pikppo.pipeline.core.fingerprints import (
     compute_inputs_fingerprint,
     compute_config_fingerprint,
-    hash_file,
+    hash_path,
 )
 from pikppo.pipeline.core.atomic import atomic_copy
 from pikppo.utils.logger import info, warning, error
@@ -33,23 +33,32 @@ class PhaseRunner:
     ) -> tuple[bool, Optional[str]]:
         """
         判断 phase 是否需要运行。
-        
+
+        检查顺序：
+        1. force 标记
+        2. manifest 中是否有记录
+        3. phase.version 是否变化
+        4. inputs fingerprint 是否变化（上游产物内容变了）
+        5. config fingerprint 是否变化（配置参数变了）
+        6. 输出文件是否存在且 fingerprint 匹配
+        7. status 是否为 succeeded
+
         Returns:
             (should_run, reason) 元组
         """
         if force:
             return True, "forced"
-        
+
         phase_data = self.manifest.get_phase_data(phase.name)
-        
+
         # 1. manifest 中没有该 phase 记录
         if phase_data is None:
             return True, "not in manifest"
-        
+
         # 2. phase.version 变化
         if phase_data.get("version") != phase.version:
             return True, f"version changed: {phase_data.get('version')} -> {phase.version}"
-        
+
         # 3. 检查输入文件（requires）是否存在
         required_keys = phase.requires()
         for key in required_keys:
@@ -57,45 +66,58 @@ class PhaseRunner:
                 artifact = self.manifest.get_artifact(key)
             except ValueError:
                 return True, f"required input artifact '{key}' not found in manifest"
-            
-            # 检查输入文件是否存在
+
             artifact_path = self.workspace / artifact.relpath
             if not artifact_path.exists():
                 return True, f"required input artifact '{key}' file not found: {artifact_path}"
-        
-        # 4. 检查输出文件是否存在和 fingerprint 是否匹配
-        # 核心逻辑：检查上次执行的结果（manifest 中 phase 的 artifacts）有没有被变动
-        # 只检查上次实际生成的 artifact，不检查 provides() 声明的所有 artifact
+
+        # 4. inputs fingerprint 变化（上游产物内容变了 → 需要重跑）
+        stored_inputs_fp = phase_data.get("inputs_fingerprint")
+        if stored_inputs_fp and required_keys:
+            try:
+                artifacts = self.manifest.get_all_artifacts()
+                current_inputs_fp = compute_inputs_fingerprint(required_keys, artifacts)
+                if stored_inputs_fp != current_inputs_fp:
+                    return True, f"inputs fingerprint changed"
+            except Exception:
+                pass  # fingerprint 计算失败不阻塞，退化到后续检查
+
+        # 5. config fingerprint 变化（配置参数变了 → 需要重跑）
+        stored_config_fp = phase_data.get("config_fingerprint")
+        if stored_config_fp and config is not None:
+            try:
+                current_config_fp = compute_config_fingerprint(phase.name, config)
+                if stored_config_fp != current_config_fp:
+                    return True, f"config fingerprint changed"
+            except Exception:
+                pass
+
+        # 6. 检查输出文件是否存在和 fingerprint 是否匹配
         phase_artifacts = phase_data.get("artifacts", {})
         if not phase_artifacts:
-            # 如果上次没有生成任何 artifact，需要重新运行
             return True, "no artifacts found in phase data"
-        
+
         for key, artifact_data in phase_artifacts.items():
-            # 从 phase 的 artifacts 中获取 artifact 信息
             relpath = artifact_data.get("relpath")
             if not relpath:
                 return True, f"output artifact '{key}' has no relpath in phase data"
-            
-            # 检查文件是否存在（使用 workspace / relpath）
+
             artifact_path = self.workspace / relpath
             if not artifact_path.exists():
                 return True, f"output artifact '{key}' file not found: {artifact_path}"
-            
-            # 检查 fingerprint 是否匹配（所有 outputs 都是 file，一律 hash_file）
-            # 如果 fingerprint 不匹配，说明文件被变动了，需要重新运行
+
             stored_fp = artifact_data.get("fingerprint")
             if not stored_fp:
                 return True, f"output artifact '{key}' has no fingerprint in phase data"
-            
-            current_fp = hash_file(artifact_path)
+
+            current_fp = hash_path(artifact_path)
             if stored_fp != current_fp:
                 return True, f"output artifact '{key}' fingerprint mismatch: stored={stored_fp[:16]}... current={current_fp[:16]}..."
-        
-        # 5. 如果 status 不是 "succeeded"，也需要重新运行
+
+        # 7. 如果 status 不是 "succeeded"，也需要重新运行
         if phase_data.get("status") != "succeeded":
             return True, f"status is {phase_data.get('status')} (expected 'succeeded')"
-        
+
         # 所有检查通过，可以 skip
         return False, "all checks passed"
     
@@ -283,9 +305,9 @@ class PhaseRunner:
                     # 2) 确定 artifact kind
                     kind = self._guess_artifact_kind(abs_path)
                     
-                    # 3) 计算 fingerprint（所有 outputs 都是 file，一律 hash_file）
-                    from pikppo.pipeline.core.fingerprints import hash_file
-                    fingerprint = hash_file(abs_path)
+                    # 3) 计算 fingerprint（支持文件和目录）
+                    from pikppo.pipeline.core.fingerprints import hash_path
+                    fingerprint = hash_path(abs_path)
                     
                     artifact = Artifact(
                         key=key,

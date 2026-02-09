@@ -46,36 +46,54 @@ MAX_RETRIES = 3
 def clean_translation_output(text: str) -> str:
     """
     清理翻译输出，移除所有系统标记。
-    
+
     移除：
     - <sep> 标记
     - <<NAME_x>> 占位符
     - <<NAME_x:...>> 占位符
     - <SLANG:...> 标记
-    
+
     Args:
         text: 原始翻译输出
-    
+
     Returns:
         清理后的文本
     """
     if not text:
         return text
-    
+
     # 移除 <sep> 标记（可能带空格）
     text = re.sub(r'\s*<sep>\s*', ' ', text)
-    
+
     # 移除 NAME 占位符（<<NAME_0>> 或 <<NAME_0:...>>）
     text = re.sub(r'<<NAME_\d+(?::[^>]*)?>>', '', text)
-    
+
     # 移除 SLANG 标记（<SLANG:key>）
     text = re.sub(r'<SLANG:[^>]+>', '', text)
-    
+
     # 清理多余空格
     text = re.sub(r'\s+', ' ', text)
     text = text.strip()
-    
+
     return text
+
+
+def is_only_punctuation(text: str) -> bool:
+    """
+    检查文本是否只包含标点符号和空白字符（没有实际单词）。
+
+    Args:
+        text: 要检查的文本
+
+    Returns:
+        True 如果文本只包含标点/空白，False 如果有实际内容
+    """
+    if not text:
+        return True
+    # 移除所有标点符号和空白字符，检查是否还有内容
+    text_without_punc = re.sub(r'[^\w\s]', '', text)
+    text_without_punc = re.sub(r'\s+', '', text_without_punc)
+    return not text_without_punc
 
 
 def pick_k(zh_tps: float) -> float:
@@ -400,18 +418,7 @@ def resegment_utterance(
     # Step 2: 按自然切分点切分文本（语义断句）
     text_segments = []
     current_pos = 0
-    
-    # 辅助函数：检查文本是否只包含标点符号/空白字符
-    def is_only_punctuation(text: str) -> bool:
-        """检查文本是否只包含标点符号和空白字符（没有实际单词）。"""
-        if not text:
-            return True
-        # 移除所有标点符号和空白字符，检查是否还有内容
-        import re
-        text_without_punc = re.sub(r'[^\w\s]', '', text)
-        text_without_punc = re.sub(r'\s+', '', text_without_punc)
-        return not text_without_punc
-    
+
     # 优先在标点处切分
     if punctuation_positions:
         for punc_pos in punctuation_positions:

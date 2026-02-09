@@ -207,3 +207,34 @@ class PipelineConfig:
 
     # 声线池配置
     voice_pool_path: str | None = None  # 声线池配置文件路径（None = 使用默认）
+
+    # ============================================================
+    # Utterance Normalization 配置（Visual SSOT 生成）
+    # ============================================================
+    # 核心理念：ASR raw utterances 不是 SSOT，需要基于 speech + silence
+    # 重建视觉/听觉友好的 utterance 边界，作为后续所有阶段的唯一 SSOT。
+
+    # 静音切分阈值（ms）：两个发声段之间的静音超过此值则切分 utterance
+    # - 小：过度切分，utterance 太碎
+    # - 大：不同句子被合并
+    utt_norm_silence_split_threshold_ms: int = 450  # 范围: 300-600
+
+    # 最小 utterance 时长（ms）：避免过短的 utterance
+    # - 小：可能出现单词级碎片
+    # - 大：可能强制合并不该合并的内容
+    utt_norm_min_duration_ms: int = 900  # 范围: 500-1500
+
+    # 最大 utterance 时长（ms）：避免过长的 utterance
+    # - 小：强制切分完整长句
+    # - 大：字幕太长不易阅读
+    utt_norm_max_duration_ms: int = 8000  # 范围: 5000-12000
+
+    # 尾部静音上限（ms）：utterance end 最多包含多少静音
+    # - 小：结束太突兀
+    # - 大：吃掉太多静音影响节奏
+    utt_norm_trailing_silence_cap_ms: int = 350  # 范围: 200-500
+
+    # 是否保留 gap 为独立字段（推荐 True）
+    # - True：保留原始信息，后续阶段可灵活使用 gap_after_ms
+    # - False：gap 被吞进 end_ms，简化但丢失信息
+    utt_norm_keep_gap_as_field: bool = True

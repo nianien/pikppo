@@ -1,10 +1,16 @@
 """
 混音：TTS + accompaniment/ducking
+
+Functions:
+- mix_audio: Original function (uses pre-concatenated TTS audio)
+- mix_timeline: New function (Timeline-First Architecture using adelay)
 """
 import subprocess
 from pathlib import Path
-from typing import Optional
+from typing import Optional, List
 
+from pikppo.schema.dub_manifest import DubManifest
+from pikppo.schema.tts_report import TTSReport, TTSSegmentStatus
 from pikppo.utils.logger import info
 
 
@@ -179,3 +185,261 @@ def mix_audio(
         raise RuntimeError(
             f"FFmpeg mix failed: {e.stderr or e.stdout or 'Unknown error'}"
         ) from e
+
+
+def mix_timeline(
+    dub_manifest: DubManifest,
+    tts_report: TTSReport,
+    segments_dir: str,
+    video_path: str,
+    *,
+    accompaniment_path: Optional[str] = None,
+    vocals_path: Optional[str] = None,
+    mute_original: bool = True,
+    mix_mode: str = "ducking",
+    tts_volume: float = 1.0,
+    accompaniment_volume: float = 0.8,
+    vocals_volume: float = 0.15,
+    duck_threshold: float = 0.05,
+    duck_ratio: float = 10.0,
+    duck_attack_ms: float = 20.0,
+    duck_release_ms: float = 400.0,
+    target_lufs: float = -16.0,
+    true_peak: float = -1.0,
+    output_path: str,
+) -> int:
+    """
+    Timeline-based mixing using adelay for segment placement.
+
+    Uses dub_manifest for timing information and places each TTS segment
+    at its correct start_ms position using FFmpeg's adelay filter.
+    Forces exact duration using apad + atrim.
+
+    Args:
+        dub_manifest: DubManifest object (SSOT for timing)
+        tts_report: TTSReport object (segment info)
+        segments_dir: Directory containing per-segment WAV files
+        video_path: Original video file path
+        accompaniment_path: Accompaniment audio path (optional)
+        vocals_path: Original vocals path (optional)
+        mute_original: Mute original dialogue (default True)
+        mix_mode: Mix mode (ducking or simple)
+        tts_volume: TTS volume multiplier
+        accompaniment_volume: Accompaniment volume multiplier
+        vocals_volume: Vocals volume multiplier
+        duck_*: Ducking parameters
+        target_lufs: Target loudness
+        true_peak: True peak limit
+        output_path: Output audio file path
+
+    Returns:
+        Actual duration in milliseconds
+    """
+    video_file = Path(video_path)
+    output_file = Path(output_path)
+    segments_path = Path(segments_dir)
+    accomp_file = Path(accompaniment_path) if accompaniment_path else None
+    vocals_file = Path(vocals_path) if vocals_path else None
+
+    if not video_file.exists():
+        raise FileNotFoundError(f"Video file not found: {video_path}")
+
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+
+    # Target duration from manifest
+    target_duration_ms = dub_manifest.audio_duration_ms
+    target_duration_sec = target_duration_ms / 1000.0
+
+    # Build list of valid segments with their timing
+    segment_info: List[tuple] = []  # (seg_path, start_ms, utt_id)
+
+    for utt in dub_manifest.utterances:
+        utt_id = utt.utt_id
+        start_ms = utt.start_ms
+
+        # Find corresponding segment file
+        seg_path = segments_path / f"seg_{utt_id}.wav"
+        if not seg_path.exists():
+            info(f"Segment not found: {seg_path}, skipping")
+            continue
+
+        # Check if segment was successfully synthesized
+        seg_report = next(
+            (s for s in tts_report.segments if s.utt_id == utt_id),
+            None
+        )
+        if seg_report and seg_report.status == TTSSegmentStatus.FAILED:
+            info(f"Segment {utt_id} failed synthesis, skipping")
+            continue
+
+        segment_info.append((str(seg_path), start_ms, utt_id))
+
+    if not segment_info:
+        raise ValueError("No valid segments to mix")
+
+    info(f"Timeline mixing: {len(segment_info)} segments, target duration: {target_duration_sec:.2f}s")
+
+    # Build FFmpeg command
+    # Input structure:
+    # 0: video (for optional audio fallback)
+    # 1..N: segment files
+    # N+1: accompaniment (if exists)
+    # N+2: vocals (if exists)
+
+    inputs = [str(video_file)]
+    for seg_path, _, _ in segment_info:
+        inputs.append(seg_path)
+
+    accomp_input_idx = None
+    vocals_input_idx = None
+
+    has_accomp = accomp_file is not None and accomp_file.exists()
+    has_vocals = vocals_file is not None and vocals_file.exists()
+
+    if has_accomp:
+        accomp_input_idx = len(inputs)
+        inputs.append(str(accomp_file))
+
+    if has_vocals:
+        vocals_input_idx = len(inputs)
+        inputs.append(str(vocals_file))
+
+    # Build filter graph
+    filter_parts = []
+    segment_labels = []
+
+    # Process each segment: apply adelay to place at correct position
+    for i, (seg_path, start_ms, utt_id) in enumerate(segment_info):
+        input_idx = i + 1  # Segment inputs start at index 1
+        label = f"s{i}"
+
+        # adelay: delay both channels (L|R format) by start_ms milliseconds
+        # Volume adjustment applied
+        filter_parts.append(
+            f"[{input_idx}:a]volume={tts_volume},adelay={start_ms}|{start_ms}[{label}]"
+        )
+        segment_labels.append(f"[{label}]")
+
+    # Mix all TTS segments together
+    if len(segment_labels) > 1:
+        tts_mix_inputs = "".join(segment_labels)
+        filter_parts.append(
+            f"{tts_mix_inputs}amix=inputs={len(segment_labels)}:duration=longest:normalize=0[tts_raw]"
+        )
+    else:
+        # Single segment - just rename
+        filter_parts.append(f"{segment_labels[0]}anull[tts_raw]")
+
+    # Prepare sidechain if needed for ducking
+    if not mute_original and mix_mode == "ducking":
+        filter_parts.append("[tts_raw]asplit=2[tts_sc][tts_mix]")
+    else:
+        filter_parts.append("[tts_raw]anull[tts_mix]")
+
+    # Background audio
+    if has_accomp:
+        filter_parts.append(f"[{accomp_input_idx}:a]volume={accompaniment_volume}[bg]")
+    else:
+        filter_parts.append("[0:a]anull[bg]")
+
+    # Original vocals for ducking
+    if not mute_original:
+        if has_vocals:
+            filter_parts.append(f"[{vocals_input_idx}:a]volume={vocals_volume}[orig]")
+        else:
+            filter_parts.append(f"[0:a]volume={vocals_volume}[orig]")
+
+        if mix_mode == "ducking":
+            filter_parts.append(
+                f"[orig][tts_sc]sidechaincompress="
+                f"threshold={duck_threshold}:"
+                f"ratio={duck_ratio}:"
+                f"attack={duck_attack_ms}:"
+                f"release={duck_release_ms}:"
+                f"detection=peak:link=maximum[orig_duck]"
+            )
+        else:
+            filter_parts.append("[orig]anull[orig_duck]")
+
+        filter_parts.append(
+            "[bg][orig_duck][tts_mix]amix=inputs=3:duration=longest:weights=1 1 3:normalize=0[mix_raw]"
+        )
+    else:
+        # Mute original: only BGM + TTS
+        filter_parts.append(
+            "[bg][tts_mix]amix=inputs=2:duration=longest:weights=1 3:normalize=0[mix_raw]"
+        )
+
+    # Force exact duration with apad + atrim
+    # apad: pad with silence to reach target duration
+    # atrim: trim to exact target duration
+    filter_parts.append(
+        f"[mix_raw]apad=whole_dur={target_duration_sec},"
+        f"atrim=duration={target_duration_sec}[mix_dur]"
+    )
+
+    # Loudness normalization
+    filter_parts.append(
+        f"[mix_dur]loudnorm=I={target_lufs}:TP={true_peak}:LRA=11:linear=true[final]"
+    )
+
+    filter_complex = ";".join(filter_parts)
+
+    # Build ffmpeg command
+    cmd = ["ffmpeg"]
+    for input_file in inputs:
+        cmd.extend(["-i", input_file])
+
+    cmd.extend([
+        "-filter_complex", filter_complex,
+        "-map", "[final]",
+        "-acodec", "pcm_s16le",
+        "-ar", "24000",
+        "-ac", "1",
+        "-y",
+        str(output_file),
+    ])
+
+    info(
+        f"Timeline mixing: {len(segment_info)} segments, "
+        f"mute_original={mute_original}, mode={mix_mode}, "
+        f"has_accomp={has_accomp}, has_vocals={has_vocals}"
+    )
+
+    try:
+        result = subprocess.run(
+            cmd,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        info(f"Mix completed: {output_file.name}")
+    except subprocess.CalledProcessError as e:
+        # Print stderr for debugging
+        error_msg = e.stderr or e.stdout or "Unknown error"
+        info(f"FFmpeg stderr: {error_msg[:1000]}")
+        raise RuntimeError(f"FFmpeg mix failed: {error_msg}") from e
+
+    # Verify output duration
+    actual_duration_ms = _probe_duration_ms(str(output_file))
+    info(f"Output duration: {actual_duration_ms}ms (target: {target_duration_ms}ms)")
+
+    return actual_duration_ms
+
+
+def _probe_duration_ms(audio_path: str) -> int:
+    """Probe audio duration using ffprobe."""
+    result = subprocess.run(
+        [
+            "ffprobe", "-v", "error",
+            "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1",
+            audio_path,
+        ],
+        capture_output=True,
+        text=True,
+    )
+    duration_str = result.stdout.strip()
+    if duration_str == "N/A" or not duration_str:
+        return 0
+    return int(float(duration_str) * 1000)

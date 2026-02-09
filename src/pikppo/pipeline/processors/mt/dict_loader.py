@@ -57,14 +57,19 @@ class DictLoader:
     def resolve_name(self, src_name: str) -> Optional[str]:
         """
         解析人名（从 names.json）。
-        
+
         Args:
             src_name: 中文人名
-        
+
         Returns:
             英文名或 None（如果不存在）
         """
-        return self.names.get(src_name)
+        entry = self.names.get(src_name)
+        if entry is None:
+            return None
+        if isinstance(entry, dict):
+            return entry.get("target")
+        return str(entry)
     
     def has_name(self, src_name: str) -> bool:
         """检查人名是否在字典中"""

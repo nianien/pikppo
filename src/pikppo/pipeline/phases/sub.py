@@ -165,14 +165,39 @@ class SubtitlePhase(Phase):
         phase_config = ctx.config.get("phases", {}).get("sub", {})
         postprofile = phase_config.get("postprofile", ctx.config.get("doubao_postprofile", "axis"))
         
+        # 获取 Utterance Normalization 配置（从 PipelineConfig）
+        # 这些参数控制如何从 word-level timestamps 重建视觉友好的 utterance 边界
+        utt_norm_config = {
+            "silence_split_threshold_ms": ctx.config.get(
+                "utt_norm_silence_split_threshold_ms", 450
+            ),
+            "min_utterance_duration_ms": ctx.config.get(
+                "utt_norm_min_duration_ms", 900
+            ),
+            "max_utterance_duration_ms": ctx.config.get(
+                "utt_norm_max_duration_ms", 8000
+            ),
+            "trailing_silence_cap_ms": ctx.config.get(
+                "utt_norm_trailing_silence_cap_ms", 350
+            ),
+            "keep_gap_as_field": ctx.config.get(
+                "utt_norm_keep_gap_as_field", True
+            ),
+        }
+
         info(f"Subtitle strategy: postprofile={postprofile}")
-        
+        info(f"Utterance Normalization: silence_split={utt_norm_config['silence_split_threshold_ms']}ms, "
+             f"min_dur={utt_norm_config['min_utterance_duration_ms']}ms, "
+             f"max_dur={utt_norm_config['max_utterance_duration_ms']}ms")
+
         try:
             # 调用 Processor 层生成 Subtitle Model (SubtitleModel)
-            # 直接从 raw_response 生成（SSOT，包含完整语义信息）
+            # 使用 Utterance Normalization 重建视觉友好的 utterance 边界
             result = srt_run(
-                raw_response=raw_response,  # 主要输入：raw_response（SSOT）
+                raw_response=raw_response,  # 主要输入：raw_response
                 postprofile=postprofile,
+                # Utterance Normalization 配置
+                **utt_norm_config,
             )
             
             # 从 ProcessorResult 提取 Subtitle Model (SSOT)

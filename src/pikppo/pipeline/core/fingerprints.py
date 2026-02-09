@@ -58,10 +58,10 @@ def hash_string(s: str) -> str:
 def hash_file(path: Path) -> str:
     """
     计算文件的 SHA256 hash。
-    
+
     Args:
         path: 文件路径
-    
+
     Returns:
         "sha256:..." 格式的 hash
     """
@@ -70,6 +70,53 @@ def hash_file(path: Path) -> str:
         for chunk in iter(lambda: f.read(1024 * 1024), b""):
             h.update(chunk)
     return f"sha256:{h.hexdigest()}"
+
+
+def hash_directory(path: Path) -> str:
+    """
+    计算目录的 SHA256 hash（基于所有文件的内容）。
+
+    按文件名排序后依次 hash 每个文件的内容，确保确定性。
+
+    Args:
+        path: 目录路径
+
+    Returns:
+        "sha256:..." 格式的 hash
+    """
+    h = hashlib.sha256()
+
+    # 获取目录下所有文件（递归），按相对路径排序
+    all_files = sorted(path.rglob("*"))
+
+    for file_path in all_files:
+        if file_path.is_file():
+            # 先 hash 相对路径（确保文件名变化会影响 hash）
+            rel_path = str(file_path.relative_to(path))
+            h.update(rel_path.encode("utf-8"))
+
+            # 再 hash 文件内容
+            with file_path.open("rb") as f:
+                for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                    h.update(chunk)
+
+    return f"sha256:{h.hexdigest()}"
+
+
+def hash_path(path: Path) -> str:
+    """
+    计算路径的 SHA256 hash（自动判断文件或目录）。
+
+    Args:
+        path: 文件或目录路径
+
+    Returns:
+        "sha256:..." 格式的 hash
+    """
+    if path.is_dir():
+        return hash_directory(path)
+    else:
+        return hash_file(path)
 
 
 def hash_json(obj: Any) -> str:

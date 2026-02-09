@@ -2,9 +2,14 @@
 构建 Subtitle Model v1.2（SSOT）
 
 职责：
-- 直接从 asr_result.json 的 utterances 生成 SSOT
+- 从 asr_result.json 提取 word-level timestamps
+- 使用 Utterance Normalization 重建视觉友好的 utterance 边界（真正的 SSOT）
 - 按照语义切分 cues
 - 根据 words 的时间轴生成 cue 的时间轴
+
+核心理念：
+- ASR raw utterances 不是 SSOT（模型导向，不是视觉友好）
+- 真正的 SSOT 基于 speech + silence 重建
 """
 from typing import Any, Dict, List, Optional, Tuple
 from pikppo.schema.subtitle_model import (
@@ -17,6 +22,13 @@ from pikppo.schema.subtitle_model import (
     EmotionInfo,
 )
 from pikppo.schema.types import Word
+from .utterance_normalization import (
+    normalize_utterances,
+    extract_all_words_from_raw_response,
+    extract_utterance_metadata,
+    NormalizationConfig,
+    NormalizedUtterance,
+)
 
 
 def normalize_speaker_id(speaker: str) -> str:
@@ -282,86 +294,6 @@ def _advance_word_idx(cue_text: str, words: List[Word], word_idx: int) -> int:
     return len(words)
 
 
-def _split_words_by_pause(words: List[Word], *, long_pause_ms: int) -> List[List[Word]]:
-    """
-    将 ASR 的 words 按“超长停顿”二次切分成多个 chunk。
-
-    SSOT 的 utterance 需要服务于翻译/TTS/预算等下游，因此必须避免被超长停顿“污染”：
-    - 如果同一 utterance 内存在显著空白（word gap），语义/听觉上已经不连续
-    - 必须拆分，否则会导致时间窗虚高、TTS/对齐被误导
-    """
-    if not words:
-        return []
-    if long_pause_ms <= 0:
-        return [words]
-
-    chunks: List[List[Word]] = []
-    cur: List[Word] = [words[0]]
-    for prev, curr in zip(words, words[1:]):
-        gap = int(curr.start_ms) - int(prev.end_ms)
-        if gap >= long_pause_ms:
-            chunks.append(cur)
-            cur = [curr]
-        else:
-            cur.append(curr)
-    if cur:
-        chunks.append(cur)
-    return chunks
-
-
-def _map_words_to_text_spans(utt_text: str, words: List[Word]) -> List[Tuple[int, int]]:
-    """
-    将 words 映射到 utt_text 的 (start_idx, end_idx) span（从左到右贪心匹配）。
-
-    目的：按 pause 切分后，尽量保留原文中的标点/符号（它们通常不在 words 中）。
-    """
-    spans: List[Tuple[int, int]] = []
-    if not utt_text or not words:
-        return spans
-
-    pos = 0
-    for w in words:
-        token = str(w.text or "")
-        if not token:
-            spans.append((-1, -1))
-            continue
-        idx = utt_text.find(token, pos)
-        if idx < 0:
-            spans.append((-1, -1))
-            continue
-        start = idx
-        end = idx + len(token)
-        spans.append((start, end))
-        pos = end
-    return spans
-
-
-def _extract_text_for_word_range(
-    utt_text: str,
-    word_spans: List[Tuple[int, int]],
-    start_word_idx: int,
-    end_word_idx_exclusive: int,
-    fallback_words: List[Word],
-) -> str:
-    """
-    从原 utterance 文本中提取一个 word 范围对应的子串（尽量保留标点）。
-    若 span 映射不完整，则回退为拼接 words.text。
-    """
-    if not utt_text or not word_spans or start_word_idx >= end_word_idx_exclusive:
-        return "".join(str(w.text or "") for w in fallback_words).strip()
-
-    start_span = word_spans[start_word_idx] if 0 <= start_word_idx < len(word_spans) else (-1, -1)
-    end_span = (
-        word_spans[end_word_idx_exclusive - 1]
-        if 0 <= end_word_idx_exclusive - 1 < len(word_spans)
-        else (-1, -1)
-    )
-    if start_span[0] >= 0 and end_span[1] >= 0 and start_span[0] < end_span[1]:
-        return utt_text[start_span[0] : end_span[1]].strip()
-
-    return "".join(str(w.text or "") for w in fallback_words).strip()
-
-
 def build_subtitle_model(
     raw_response: Dict[str, Any],
     *,
@@ -371,186 +303,137 @@ def build_subtitle_model(
     max_dur_ms: int = 2800,
     hard_punc: str = "。！？；",
     soft_punc: str = "，",
-    long_pause_ms: int = 1000,
+    # Utterance Normalization 配置
+    silence_split_threshold_ms: int = 450,
+    min_utterance_duration_ms: int = 900,
+    max_utterance_duration_ms: int = 8000,
+    trailing_silence_cap_ms: int = 350,
+    keep_gap_as_field: bool = True,
 ) -> SubtitleModel:
     """
-    直接从 asr_result.json 的 utterances 构建 Subtitle Model v1.2（SSOT）。
-    
+    从 asr_result.json 构建 Subtitle Model v1.2（SSOT）。
+
+    核心理念：
+    - ASR raw utterances 不是 SSOT（它们是模型导向的，不是视觉/听觉友好的）
+    - 真正的 SSOT 应该基于 word-level timestamps + silence 重建
+    - 使用 Utterance Normalization 重建视觉友好的 utterance 边界
+
     Args:
-        raw_response: ASR 原始响应（SSOT，包含完整语义信息）
+        raw_response: ASR 原始响应
         source_lang: 源语言代码（如 "zh", "en"），默认 "zh"
         audio_duration_ms: 音频时长（毫秒，可选）
-        max_chars: 最大字数阈值（用于语义切分）
-        max_dur_ms: 最大时长阈值（毫秒，用于语义切分）
+        max_chars: cue 最大字数阈值（用于语义切分）
+        max_dur_ms: cue 最大时长阈值（毫秒，用于语义切分）
         hard_punc: 硬标点（必切）
         soft_punc: 软标点（可切）
-    
+
+        # Utterance Normalization 配置：
+        silence_split_threshold_ms: 静音切分阈值（ms），超过则切分 utterance
+        min_utterance_duration_ms: 最小 utterance 时长（ms）
+        max_utterance_duration_ms: 最大 utterance 时长（ms）
+        trailing_silence_cap_ms: 尾部静音上限（ms）
+        keep_gap_as_field: 是否保留 gap 为独立字段
+
     Returns:
         SubtitleModel: 完整的字幕模型 v1.2（SSOT）
-    
-    注意：
-    - 直接从 raw_response 的 utterances 生成，不依赖 segments
-    - 按照语义切分 cues（基于标点、字数等）
-    - 根据 words 的时间轴生成 cue 的时间轴
     """
-    # 1. 从 raw_response 中提取原始 utterances
-    result = raw_response.get("result") or {}
-    raw_utterances = result.get("utterances") or []
-    
-    # 2. 构建 utterances 和 cues（直接遍历 raw_utterances；允许按 pause 二次拆分）
+    # 1. 从 ASR response 中提取所有 word-level timestamps
+    #    完全忽略 ASR 的 utterance 边界，只使用 words
+    all_words = extract_all_words_from_raw_response(raw_response)
+
+    if not all_words:
+        # 没有 words，返回空模型
+        return SubtitleModel(
+            schema=SchemaInfo(name="subtitle.model", version="1.2"),
+            audio={"duration_ms": audio_duration_ms} if audio_duration_ms else None,
+            utterances=[],
+        )
+
+    # 2. 使用 Utterance Normalization 重建 utterance 边界
+    #    这是真正的 SSOT：基于 speech + silence 重建视觉友好的边界
+    norm_config = NormalizationConfig(
+        silence_split_threshold_ms=silence_split_threshold_ms,
+        min_utterance_duration_ms=min_utterance_duration_ms,
+        max_utterance_duration_ms=max_utterance_duration_ms,
+        trailing_silence_cap_ms=trailing_silence_cap_ms,
+        keep_gap_as_field=keep_gap_as_field,
+    )
+    normalized_utts = normalize_utterances(all_words, norm_config)
+
+    # 3. 将 NormalizedUtterance 转换为 SubtitleUtterance
     utterances: List[SubtitleUtterance] = []
 
-    ssot_utt_index = 0
-
-    for raw_utt in raw_utterances:
-        # 从 asr-result.json 的 utterance 中获取 text 和时间
-        utt_text = str(raw_utt.get("text", "")).strip()
-
-        # 如果 text 为空，跳过（SSOT 不记录空 utterance）
+    for idx, norm_utt in enumerate(normalized_utts, start=1):
+        utt_text = norm_utt.text
         if not utt_text:
             continue
-        
-        # 规范化 speaker ID（从 raw_utt 的 additions 中获取）
-        additions = raw_utt.get("additions") or {}
-        raw_speaker = str(additions.get("speaker", "0"))
-        normalized_speaker = normalize_speaker_id(raw_speaker)
-        
-        # 解析 words（用于 pause 切分、计算语速和生成 cue 时间轴）
-        words: List[Word] = []
-        words_list = raw_utt.get("words") or []
-        for w in words_list:
-            words.append(Word(
-                start_ms=int(w.get("start_time", 0)),
-                end_ms=int(w.get("end_time", w.get("start_time", 0))),
-                text=str(w.get("text", "")).strip(),
-                speaker="",
-            ))
-        
-        # 提取 emotion（从 raw_utt 的 additions 中）
+
+        # 规范化 speaker ID
+        normalized_speaker = normalize_speaker_id(norm_utt.speaker)
+
+        # 提取 emotion 元数据（通过时间范围匹配）
+        metadata = extract_utterance_metadata(raw_response, norm_utt)
         utterance_emotion: Optional[EmotionInfo] = None
-        emotion_label = additions.get("emotion")
-        if emotion_label:
-            emotion_score = additions.get("emotion_score")
-            if emotion_score:
-                try:
-                    emotion_score = float(emotion_score)
-                except (ValueError, TypeError):
-                    emotion_score = None
-            else:
-                emotion_score = None
-            emotion_degree = additions.get("emotion_degree")
+        if metadata.get("emotion"):
             utterance_emotion = build_emotion_info(
-                emotion_label=emotion_label,
-                emotion_score=emotion_score,
-                emotion_degree=emotion_degree,
+                emotion_label=metadata.get("emotion"),
+                emotion_score=metadata.get("emotion_score"),
+                emotion_degree=metadata.get("emotion_degree"),
             )
-        
-        # 没有 words 时，无法按 pause 切分，且 cue 时间轴也无法可靠生成：退化为单条
-        if not words:
-            ssot_utt_index += 1
-            utterances.append(
-                SubtitleUtterance(
-                    utt_id=f"utt_{ssot_utt_index:04d}",
-                    speaker=normalized_speaker,
-                    start_ms=int(raw_utt.get("start_time", 0)),
-                    end_ms=int(raw_utt.get("end_time", int(raw_utt.get("start_time", 0)))),
-                    speech_rate=SpeechRate(zh_tps=0.0),
-                    emotion=utterance_emotion,
-                    cues=[
-                        SubtitleCue(
-                            start_ms=int(raw_utt.get("start_time", 0)),
-                            end_ms=int(raw_utt.get("end_time", int(raw_utt.get("start_time", 0)))),
-                            source=SourceText(lang=source_lang, text=utt_text),
-                        )
-                    ],
+
+        # 计算语速
+        zh_tps = calculate_speech_rate_zh_tps(norm_utt.words)
+
+        # 按照语义切分 cues
+        cue_data_list = semantic_split_text(
+            text=utt_text,
+            words=norm_utt.words,
+            max_chars=max_chars,
+            max_dur_ms=max_dur_ms,
+            hard_punc=hard_punc,
+            soft_punc=soft_punc,
+        )
+
+        cues: List[SubtitleCue] = []
+        for cue_text, cue_start_ms, cue_end_ms in cue_data_list:
+            cues.append(
+                SubtitleCue(
+                    start_ms=int(cue_start_ms),
+                    end_ms=int(cue_end_ms),
+                    source=SourceText(lang=source_lang, text=str(cue_text)),
                 )
             )
+
+        if not cues:
             continue
 
-        # 规则：按超长停顿拆分 utterance
-        chunks = _split_words_by_pause(words, long_pause_ms=long_pause_ms)
-        word_spans = _map_words_to_text_spans(utt_text, words)
-
-        cursor = 0
-        for chunk_words in chunks:
-            if not chunk_words:
-                continue
-
-            start_word_idx = cursor
-            end_word_idx_exclusive = start_word_idx + len(chunk_words)
-            cursor = end_word_idx_exclusive
-
-            chunk_text = _extract_text_for_word_range(
-                utt_text=utt_text,
-                word_spans=word_spans,
-                start_word_idx=start_word_idx,
-                end_word_idx_exclusive=end_word_idx_exclusive,
-                fallback_words=chunk_words,
+        # utterance 时间范围使用 normalized 的边界（已经是 SSOT）
+        utterances.append(
+            SubtitleUtterance(
+                utt_id=f"utt_{idx:04d}",
+                speaker=normalized_speaker,
+                start_ms=norm_utt.start_ms,
+                end_ms=norm_utt.end_ms,
+                speech_rate=SpeechRate(zh_tps=float(zh_tps)),
+                emotion=utterance_emotion,
+                cues=cues,
             )
-            if not chunk_text:
-                continue
+        )
 
-            # 计算语速（从 chunk words）
-            zh_tps = calculate_speech_rate_zh_tps(chunk_words)
-
-            # 按照语义切分 cues（在 chunk 内）
-            cue_data_list = semantic_split_text(
-                text=chunk_text,
-                words=chunk_words,
-                max_chars=max_chars,
-                max_dur_ms=max_dur_ms,
-                hard_punc=hard_punc,
-                soft_punc=soft_punc,
-            )
-
-            cues: List[SubtitleCue] = []
-            for cue_text, cue_start_ms, cue_end_ms in cue_data_list:
-                cues.append(
-                    SubtitleCue(
-                        start_ms=int(cue_start_ms),
-                        end_ms=int(cue_end_ms),
-                        source=SourceText(lang=source_lang, text=str(cue_text)),
-                    )
-                )
-
-            if not cues:
-                continue
-
-            # SSOT hard invariant：utterance 时间范围 == cues 覆盖范围（避免被长空白污染）
-            utt_start_ms = int(min(cue.start_ms for cue in cues))
-            utt_end_ms = int(max(cue.end_ms for cue in cues))
-
-            ssot_utt_index += 1
-            utterances.append(
-                SubtitleUtterance(
-                    utt_id=f"utt_{ssot_utt_index:04d}",
-                    speaker=normalized_speaker,
-                    start_ms=utt_start_ms,
-                    end_ms=utt_end_ms,
-                    speech_rate=SpeechRate(zh_tps=float(zh_tps)),
-                    emotion=utterance_emotion,
-                    cues=cues,
-                )
-            )
-    
-    # 3. 构建 audio 元数据
+    # 4. 构建 audio 元数据
     audio: Optional[Dict[str, Any]] = None
     if audio_duration_ms is not None:
-        audio = {
-            "duration_ms": audio_duration_ms,
-        }
+        audio = {"duration_ms": audio_duration_ms}
     elif utterances:
         # 从最后一个 utterance 推断时长
         last_utt = utterances[-1]
-        audio = {
-            "duration_ms": last_utt.end_ms,
-        }
-    
-    # 4. 构建 Subtitle Model v1.2
+        audio = {"duration_ms": last_utt.end_ms}
+
+    # 5. 构建 Subtitle Model v1.2
     model = SubtitleModel(
         schema=SchemaInfo(name="subtitle.model", version="1.2"),
         audio=audio,
         utterances=utterances,
     )
-    
+
     return model

@@ -3,12 +3,13 @@ Align Phase: 时间对齐与重断句（不调模型）
 
 职责：
 - 将 mt 输出的英文整段文本映射到 SSOT 的时间骨架
-- 允许 utterance end 微延长
+- 生成 dub_manifest.json 作为 TTS/Mix 的 SSOT
 - 在 utterance 内重断句生成 segments[]
 - 导出 en.srt
 """
 import json
 import re
+import subprocess
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -19,10 +20,52 @@ from pikppo.pipeline.processors.mt.utterance_translate import (
     calculate_extend_ms,
     resegment_utterance,
 )
+from pikppo.schema.dub_manifest import (
+    DubManifest,
+    DubUtterance,
+    TTSPolicy,
+    dub_manifest_to_dict,
+)
 # NameMap 和 final_render_names 不再需要
 # MT phase 已经输出纯英文（无占位符），模型负责翻译人名
 from pikppo.utils.timecode import write_srt_from_segments
 from pikppo.utils.logger import info, warning
+
+
+def probe_duration_ms(audio_path: str) -> int:
+    """
+    Probe audio duration using ffprobe.
+
+    Args:
+        audio_path: Path to audio file
+
+    Returns:
+        Duration in milliseconds
+
+    Raises:
+        RuntimeError: If ffprobe fails or returns invalid duration
+    """
+    result = subprocess.run(
+        [
+            "ffprobe",
+            "-v", "error",
+            "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1",
+            audio_path,
+        ],
+        capture_output=True,
+        text=True,
+    )
+
+    if result.returncode != 0:
+        raise RuntimeError(f"ffprobe failed: {result.stderr}")
+
+    duration_str = result.stdout.strip()
+    if duration_str == "N/A" or not duration_str:
+        raise RuntimeError(f"ffprobe returned invalid duration for {audio_path}")
+
+    duration_sec = float(duration_str)
+    return int(duration_sec * 1000)
 
 
 # final_render_names 函数已移除
@@ -37,12 +80,12 @@ class AlignPhase(Phase):
     version = "1.0.0"
     
     def requires(self) -> list[str]:
-        """需要 subs.subtitle_model（SSOT）和 mt.mt_output。"""
-        return ["subs.subtitle_model", "mt.mt_output"]
-    
+        """需要 subs.subtitle_model（SSOT）、mt.mt_output、demux.audio。"""
+        return ["subs.subtitle_model", "mt.mt_output", "demux.audio"]
+
     def provides(self) -> list[str]:
-        """生成 subs.subtitle_align, subs.en_srt。"""
-        return ["subs.subtitle_align", "subs.en_srt"]
+        """生成 subs.subtitle_align, subs.en_srt, dub.dub_manifest。"""
+        return ["subs.subtitle_align", "subs.en_srt", "dub.dub_manifest"]
     
     def run(
         self,
@@ -86,7 +129,31 @@ class AlignPhase(Phase):
                     message=f"MT output file not found: {mt_output_path}",
                 ),
             )
-        
+
+        # Probe audio duration from demux.audio (SSOT for total duration)
+        audio_artifact = inputs["demux.audio"]
+        audio_path = Path(ctx.workspace) / audio_artifact.relpath
+        if not audio_path.exists():
+            return PhaseResult(
+                status="failed",
+                error=ErrorInfo(
+                    type="FileNotFoundError",
+                    message=f"Audio file not found: {audio_path}",
+                ),
+            )
+
+        try:
+            audio_duration_ms = probe_duration_ms(str(audio_path))
+            info(f"Probed audio duration: {audio_duration_ms}ms ({audio_duration_ms/1000:.2f}s)")
+        except RuntimeError as e:
+            return PhaseResult(
+                status="failed",
+                error=ErrorInfo(
+                    type="RuntimeError",
+                    message=str(e),
+                ),
+            )
+
         # 读取 Subtitle Model v1.2
         with open(subtitle_model_path, "r", encoding="utf-8") as f:
             model_data = json.load(f)
@@ -281,18 +348,97 @@ class AlignPhase(Phase):
         en_srt_path = outputs.get("subs.en_srt")
         write_srt_from_segments(all_segments_for_srt, str(en_srt_path), text_key="en_text")
         info(f"Saved en.srt: {len(all_segments_for_srt)} segments (所有占位符已替换)")
-        
+
+        # Generate dub_manifest.json (SSOT for TTS + Mix phases)
+        # Get TTS policy config
+        tts_config = ctx.config.get("phases", {}).get("tts", {})
+        default_max_rate = float(tts_config.get("max_rate", 1.3))
+        default_allow_extend_ms = int(tts_config.get("allow_extend_ms", 0))
+
+        min_tts_window_ms = int(tts_config.get("min_tts_window_ms", 900))
+        max_extend_cap_ms = int(tts_config.get("max_extend_cap_ms", 800))
+
+        dub_utterances = []
+        for utt in aligned_utterances:
+            utt_id = utt["utt_id"]
+            start_ms = utt["start_ms"]
+            end_ms = utt["end_ms"]
+            budget_ms = end_ms - start_ms
+
+            # Validate budget is positive
+            if budget_ms <= 0:
+                warning(f"Skipping utterance {utt_id}: invalid budget_ms={budget_ms}")
+                continue
+
+            # Get original Chinese text from SSOT
+            original_utt = next(
+                (u for u in utterances if u.get("utt_id") == utt_id),
+                None
+            )
+            text_zh = ""
+            if original_utt:
+                # Get text from cues
+                cues = original_utt.get("cues", [])
+                text_zh = " ".join(
+                    cue.get("source", {}).get("text", "")
+                    for cue in cues
+                )
+
+            # Short utterance protection: ensure TTS window >= min_tts_window_ms
+            # For budget < min_tts_window_ms, grant extra time so TTS has room to speak
+            utt_allow_extend_ms = default_allow_extend_ms
+            if budget_ms < min_tts_window_ms:
+                utt_allow_extend_ms = max(
+                    default_allow_extend_ms,
+                    min(min_tts_window_ms - budget_ms, max_extend_cap_ms),
+                )
+                info(f"  {utt_id}: budget={budget_ms}ms < {min_tts_window_ms}ms, allow_extend_ms={utt_allow_extend_ms}ms")
+
+            dub_utterances.append(
+                DubUtterance(
+                    utt_id=utt_id,
+                    start_ms=start_ms,
+                    end_ms=end_ms,
+                    budget_ms=budget_ms,
+                    text_zh=text_zh,
+                    text_en=utt["text"],  # English text for TTS
+                    speaker=utt["speaker"],
+                    tts_policy=TTSPolicy(
+                        max_rate=default_max_rate,
+                        allow_extend_ms=utt_allow_extend_ms,
+                    ),
+                    emotion=utt.get("emotion"),
+                    gender=None,  # Gender is assigned in TTS phase
+                )
+            )
+
+        # Create and validate manifest
+        dub_manifest = DubManifest(
+            audio_duration_ms=audio_duration_ms,
+            utterances=dub_utterances,
+        )
+
+        # Save dub_manifest.json
+        dub_manifest_path = outputs.get("dub.dub_manifest")
+        dub_manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(dub_manifest_path, "w", encoding="utf-8") as f:
+            json.dump(dub_manifest_to_dict(dub_manifest), f, indent=2, ensure_ascii=False)
+        info(f"Saved dub_manifest.json: {len(dub_utterances)} utterances, audio_duration_ms={audio_duration_ms}")
+
         # 返回 PhaseResult
         return PhaseResult(
             status="succeeded",
             outputs=[
                 "subs.subtitle_align",
                 "subs.en_srt",
+                "dub.dub_manifest",
             ],
             metrics={
                 "utterances_count": len(utterances),
                 "segments_count": len(all_segments_for_srt),
                 "total_extend_ms": total_extend_ms,
                 "need_retry_count": len(need_retry_utts),
+                "audio_duration_ms": audio_duration_ms,
+                "dub_utterances_count": len(dub_utterances),
             },
         )

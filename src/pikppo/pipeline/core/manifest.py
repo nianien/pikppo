@@ -206,6 +206,7 @@ class Manifest:
             obj = key
         
         # 路径映射规则（workspace-relative）
+        # 原则：只有多文件的 domain 才用子目录（audio/, tts/），其余拍平到根
         path_map = {
             "demux": {
                 "audio": "audio/{episode_stem}.wav",
@@ -216,22 +217,27 @@ class Manifest:
                 "accompaniment": "audio/{episode_stem}-accompaniment.wav",
             },
             "asr": {
-                "asr_result": "asr/asr-result.json",  # SSOT：原始响应，包含完整语义信息
+                "asr_result": "asr-result.json",
             },
             "subs": {
-                "subtitle_model": "subs/subtitle.model.json",  # SSOT（中文）
-                "subtitle_align": "subs/subtitle.align.json",  # 对齐后的 SSOT（英文翻译）
-                "zh_srt": "subs/zh.srt",                       # 视图（SRT 格式）
-                "en_srt": "subs/en.srt",
+                "subtitle_model": "subtitle.model.json",
+                "subtitle_align": "subtitle.align.json",
+                "zh_srt": "zh.srt",
+                "en_srt": "en.srt",
             },
             "mt": {
-                "mt_input": "mt/mt_input.jsonl",
-                "mt_output": "mt/mt_output.jsonl",
+                "mt_input": "mt_input.jsonl",
+                "mt_output": "mt_output.jsonl",
             },
             "tts": {
                 "audio": "audio/{episode_stem}-tts.wav",
                 "voice_assignment": "voice-assignment.json",
-                "sentence": "tts/sentence.json",  # TTS 时间戳/字幕数据
+                "sentence": "tts/sentence.json",
+                "segments_dir": "tts/segments",
+                "report": "tts/tts_report.json",
+            },
+            "dub": {
+                "dub_manifest": "dub_manifest.json",
             },
             "mix": {
                 "audio": "audio/{episode_stem}-mix.wav",
