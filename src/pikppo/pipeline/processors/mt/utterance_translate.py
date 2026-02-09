@@ -209,6 +209,12 @@ def build_utterance_translation_prompt(
             "1) The input may contain <<NAME_i:...>> which is a Chinese personal name.",
             "   Translate the name into English (pinyin or surname-based). Do NOT invent Western names.",
             "   Do NOT translate name meanings.",
+            "   IMPORTANT: Chinese kinship suffixes used as direct address next to <<NAME_i:...>>:",
+            "   - 哥 → bro",
+            "   - 姐 → sis",
+            "   - 嫂/嫂子 → 'sis' when used alone; omit when after a name",
+            "   (Use kinship terms only when they function as natural forms of address in English; otherwise omit.)",
+            "   Examples: <<NAME_0:平安>>哥 → Ping An, bro | <<NAME_0:小美>>姐 → Xiao Mei, sis",
             "2) Translate naturally. Do NOT translate word by word.",
             "3) This dialogue includes gambling / card-game slang. Use natural English equivalents.",
             "4) Output must be clean English for subtitles:",
@@ -261,6 +267,7 @@ while keeping the core meaning.
 
 Important: If the text contains <<NAME_x:...>> placeholders, translate them to English names.
 Do NOT keep any <<NAME_x>> or <<NAME_x:...>> in the output.
+Chinese kinship suffixes as direct address MUST be handled (哥→bro, 姐→sis, 嫂/嫂子→sis when alone, omit when after a name).
 
 About <sep> markers (if present):
 - <sep> indicates a light pause between phrases.
@@ -277,6 +284,7 @@ You may omit filler words, repetitions, or minor details, but keep the core mean
 
 Important: If the text contains <<NAME_x:...>> placeholders, translate them to English names.
 Do NOT keep any <<NAME_x>> or <<NAME_x:...>> in the output.
+Chinese kinship suffixes as direct address MUST be handled (哥→bro, 姐→sis, 嫂/嫂子→sis when alone, omit when after a name).
 
 About <sep> markers (if present):
 - <sep> indicates a light pause between phrases.
@@ -400,13 +408,25 @@ def resegment_utterance(
             "text": str,
         }
     """
+    # 可配置参数
+    no_resegment_threshold_ms = 1500  # 短句跳过 resegment
+    min_segment_ms = 500             # 最短 segment 时长
+
     if not en_text or not en_text.strip():
         return []
-    
+
     utt_duration_ms = utt_end_ms - utt_start_ms
     if utt_duration_ms <= 0:
         return []
-    
+
+    # 规则 A：短 utterance 直接输出一条 cue，不做重断句
+    if utt_duration_ms < no_resegment_threshold_ms:
+        return [{
+            "start_ms": utt_start_ms,
+            "end_ms": utt_end_ms,
+            "text": en_text.strip(),
+        }]
+
     # Step 1: 在英文文本中找自然切分点（标点、空格）
     # 优先级：标点（, . ? ! — ; :） > 空格 > 单词边界
     punctuation_pattern = r'[,\.\?!—;:]\s*'
@@ -514,7 +534,25 @@ def resegment_utterance(
     # 确保最后一个 segment 的 end 正好是 utt_end_ms
     if segments:
         segments[-1]["end_ms"] = utt_end_ms
-    
+
+    # 规则 B：合并过短的 segment（向前合并，防止闪烁字幕）
+    if len(segments) > 1:
+        merged = [segments[0]]
+        for seg in segments[1:]:
+            seg_dur = seg["end_ms"] - seg["start_ms"]
+            if seg_dur < min_segment_ms:
+                # 向前合并：文本拼接，end_ms 取后者
+                merged[-1]["text"] = merged[-1]["text"].rstrip() + " " + seg["text"]
+                merged[-1]["end_ms"] = seg["end_ms"]
+            else:
+                merged.append(seg)
+        # 检查第一个 segment 是否也过短（被后面的合并后可能不需要了，但防御性检查）
+        if len(merged) > 1 and (merged[0]["end_ms"] - merged[0]["start_ms"]) < min_segment_ms:
+            merged[1]["text"] = merged[0]["text"].rstrip() + " " + merged[1]["text"]
+            merged[1]["start_ms"] = merged[0]["start_ms"]
+            merged.pop(0)
+        segments = merged
+
     return segments
 
 

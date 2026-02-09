@@ -7,8 +7,9 @@ MT Phase: 机器翻译（只调模型，输出英文整段文本）
 - 不处理时间轴、不生成 SRT
 """
 import json
+import re
 from pathlib import Path
-from typing import Dict
+from typing import Dict, List
 
 from pikppo.pipeline.core.phase import Phase
 from pikppo.pipeline.core.types import Artifact, ErrorInfo, PhaseResult, RunContext, ResolvedOutputs
@@ -25,6 +26,33 @@ from pikppo.pipeline.processors.mt.name_map_complete import (
 )
 from pikppo.config.settings import get_openai_api_key
 from pikppo.utils.logger import info, error, warning
+
+
+def _build_name_variants(en_name: str, src_name: str) -> List[str]:
+    """
+    构建人名的常见误译变体列表，用于强制替换。
+
+    例如 en_name="Ping An", src_name="平安" →
+    ["Ping'an", "Pingan", "ping'an", "Peace", "An'an", "Anan"]
+    """
+    variants = []
+    parts = en_name.split()
+    if len(parts) == 2:
+        a, b = parts
+        variants.append(f"{a}'{b.lower()}")     # Ping'an
+        variants.append(f"{a}{b.lower()}")      # Pingan
+        variants.append(f"{a.lower()}'{b.lower()}")  # ping'an
+        variants.append(f"{a}{b}")              # PingAn
+    # 常见语义误译（中文名 → 英文含义）
+    semantic = {
+        "平安": ["Peace", "Safe", "Safety"],
+        "明": ["Bright", "Light"],
+        "安": ["An'an", "Anan"],
+    }
+    for cn_part, words in semantic.items():
+        if cn_part in src_name:
+            variants.extend(words)
+    return variants
 
 
 class MTPhase(Phase):
@@ -543,6 +571,35 @@ class MTPhase(Phase):
             from pikppo.pipeline.processors.mt.utterance_translate import clean_translation_output, is_only_punctuation
             en_text = clean_translation_output(en_text)
 
+            # 人名强制替换：如果模型忽略占位符指令，直接翻译了人名（如 Peace / An'an / Ping'an），
+            # 用字典中的正确英文名强制覆盖。
+            if placeholder_to_name and en_text:
+                for ph, src_name in placeholder_to_name.items():
+                    en_name = name_en_cache.get(src_name) or dict_loader.resolve_name(src_name)
+                    if not en_name:
+                        continue
+                    if en_name.lower() in en_text.lower():
+                        continue  # 已包含正确名字
+
+                    # 输出中不包含正确的英文名 → 尝试替换常见误译变体
+                    wrong_variants = _build_name_variants(en_name, src_name)
+                    replaced = False
+                    for variant in wrong_variants:
+                        pattern = re.compile(re.escape(variant), re.IGNORECASE)
+                        if pattern.search(en_text):
+                            en_text = pattern.sub(en_name, en_text)
+                            info(f"  {utt_id}: 人名强制替换 '{variant}' -> '{en_name}'")
+                            replaced = True
+                            break
+
+                    if not replaced:
+                        # 短句兜底：如果整句只有 1-2 个词（纯人名 utterance），直接替换
+                        stripped = en_text.strip().rstrip(".,!?;:")
+                        if len(stripped.split()) <= 2:
+                            punct = en_text[len(en_text.rstrip(".,!?;:")):] or "."
+                            en_text = en_name + punct
+                            info(f"  {utt_id}: 人名强制替换（短句兜底）'{stripped}' -> '{en_name}'")
+
             # 兜底：如果该 utterance 含有人名占位符，但清理后只剩标点/空白，
             # 说明上游模型输出质量极差；至少保证字典人名能带入，避免生成 ", !" 这种结果。
             if placeholder_to_name and (not en_text or is_only_punctuation(en_text)):
@@ -573,7 +630,7 @@ class MTPhase(Phase):
                     suffix = ""
                     if "哥" in zh_text:
                         suffix = "bro"
-                    elif "姐" in zh_text or "嫂子" in zh_text:
+                    elif "姐" in zh_text:
                         suffix = "sis"
                     if suffix:
                         base = f"{base}, {suffix}"

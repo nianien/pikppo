@@ -101,6 +101,7 @@ Important rules:
 - Do NOT invent Western names.
 - Do NOT translate semantic meaning of names.
 - Use pinyin or surname-based forms.
+- Chinese kinship suffixes as direct address MUST be handled (哥→bro, 姐→sis, 嫂/嫂子→sis when alone, omit when after a name).
 - Output must be clean, natural English with NO placeholders.
 
 Follow all constraints in the user prompt exactly."""
@@ -151,6 +152,7 @@ Important rules:
 - Do NOT invent Western names.
 - Do NOT translate semantic meaning of names.
 - Use pinyin or surname-based forms.
+- Chinese kinship suffixes as direct address MUST be handled (哥→bro, 姐→sis, 嫂/嫂子→sis when alone, omit when after a name).
 - Output must be clean, natural English with NO placeholders.
 
 Follow all constraints in the user prompt exactly."""
