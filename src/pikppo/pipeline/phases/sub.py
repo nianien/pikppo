@@ -295,6 +295,21 @@ class SubtitlePhase(Phase):
             render_srt(segments_for_srt, srt_path)
             info(f"Rendered SRT file to: {srt_path}")
             
+            # Side-effect: 更新 speakers_to_role.json（剧集级文件）
+            # 从 model_dict 提取 unique speakers，写入 {episode}/speakers_to_role.json
+            try:
+                unique_speakers = list(dict.fromkeys(
+                    utt_dict["speaker"]
+                    for utt_dict in model_dict["utterances"]
+                    if utt_dict.get("speaker")
+                ))
+                if unique_speakers:
+                    from pikppo.pipeline.processors.voiceprint.speakers_to_role import update_speakers_to_role
+                    str_path = str(workspace_path / "speakers_to_role.json")
+                    update_speakers_to_role(unique_speakers, str_path)
+            except Exception as e:
+                info(f"Warning: failed to update speakers_to_role.json: {e}")
+
             # 返回 PhaseResult：只声明哪些 outputs 成功
             return PhaseResult(
                 status="succeeded",

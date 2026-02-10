@@ -112,6 +112,19 @@ Examples:
         help="Path to config file (optional)"
     )
 
+    # bless command
+    bless_parser = subparsers.add_parser(
+        "bless",
+        help="Accept manual edits: re-fingerprint a phase's output artifacts",
+    )
+    bless_parser.add_argument("video", type=str, help="Input video file path")
+    bless_parser.add_argument(
+        "phase",
+        type=str,
+        choices=phase_names,
+        help="Phase whose outputs to re-fingerprint",
+    )
+
     # phases command
     subparsers.add_parser("phases", help="List available phases")
 
@@ -128,6 +141,64 @@ Examples:
         info("Available phases:")
         for phase in ALL_PHASES:
             info(f"  - {phase.name} (v{phase.version}): requires={phase.requires()}, provides={phase.provides()}")
+        return
+
+    if args.command == "bless":
+        video_path = Path(args.video)
+        if not video_path.exists():
+            error(f"Video file not found: {video_path}")
+            sys.exit(1)
+
+        workdir = get_workdir(video_path)
+        manifest_path = workdir / "manifest.json"
+        if not manifest_path.exists():
+            error(f"Manifest not found: {manifest_path}")
+            sys.exit(1)
+
+        manifest = Manifest(manifest_path)
+        phase_name = args.phase
+
+        phase_data = manifest.get_phase_data(phase_name)
+        if phase_data is None:
+            error(f"Phase '{phase_name}' has no record in manifest")
+            sys.exit(1)
+
+        phase_artifacts = phase_data.get("artifacts", {})
+        if not phase_artifacts:
+            error(f"Phase '{phase_name}' has no output artifacts")
+            sys.exit(1)
+
+        from pikppo.pipeline.core.fingerprints import hash_path
+
+        updated = 0
+        for key, artifact_data in phase_artifacts.items():
+            relpath = artifact_data.get("relpath")
+            if not relpath:
+                continue
+            artifact_path = workdir / relpath
+            if not artifact_path.exists():
+                error(f"  {key}: file not found ({artifact_path})")
+                continue
+
+            old_fp = artifact_data.get("fingerprint", "")
+            new_fp = hash_path(artifact_path)
+            if old_fp == new_fp:
+                info(f"  {key}: unchanged")
+                continue
+
+            # Update in phase-level artifacts
+            artifact_data["fingerprint"] = new_fp
+            # Update in global artifacts registry
+            if key in manifest.data["artifacts"]:
+                manifest.data["artifacts"][key]["fingerprint"] = new_fp
+            updated += 1
+            info(f"  {key}: {old_fp[:16]}... -> {new_fp[:16]}...")
+
+        if updated:
+            manifest.save()
+            success(f"Blessed {updated} artifact(s) for phase '{phase_name}'")
+        else:
+            info(f"All artifacts for phase '{phase_name}' are unchanged")
         return
 
     if args.command == "run":

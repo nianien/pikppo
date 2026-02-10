@@ -137,29 +137,42 @@ def _call_volcengine_tts(
     emotion_scale: int = 4,  # 1-5
     enable_timestamp: bool = False,  # TTS1.0 支持
     enable_subtitle: bool = False,  # TTS2.0/ICL2.0 支持
+    reference_audio: Optional[str] = None,  # ICL 声线克隆参考音频路径
     **kwargs
 ) -> tuple[bytes, Optional[Dict[str, Any]]]:
     """
     Call VolcEngine TTS API (streaming).
-    
+
     Args:
         text: Text to synthesize
         speaker: Speaker ID (voice)
         app_id: VolcEngine APP ID
         access_key: VolcEngine Access Key
-        resource_id: Resource ID (e.g., "seed-tts-1.0", "seed-tts-2.0")
+        resource_id: Resource ID (e.g., "seed-tts-1.0", "seed-tts-2.0", "seed-tts-icl-2.0")
         format: Audio format (mp3/ogg_opus/pcm)
         sample_rate: Sample rate
         speech_rate: Speech rate (-50 to 100, 0 = normal)
         emotion: Emotion label (optional)
         emotion_scale: Emotion scale (1-5, default 4)
+        reference_audio: Path to reference audio for ICL voice cloning (optional).
+                         When provided, resource_id will be switched to ICL mode.
         **kwargs: Other parameters
-    
+
     Returns:
         Audio data as bytes
     """
     request_id = str(uuid.uuid4())
-    
+
+    # ICL 模式：如果提供参考音频，切换到 ICL resource 并编码参考音频
+    if reference_audio and os.path.exists(reference_audio):
+        resource_id = kwargs.pop("icl_resource_id", "seed-tts-icl-2.0")
+        with open(reference_audio, "rb") as rf:
+            ref_bytes = rf.read()
+        ref_audio_b64 = base64.b64encode(ref_bytes).decode("utf-8")
+        print(f"  🎙️ ICL mode: reference_audio={reference_audio} ({len(ref_bytes)} bytes), resource_id={resource_id}")
+    else:
+        ref_audio_b64 = None
+
     # Build request body
     body = {
         "user": {
@@ -174,26 +187,30 @@ def _call_volcengine_tts(
             }
         }
     }
-    
+
+    # Add reference audio for ICL
+    if ref_audio_b64:
+        body["req_params"]["reference_audio"] = ref_audio_b64
+
     # Add speech rate if specified
     if speech_rate != 0.0:
         body["req_params"]["audio_params"]["speech_rate"] = speech_rate
-    
+
     # Add emotion if specified
     if emotion:
         body["req_params"]["audio_params"]["emotion"] = emotion
         body["req_params"]["audio_params"]["emotion_scale"] = emotion_scale
-    
+
     # Add timestamp/subtitle support
     if enable_timestamp:
         body["req_params"]["audio_params"]["enable_timestamp"] = True
     if enable_subtitle:
         body["req_params"]["audio_params"]["enable_subtitle"] = True
-    
+
     # Add other parameters
     if "additions" in kwargs:
         body["req_params"]["additions"] = kwargs["additions"]
-    
+
     # Build headers
     headers = {
         "Content-Type": "application/json",
@@ -392,13 +409,19 @@ def synthesize_tts(
             continue
         
         voice_info = voice_assignment["speakers"].get(speaker, {})
-        voice_id = voice_info.get("voice", {}).get("voice_id", "zh_female_shuangkuaisisi_moon_bigtts")
-        
+        # 优先用 voice_type（speakers_to_role 模式），回退到扁平 voice_id，再回退到嵌套结构
+        voice_id = (
+            voice_info.get("voice_type")
+            or voice_info.get("voice_id")
+            or voice_info.get("voice", {}).get("voice_id")
+            or "zh_female_shuangkuaisisi_moon_bigtts"
+        )
+
         # Get voice config from pool
-        pool_key = voice_info.get("voice", {}).get("pool_key")
+        pool_key = voice_info.get("pool_key") or voice_info.get("voice", {}).get("pool_key")
         if pool_key:
             voice_config = voice_pool.get_voice(pool_key)
-            prosody = voice_config.get("prosody", {})
+            prosody = voice_config.get("prosody", {}) if voice_config else {}
         else:
             prosody = {}
         
@@ -645,7 +668,6 @@ def synthesize_tts(
 def synthesize_tts_per_segment(
     dub_manifest: DubManifest,
     voice_assignment: Dict[str, Any],
-    voice_pool_path: Optional[str],
     segments_dir: str,
     temp_dir: str,
     *,
@@ -665,8 +687,7 @@ def synthesize_tts_per_segment(
 
     Args:
         dub_manifest: DubManifest object (SSOT for dubbing)
-        voice_assignment: Speaker -> voice mapping
-        voice_pool_path: Path to voice pool JSON
+        voice_assignment: Speaker -> {voice_type, params} mapping
         segments_dir: Output directory for per-segment WAVs
         temp_dir: Temporary directory for intermediate files
         app_id: VolcEngine APP ID
@@ -680,10 +701,6 @@ def synthesize_tts_per_segment(
     Returns:
         TTSReport with per-segment synthesis results
     """
-    from pikppo.models.voice_pool import VoicePool
-
-    voice_pool = VoicePool(pool_path=voice_pool_path)
-
     output_dir = Path(segments_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     temp_path = Path(temp_dir)
@@ -723,17 +740,13 @@ def synthesize_tts_per_segment(
             )
             continue
 
-        # Get voice configuration
+        # Get voice configuration from voice_assignment
         voice_info = voice_assignment["speakers"].get(speaker, {})
-        voice_id = voice_info.get("voice", {}).get("voice_id", "zh_female_shuangkuaisisi_moon_bigtts")
-        pool_key = voice_info.get("voice", {}).get("pool_key")
-        prosody = {}
-        if pool_key:
-            voice_config = voice_pool.get_voice(pool_key)
-            prosody = voice_config.get("prosody", {})
+        voice_id = voice_info.get("voice_type", "zh_female_shuangkuaisisi_moon_bigtts")
+        params = voice_info.get("params", {})
 
-        # Generate cache key
-        cache_key = _generate_cache_key(text, voice_id, prosody, language)
+        # Generate cache key (voice_type + text，不含 speed/pitch 因为不传给 API)
+        cache_key = _generate_cache_key(text, voice_id, {}, language)
         cache_file = cache_dir / f"{cache_key}.wav"
 
         try:
@@ -742,16 +755,8 @@ def synthesize_tts_per_segment(
                 shutil.copy2(cache_file, segment_file_raw)
                 print(f"  💾 [{utt_id}] Cache hit")
             else:
-                # Synthesize
-                # Calculate speech rate from prosody
-                azure_rate = prosody.get("rate", 1.0)
-                if azure_rate <= 0.5:
-                    speech_rate = -50
-                elif azure_rate >= 2.0:
-                    speech_rate = 100
-                else:
-                    speech_rate = (azure_rate - 1.0) * 100
-
+                # Synthesize — 不传 speech_rate，让声音按自然语速合成
+                # budget fitting 由 post-processing (trim → rate adjust → pad) 处理
                 audio_bytes, _ = _call_volcengine_tts(
                     text=text,
                     speaker=voice_id,
@@ -760,7 +765,6 @@ def synthesize_tts_per_segment(
                     resource_id=resource_id,
                     format=format,
                     sample_rate=sample_rate,
-                    speech_rate=speech_rate,
                 )
 
                 # Convert to WAV
@@ -824,8 +828,15 @@ def synthesize_tts_per_segment(
                     status = TTSSegmentStatus.RATE_ADJUSTED
                 elif allow_extend_ms > 0:
                     extended_budget = budget_ms + allow_extend_ms
-                    rate = trimmed_ms / extended_budget
-                    if rate <= max_rate:
+                    if trimmed_ms <= extended_budget:
+                        # 音频已经能放进 extended budget，直接 pad 静音，不减速
+                        _pad_audio(str(trimmed_file), str(segment_file), extended_budget)
+                        final_ms = extended_budget
+                        rate = 1.0
+                        status = TTSSegmentStatus.EXTENDED
+                    elif trimmed_ms / extended_budget <= max_rate:
+                        # 需要加速但在 max_rate 范围内
+                        rate = trimmed_ms / extended_budget
                         _apply_rate_and_pad(str(trimmed_file), str(segment_file), rate, extended_budget)
                         final_ms = extended_budget
                         status = TTSSegmentStatus.EXTENDED

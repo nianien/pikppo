@@ -115,6 +115,9 @@ def words_to_segment(
             # 找到匹配位置，映射回原文索引
             orig_start = p2o_full[pos]
             orig_end = p2o_full[pos + len(plain_words) - 1] + 1
+            # 把紧跟其后的标点/空白也包进来（如逗号、句号）
+            while orig_end < len(full_text) and (full_text[orig_end] in _PUNC or full_text[orig_end].isspace()):
+                orig_end += 1
             # ✅ 最终切片必须用原文 full_text（保留中间标点）
             text = full_text[orig_start:orig_end]
         else:
@@ -612,18 +615,4 @@ def speaker_aware_postprocess(
         ))
         last_end = et
     
-    # Step 5：最终文本清理（清理首尾标点）
-    # 在最终返回前统一清理所有 segments 的首尾标点
-    cleaned: List[Segment] = []
-    for seg in fixed:
-        cleaned_text = clean_segment_text(seg.text)
-        cleaned.append(Segment(
-            speaker=seg.speaker,
-            start_ms=seg.start_ms,
-            end_ms=seg.end_ms,
-            text=cleaned_text,
-            emotion=seg.emotion,
-            gender=seg.gender,
-        ))
-    
-    return cleaned
+    return fixed

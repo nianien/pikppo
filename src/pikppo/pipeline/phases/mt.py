@@ -469,7 +469,8 @@ class MTPhase(Phase):
                 continue
             
             # 翻译（带重试 + 轻量 glossary 校验）
-            slang_glossary_text = dict_loader.get_slang_glossary_text()
+            # 按需注入：只注入当前句命中的 glossary 条目
+            slang_glossary_text = dict_loader.get_glossary_hits(zh_text)
             try:
                 en_text, retries = translate_utterance_with_retry(
                     zh_text=zh_text,

@@ -353,7 +353,7 @@ class AlignPhase(Phase):
         # Get TTS policy config
         tts_config = ctx.config.get("phases", {}).get("tts", {})
         default_max_rate = float(tts_config.get("max_rate", 1.3))
-        default_allow_extend_ms = int(tts_config.get("allow_extend_ms", 0))
+        default_allow_extend_ms = int(tts_config.get("allow_extend_ms", 500))
 
         min_tts_window_ms = int(tts_config.get("min_tts_window_ms", 900))
         max_extend_cap_ms = int(tts_config.get("max_extend_cap_ms", 800))

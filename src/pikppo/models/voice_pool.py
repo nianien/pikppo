@@ -98,10 +98,27 @@ class VoicePool:
         """
         return self.pool_data.get("voices", {}).get(pool_key)
     
+    def get_voice_by_id(self, voice_id: str) -> Optional[Dict[str, Any]]:
+        """
+        根据 id 字段获取 voice 配置（支持数组格式的 voice_pool.json）。
+
+        Args:
+            voice_id: voice 的 id（如 "v_m_deep_01"）
+
+        Returns:
+            voice 配置字典，如果不存在则返回 None
+        """
+        voices = self.pool_data.get("voices", [])
+        if isinstance(voices, list):
+            for v in voices:
+                if v.get("id") == voice_id:
+                    return v
+        return None
+
     def get_all_voices(self) -> List[Dict[str, Any]]:
         """
         获取所有 voices 列表。
-        
+
         Returns:
             voices 列表（每个包含 voice_id, name, gender 等）
         """

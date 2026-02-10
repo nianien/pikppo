@@ -236,6 +236,10 @@ class Manifest:
                 "segments_dir": "tts/segments",
                 "report": "tts/tts_report.json",
             },
+            "voiceprint": {
+                "speaker_map": "voiceprint/speaker_map.json",
+                "reference_clips": "voiceprint/refs",
+            },
             "dub": {
                 "dub_manifest": "dub_manifest.json",
             },

@@ -168,13 +168,15 @@ class PhaseRunner:
     def _guess_artifact_kind(self, path: Path) -> str:
         """
         根据文件路径猜测 artifact kind。
-        
+
         Args:
             path: 文件路径
-        
+
         Returns:
-            artifact kind（"json", "srt", "wav", "mp4" 等）
+            artifact kind（"json", "srt", "wav", "mp4", "dir" 等）
         """
+        if path.is_dir():
+            return "dir"
         suffix = path.suffix.lower()
         kind_map = {
             ".json": "json",
@@ -183,7 +185,7 @@ class PhaseRunner:
             ".mp4": "mp4",
             ".mp3": "mp3",
         }
-        return kind_map.get(suffix, "file")
+        return kind_map.get(suffix, "bin")
     
     # 旧的 publish_artifacts 方法已由 run_phase 内逻辑取代，保留空壳以防外部调用。
     # 新约定：Runner 是唯一提交者，Phase/Processor 只写文件，Runner 直接构造 Artifact 并注册到 manifest。
@@ -412,13 +414,20 @@ class PhaseRunner:
         # 运行 phases
         for idx, phase in enumerate(phases_to_run):
             force = force_from_idx is not None and idx >= force_from_idx
-            
+
             info(f"\n{'=' * 60}")
             info(f"Phase: {phase.name}")
             info(f"{'=' * 60}")
-            
+
+            # --from 之前的 phase：只跳过，不重跑（即使之前失败）
+            if force_from_idx is not None and idx < force_from_idx:
+                should, reason = self.should_run(phase, force=False, config=ctx.config)
+                if should:
+                    info(f"Phase '{phase.name}' skipped (before --from {from_phase}): {reason}")
+                    continue
+
             success = self.run_phase(phase, ctx, force=force)
-            
+
             if not success:
                 raise RuntimeError(f"Phase '{phase.name}' failed")
         

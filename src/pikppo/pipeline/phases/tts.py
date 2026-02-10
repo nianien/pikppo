@@ -7,17 +7,16 @@ TTS Phase: 语音合成（Timeline-First Architecture）
   - tts.report: TTS synthesis report (JSON)
   - tts.voice_assignment: Speaker -> voice mapping
 
-不再生成拼接后的 tts.audio，拼接在 Mix phase 进行。
+声线分配通过 speakers_to_role.json 解析（由 Sub 阶段自动生成，用户手动编辑）。
 """
 import json
-import shutil
+import os
 from pathlib import Path
 from typing import Dict
 
 from pikppo.pipeline.core.phase import Phase
 from pikppo.pipeline.core.types import Artifact, ErrorInfo, PhaseResult, RunContext, ResolvedOutputs
 from pikppo.pipeline.processors.tts import run_per_segment as tts_run_per_segment
-from pikppo.models.voice_pool import DEFAULT_VOICE_POOL
 from pikppo.schema.dub_manifest import dub_manifest_from_dict
 from pikppo.schema.tts_report import tts_report_to_dict
 from pikppo.utils.logger import info, warning
@@ -25,18 +24,18 @@ from pikppo.utils.logger import info, warning
 
 class TTSPhase(Phase):
     """语音合成 Phase。"""
-    
+
     name = "tts"
     version = "1.0.0"
-    
+
     def requires(self) -> list[str]:
-        """需要 dub.dub_manifest（SSOT for dubbing）和 demux.audio（可选，用于声线分配）。"""
-        return ["dub.dub_manifest", "demux.audio"]
+        """需要 dub.dub_manifest（SSOT for dubbing）。"""
+        return ["dub.dub_manifest"]
 
     def provides(self) -> list[str]:
         """生成 per-segment WAVs, tts_report, voice_assignment。"""
         return ["tts.segments_dir", "tts.report", "tts.voice_assignment"]
-    
+
     def run(
         self,
         ctx: RunContext,
@@ -48,8 +47,8 @@ class TTSPhase(Phase):
 
         流程：
         1. 读取 dub_manifest.json (SSOT for dubbing)
-        2. 分配声线
-        3. TTS per-segment 合成 (不拼接)
+        2. 通过 speakers_to_role.json 解析声线分配
+        3. TTS per-segment 合成 (VolcEngine)
         4. 生成 tts_report.json
         """
         # 获取输入 (dub_manifest.json)
@@ -73,27 +72,12 @@ class TTSPhase(Phase):
                 ),
             )
 
-        audio_artifact = inputs.get("demux.audio")
-        audio_path = None
-        if audio_artifact:
-            audio_path = Path(ctx.workspace) / audio_artifact.relpath
-
         workspace_path = Path(ctx.workspace)
 
         # 获取配置
         phase_config = ctx.config.get("phases", {}).get("tts", {})
 
-        # TTS 引擎选择（默认 azure）
-        engine = phase_config.get("engine", ctx.config.get("tts_engine", "azure"))
-        info(f"TTS engine: {engine}")
-
-        # Azure 配置
-        azure_key = phase_config.get("azure_key", ctx.config.get("azure_tts_key"))
-        azure_region = phase_config.get("azure_region", ctx.config.get("azure_tts_region"))
-        azure_language = phase_config.get("azure_language", ctx.config.get("azure_tts_language", "en-US"))
-
         # VolcEngine 配置（支持从环境变量读取）
-        import os
         volcengine_app_id = (
             phase_config.get("volcengine_app_id") or
             ctx.config.get("volcengine_app_id") or
@@ -112,35 +96,17 @@ class TTSPhase(Phase):
 
         # 通用配置
         max_workers = phase_config.get("max_workers", ctx.config.get("tts_max_workers", 4))
-        voice_pool_path = phase_config.get("voice_pool_path", ctx.config.get("voice_pool_path"))
+        language = phase_config.get("language", ctx.config.get("tts_language", "en-US"))
 
-        # 验证引擎配置
-        if engine == "azure":
-            if not azure_key or not azure_region:
-                return PhaseResult(
-                    status="failed",
-                    error=ErrorInfo(
-                        type="ValueError",
-                        message="Azure TTS credentials not set (azure_key and azure_region required)",
-                    ),
-                )
-        elif engine == "volcengine":
-            if not volcengine_app_id or not volcengine_access_key:
-                return PhaseResult(
-                    status="failed",
-                    error=ErrorInfo(
-                        type="ValueError",
-                        message="VolcEngine TTS credentials not set (volcengine_app_id and volcengine_access_key required). "
-                                "You can set them via environment variables: DOUBAO_APPID and DOUBAO_ACCESS_TOKEN, "
-                                "or in config: phases.tts.volcengine_app_id and phases.tts.volcengine_access_key",
-                    ),
-                )
-        else:
+        # 验证 VolcEngine 配置
+        if not volcengine_app_id or not volcengine_access_key:
             return PhaseResult(
                 status="failed",
                 error=ErrorInfo(
                     type="ValueError",
-                    message=f"Unknown TTS engine: {engine}. Supported engines: 'azure', 'volcengine'",
+                    message="VolcEngine TTS credentials not set (volcengine_app_id and volcengine_access_key required). "
+                            "Set via env: DOUBAO_APPID and DOUBAO_ACCESS_TOKEN, "
+                            "or config: phases.tts.volcengine_app_id and phases.tts.volcengine_access_key",
                 ),
             )
 
@@ -161,14 +127,9 @@ class TTSPhase(Phase):
                     ),
                 )
 
-            # 准备 voice pool
-            if not voice_pool_path:
-                cache_dir = workspace_path / ".cache"
-                cache_dir.mkdir(exist_ok=True)
-                pool_file = cache_dir / "voice_pool.json"
-                with open(pool_file, "w", encoding="utf-8") as f:
-                    json.dump(DEFAULT_VOICE_POOL, f, indent=2, ensure_ascii=False)
-                voice_pool_path = str(pool_file)
+            # 声线映射文件路径
+            speakers_to_role_path = str(workspace_path / "speakers_to_role.json")  # 剧集级
+            role_to_voice_path = str(workspace_path.parent / "voices" / "role_to_voice.json")  # 剧级
 
             # 输出路径
             segments_dir = outputs.get("tts.segments_dir")
@@ -178,38 +139,20 @@ class TTSPhase(Phase):
             temp_dir = str(workspace_path / ".cache" / "tts")
             Path(temp_dir).mkdir(parents=True, exist_ok=True)
 
-            # 根据引擎选择参数
-            if engine == "azure":
-                result = tts_run_per_segment(
-                    dub_manifest=dub_manifest,
-                    segments_dir=str(segments_dir),
-                    reference_audio_path=str(audio_path) if audio_path and audio_path.exists() else None,
-                    voice_pool_path=voice_pool_path,
-                    engine=engine,
-                    azure_key=azure_key,
-                    azure_region=azure_region,
-                    language=azure_language,
-                    max_workers=max_workers,
-                    temp_dir=temp_dir,
-                )
-            elif engine == "volcengine":
-                result = tts_run_per_segment(
-                    dub_manifest=dub_manifest,
-                    segments_dir=str(segments_dir),
-                    reference_audio_path=str(audio_path) if audio_path and audio_path.exists() else None,
-                    voice_pool_path=voice_pool_path,
-                    engine=engine,
-                    volcengine_app_id=volcengine_app_id,
-                    volcengine_access_key=volcengine_access_key,
-                    volcengine_resource_id=volcengine_resource_id,
-                    volcengine_format=volcengine_format,
-                    volcengine_sample_rate=volcengine_sample_rate,
-                    language=azure_language,
-                    max_workers=max_workers,
-                    temp_dir=temp_dir,
-                )
-            else:
-                raise ValueError(f"Unknown TTS engine: {engine}")
+            result = tts_run_per_segment(
+                dub_manifest=dub_manifest,
+                segments_dir=str(segments_dir),
+                speakers_to_role_path=speakers_to_role_path,
+                role_to_voice_path=role_to_voice_path,
+                volcengine_app_id=volcengine_app_id,
+                volcengine_access_key=volcengine_access_key,
+                volcengine_resource_id=volcengine_resource_id,
+                volcengine_format=volcengine_format,
+                volcengine_sample_rate=volcengine_sample_rate,
+                language=language,
+                max_workers=max_workers,
+                temp_dir=temp_dir,
+            )
 
             # 从 ProcessorResult 提取数据
             voice_assignment = result.data["voice_assignment"]

@@ -403,18 +403,73 @@ def _build_utterances(
     return utterances
 
 
+def _attach_trailing_punctuation(
+    utt_text: str,
+    words_list: List[Dict[str, Any]],
+) -> List[str]:
+    """
+    把 utterance 级别的标点附加到对应 word 的 text 后面。
+
+    ASR 的 word 级别不含标点（如 "坐", "牢", "十", "年"），
+    但 utterance text 有（如 "坐牢十年，我被冤枉杀父弑母的事，该去找个明白。"）。
+    将尾部标点附加到对应 word：年 → 年，  事 → 事，  白 → 白。
+
+    Args:
+        utt_text: utterance 级别的完整文本（含标点）
+        words_list: raw words 列表
+
+    Returns:
+        与 words_list 等长的文本列表（含尾部标点）
+    """
+    _PUNC_CHARS = set("，。！？、；：,.!?;:\"'（）()【】[]《》<>…—- ")
+
+    # 提取有效 word texts
+    w_texts = [str(w.get("text", "")).strip() for w in words_list]
+
+    # 在 utt_text 中逐字匹配，找到每个 word 结束后的标点
+    result = list(w_texts)  # 默认无标点
+    utt_pos = 0
+
+    for idx, wt in enumerate(w_texts):
+        if not wt:
+            continue
+        # 跳过 utt_text 中当前位置的标点/空白（它们属于前一个 word，已经处理了）
+        # 找到 wt 的第一个字符在 utt_text 中的位置
+        found = False
+        for scan in range(utt_pos, len(utt_text)):
+            if utt_text[scan] == wt[0]:
+                # 验证整个 word 匹配
+                if utt_text[scan:scan + len(wt)] == wt:
+                    utt_pos = scan + len(wt)
+                    found = True
+                    break
+        if not found:
+            continue
+
+        # 收集尾部标点
+        trailing = []
+        while utt_pos < len(utt_text) and utt_text[utt_pos] in _PUNC_CHARS:
+            trailing.append(utt_text[utt_pos])
+            utt_pos += 1
+        if trailing:
+            result[idx] = wt + "".join(trailing)
+
+    return result
+
+
 def extract_all_words_from_raw_response(raw_response: Dict[str, Any]) -> List[Word]:
     """
     从 ASR raw response 中提取所有 words。
 
     这是 Utterance Normalization 的输入准备步骤。
     完全忽略 ASR 的 utterance 边界，只提取 word-level timestamps。
+    标点从 utterance 级别的 text 附加到对应 word 的 text 后面。
 
     Args:
         raw_response: ASR 原始响应
 
     Returns:
-        List[Word]: 所有 words（按时间排序）
+        List[Word]: 所有 words（按时间排序，含尾部标点）
     """
     result = raw_response.get("result") or {}
     raw_utterances = result.get("utterances") or []
@@ -428,8 +483,15 @@ def extract_all_words_from_raw_response(raw_response: Dict[str, Any]) -> List[Wo
 
         # 提取 words
         words_list = raw_utt.get("words") or []
-        for w in words_list:
-            text = str(w.get("text", "")).strip()
+        if not words_list:
+            continue
+
+        # 把 utterance text 的标点附加到 word text
+        utt_text = str(raw_utt.get("text", ""))
+        enriched_texts = _attach_trailing_punctuation(utt_text, words_list)
+
+        for i, w in enumerate(words_list):
+            text = enriched_texts[i] if i < len(enriched_texts) else str(w.get("text", "")).strip()
             if not text:
                 continue
 

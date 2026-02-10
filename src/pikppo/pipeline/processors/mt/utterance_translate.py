@@ -216,26 +216,33 @@ def build_utterance_translation_prompt(
             "   (Use kinship terms only when they function as natural forms of address in English; otherwise omit.)",
             "   Examples: <<NAME_0:平安>>哥 → Ping An, bro | <<NAME_0:小美>>姐 → Xiao Mei, sis",
             "2) Translate naturally. Do NOT translate word by word.",
-            "3) This dialogue includes gambling / card-game slang. Use natural English equivalents.",
-            "4) Output must be clean English for subtitles:",
+            "3) Output must be clean English for subtitles:",
             "   - Remove all <<NAME_i:...>> placeholders (render the translated name).",
             "   - Remove <sep> separators (use punctuation/pauses naturally).",
             "Return ONLY the final English text.",
         ]
-        
-        # Glossary（必须遵守的术语表）
+
+        # Glossary（按需注入：只注入当前句命中的条目）
         if slang_glossary_text:
             system_parts.append("")
-            system_parts.append("Glossary (MUST follow EXACTLY if these phrases appear):")
+            system_parts.append("Glossary — only apply if the exact source phrase appears in THIS utterance. Do not infer or generalize:")
             system_parts.append(slang_glossary_text)
-        
+
+        # Domain hint（按需注入：只在源文本含赌博/牌局关键词时添加）
+        _GAMBLING_KEYWORDS = (
+            "牌", "胡", "杠", "碰", "筒", "条", "筹码", "庄",
+            "对家", "听牌", "起手", "翻牌", "尖", "三条", "蓝道",
+            "下注", "all-in", "底注",
+        )
+        has_gambling = any(kw in zh_text for kw in _GAMBLING_KEYWORDS)
+
         # User prompt（上下文 + 当前句）
         user_parts = []
-        
+
         # 1. 剧情简介（可选）
         if plot_overview:
             user_parts.append(f"Plot overview:\n{plot_overview}\n")
-        
+
         # 2. Episode Context
         if episode_context:
             # 截断到合理长度（避免 token 超限）
@@ -243,10 +250,11 @@ def build_utterance_translation_prompt(
             if len(episode_context) > max_context_chars:
                 episode_context = episode_context[:max_context_chars] + "..."
             user_parts.append(f"Episode dialogue context:\n{episode_context}\n")
-        
-        # 3. Domain Hint
-        user_parts.append("Context: This dialogue includes gambling and card-game slang. Use natural English equivalents.")
-        
+
+        # 3. Domain Hint（按需）
+        if has_gambling:
+            user_parts.append("Context: This utterance contains gambling / card-game slang. Use natural English equivalents.")
+
         # 4. Focus：当前 utterance
         user_parts.append(f"\nConstraints:")
         user_parts.append(f"- This subtitle will be displayed for {budget_sec:.2f} seconds.")

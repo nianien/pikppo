@@ -103,18 +103,38 @@ class DictLoader:
     def get_slang_glossary_text(self) -> str:
         """
         获取 slang 词表文本（用于 prompt，作为"必须遵守的术语表"）。
-        
+
         Returns:
             格式化的词表字符串（用于 System Prompt）
         """
         if not self.slang:
             return ""
-        
+
         lines = []
         for zh_term, en_translation in sorted(self.slang.items()):
             lines.append(f"{zh_term} -> {en_translation}")
-        
+
         return "\n".join(lines)
+
+    def get_glossary_hits(self, src_text: str) -> str:
+        """
+        获取与源文本匹配的 glossary 条目（按需注入，不污染无关句子）。
+
+        Args:
+            src_text: 当前 utterance 的中文源文本
+
+        Returns:
+            只包含命中条目的格式化字符串，无命中返回空串
+        """
+        if not self.slang:
+            return ""
+
+        hits = []
+        for zh_term, en_translation in sorted(self.slang.items()):
+            if zh_term in src_text:
+                hits.append(f"{zh_term} -> {en_translation}")
+
+        return "\n".join(hits) if hits else ""
     
     def check_glossary_violation(self, src_text: str, out_text: str) -> List[str]:
         """

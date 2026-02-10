@@ -21,7 +21,7 @@ class Artifact:
 
     key: str  # e.g. "subs.subtitle_model"
     relpath: str  # workspace-relative path, e.g. "subs/zh.srt"
-    kind: Literal["json", "srt", "wav", "mp4", "txt", "bin"]
+    kind: Literal["json", "srt", "wav", "mp4", "txt", "bin", "dir"]
     fingerprint: str  # e.g. "sha256:..."
     meta: Dict[str, Any] = field(default_factory=dict)
 
