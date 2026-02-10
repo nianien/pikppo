@@ -1,3 +1,0 @@
-桶: pikppo-video
-本地视频路径:  ***/$drama/1.mp4
-tos 存储路径: pikppo-video/$drama/1.mp4
