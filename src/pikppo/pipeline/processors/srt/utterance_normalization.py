@@ -33,6 +33,7 @@ class NormalizedUtterance:
     end_ms: int                # 发声结束时间（不含 trailing silence）
     words: List[Word]          # 属于此 utterance 的 words
     speaker: str               # 说话人 ID
+    gender: str = ""           # 性别（从 raw utterance additions 继承）
     gap_after_ms: int = 0      # 此 utterance 后的静音时长（如果 keep_gap_as_field=True）
 
     @property
@@ -58,12 +59,13 @@ class NormalizationConfig:
 def normalize_utterances(
     all_words: List[Word],
     config: Optional[NormalizationConfig] = None,
+    speaker_gender_map: Optional[Dict[str, str]] = None,
 ) -> List[NormalizedUtterance]:
     """
     基于 word-level timestamps 重建 utterance 边界。
 
     算法：
-    1. 计算所有 word 之间的 gaps
+    1. 计算所有 word 之间的 gaps（speaker 变化是硬边界）
     2. 根据 silence_split_threshold_ms 切分
     3. 应用 min/max duration 约束
     4. 处理 trailing silence
@@ -72,6 +74,7 @@ def normalize_utterances(
     Args:
         all_words: 所有 words（按时间排序）
         config: 配置参数
+        speaker_gender_map: speaker→gender 映射（从 raw response 提取）
 
     Returns:
         List[NormalizedUtterance]: 规范化后的 utterances
@@ -104,6 +107,7 @@ def normalize_utterances(
         sorted_words,
         config.trailing_silence_cap_ms,
         config.keep_gap_as_field,
+        speaker_gender_map=speaker_gender_map,
     )
 
     return utterances
@@ -136,13 +140,17 @@ def _split_by_silence(
         # 计算两个 word 之间的 gap
         gap_ms = curr_word.start_ms - prev_word.end_ms
 
-        if gap_ms >= threshold_ms:
-            # Gap 超过阈值，切分
+        # speaker 变化是硬边界，必切（不同说话人不能混在同一个 chunk）
+        speaker_changed = (
+            curr_word.speaker and prev_word.speaker
+            and curr_word.speaker != prev_word.speaker
+        )
+
+        if gap_ms >= threshold_ms or speaker_changed:
             if current_chunk:
                 chunks.append(current_chunk)
             current_chunk = [curr_word]
         else:
-            # Gap 在阈值内，继续当前 chunk
             current_chunk.append(curr_word)
 
     # 添加最后一个 chunk
@@ -343,6 +351,7 @@ def _build_utterances(
     all_words: List[Word],
     trailing_silence_cap_ms: int,
     keep_gap_as_field: bool,
+    speaker_gender_map: Optional[Dict[str, str]] = None,
 ) -> List[NormalizedUtterance]:
     """
     构建 NormalizedUtterance 列表。
@@ -352,6 +361,7 @@ def _build_utterances(
         all_words: 所有 words（用于计算 gap）
         trailing_silence_cap_ms: 尾部静音上限
         keep_gap_as_field: 是否保留 gap 为独立字段
+        speaker_gender_map: speaker→gender 映射（从 raw response 提取）
 
     Returns:
         List[NormalizedUtterance]: 规范化后的 utterances
@@ -359,6 +369,7 @@ def _build_utterances(
     if not chunks:
         return []
 
+    gender_map = speaker_gender_map or {}
     utterances: List[NormalizedUtterance] = []
 
     for i, chunk in enumerate(chunks):
@@ -396,6 +407,7 @@ def _build_utterances(
                 end_ms=end_ms,
                 words=chunk,
                 speaker=speaker,
+                gender=gender_map.get(speaker, ""),
                 gap_after_ms=gap_after_ms,
             )
         )
@@ -457,9 +469,11 @@ def _attach_trailing_punctuation(
     return result
 
 
-def extract_all_words_from_raw_response(raw_response: Dict[str, Any]) -> List[Word]:
+def extract_all_words_from_raw_response(
+    raw_response: Dict[str, Any],
+) -> Tuple[List[Word], Dict[str, str]]:
     """
-    从 ASR raw response 中提取所有 words。
+    从 ASR raw response 中提取所有 words 和 speaker→gender 映射。
 
     这是 Utterance Normalization 的输入准备步骤。
     完全忽略 ASR 的 utterance 边界，只提取 word-level timestamps。
@@ -469,17 +483,23 @@ def extract_all_words_from_raw_response(raw_response: Dict[str, Any]) -> List[Wo
         raw_response: ASR 原始响应
 
     Returns:
-        List[Word]: 所有 words（按时间排序，含尾部标点）
+        (all_words, speaker_gender_map):
+        - all_words: 所有 words（按时间排序，含尾部标点）
+        - speaker_gender_map: speaker→gender 映射（如 {"1": "male"}）
     """
     result = raw_response.get("result") or {}
     raw_utterances = result.get("utterances") or []
 
     all_words: List[Word] = []
+    speaker_gender_map: Dict[str, str] = {}
 
     for raw_utt in raw_utterances:
-        # 从 utterance 获取 speaker（作为 words 的默认 speaker）
+        # 从 utterance 获取 speaker 和 gender
         additions = raw_utt.get("additions") or {}
         default_speaker = str(additions.get("speaker", "0"))
+        gender = additions.get("gender")
+        if default_speaker and gender and default_speaker not in speaker_gender_map:
+            speaker_gender_map[default_speaker] = str(gender).strip()
 
         # 提取 words
         words_list = raw_utt.get("words") or []
@@ -511,7 +531,7 @@ def extract_all_words_from_raw_response(raw_response: Dict[str, Any]) -> List[Wo
     # 按时间排序
     all_words.sort(key=lambda w: (w.start_ms, w.end_ms))
 
-    return all_words
+    return all_words, speaker_gender_map
 
 
 def extract_utterance_metadata(

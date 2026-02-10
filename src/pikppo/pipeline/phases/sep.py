@@ -33,8 +33,8 @@ class SepPhase(Phase):
         return ["demux.audio"]
     
     def provides(self) -> list[str]:
-        """生成 sep.vocals、sep.vocals_16k 和 sep.accompaniment。"""
-        return ["sep.vocals", "sep.vocals_16k", "sep.accompaniment"]
+        """生成 sep.vocals 和 sep.accompaniment。"""
+        return ["sep.vocals", "sep.accompaniment"]
     
     def run(
         self,
@@ -78,7 +78,6 @@ class SepPhase(Phase):
         
         # Phase 层负责文件 IO：使用 runner 预分配的 outputs.paths
         vocals_path = outputs.get("sep.vocals")
-        vocals_16k_path = outputs.get("sep.vocals_16k")
         accompaniment_path = outputs.get("sep.accompaniment")
         
         # 调用 Processor 层分离人声
@@ -117,24 +116,6 @@ class SepPhase(Phase):
                 ),
             )
         
-        # 检查 vocals-16k.wav 是否存在（processor 会自动生成）
-        # processor 会在 vocals_path 的同目录下生成 vocals-16k.wav
-        expected_vocals_16k = vocals_path.parent / f"{vocals_path.stem}-16k.wav"
-        if not expected_vocals_16k.exists():
-            return PhaseResult(
-                status="failed",
-                error=ErrorInfo(
-                    type="RuntimeError",
-                    message=f"Vocal separation failed: {expected_vocals_16k} was not created",
-                ),
-            )
-        
-        # 如果路径不一致，复制到预分配的位置
-        if expected_vocals_16k != vocals_16k_path:
-            import shutil
-            vocals_16k_path.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(expected_vocals_16k, vocals_16k_path)
-        
         if vocals_path.stat().st_size == 0:
             return PhaseResult(
                 status="failed",
@@ -153,31 +134,19 @@ class SepPhase(Phase):
                 ),
             )
         
-        if vocals_16k_path.stat().st_size == 0:
-            return PhaseResult(
-                status="failed",
-                error=ErrorInfo(
-                    type="RuntimeError",
-                    message=f"Vocal separation failed: {vocals_16k_path} is empty",
-                ),
-            )
-        
         vocals_size = vocals_path.stat().st_size / 1024 / 1024
-        vocals_16k_size = vocals_16k_path.stat().st_size / 1024 / 1024
         accompaniment_size = accompaniment_path.stat().st_size / 1024 / 1024
-        
+
         info(f"Vocal separation succeeded:")
         info(f"  Vocals: {vocals_path.name} (size: {vocals_size:.2f} MB)")
-        info(f"  Vocals 16k: {vocals_16k_path.name} (size: {vocals_16k_size:.2f} MB)")
         info(f"  Accompaniment: {accompaniment_path.name} (size: {accompaniment_size:.2f} MB)")
-        
+
         # 返回 PhaseResult：只声明哪些 outputs 成功
         return PhaseResult(
             status="succeeded",
-            outputs=["sep.vocals", "sep.vocals_16k", "sep.accompaniment"],
+            outputs=["sep.vocals", "sep.accompaniment"],
             metrics={
                 "vocals_size_mb": vocals_size,
-                "vocals_16k_size_mb": vocals_16k_size,
                 "accompaniment_size_mb": accompaniment_size,
             },
         )

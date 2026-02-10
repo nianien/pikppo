@@ -1,13 +1,13 @@
 """
 TTS Phase: 语音合成（Timeline-First Architecture）
 
-输入: dub_manifest.json (from Align phase)
+输入: dub.model.json (from Align phase)
 输出:
   - tts.segments_dir: Per-segment WAV files
   - tts.report: TTS synthesis report (JSON)
   - tts.voice_assignment: Speaker -> voice mapping
 
-声线分配通过 speakers_to_role.json 解析（由 Sub 阶段自动生成，用户手动编辑）。
+声线分配通过 speaker_to_role.json 解析（由 Sub 阶段自动生成，用户手动编辑）。
 """
 import json
 import os
@@ -34,7 +34,7 @@ class TTSPhase(Phase):
 
     def provides(self) -> list[str]:
         """生成 per-segment WAVs, tts_report, voice_assignment。"""
-        return ["tts.segments_dir", "tts.report", "tts.voice_assignment"]
+        return ["tts.segments_dir", "tts.segments_index", "tts.report", "tts.voice_assignment"]
 
     def run(
         self,
@@ -46,12 +46,12 @@ class TTSPhase(Phase):
         执行 TTS Phase (Timeline-First Architecture)。
 
         流程：
-        1. 读取 dub_manifest.json (SSOT for dubbing)
-        2. 通过 speakers_to_role.json 解析声线分配
+        1. 读取 dub.model.json (SSOT for dubbing)
+        2. 通过 speaker_to_role.json 解析声线分配
         3. TTS per-segment 合成 (VolcEngine)
         4. 生成 tts_report.json
         """
-        # 获取输入 (dub_manifest.json)
+        # 获取输入 (dub.model.json)
         dub_manifest_artifact = inputs.get("dub.dub_manifest")
         if not dub_manifest_artifact:
             return PhaseResult(
@@ -111,7 +111,7 @@ class TTSPhase(Phase):
             )
 
         try:
-            # 读取 dub_manifest.json
+            # 读取 dub.model.json
             with open(dub_manifest_path, "r", encoding="utf-8") as f:
                 manifest_data = json.load(f)
 
@@ -123,13 +123,14 @@ class TTSPhase(Phase):
                     status="failed",
                     error=ErrorInfo(
                         type="ValueError",
-                        message="No utterances found in dub_manifest.json.",
+                        message="No utterances found in dub.model.json.",
                     ),
                 )
 
-            # 声线映射文件路径
-            speakers_to_role_path = str(workspace_path / "speakers_to_role.json")  # 剧集级
-            role_to_voice_path = str(workspace_path.parent / "voices" / "role_to_voice.json")  # 剧级
+            # 声线映射文件路径（均在 {series}/dub/voices/ 下）
+            voices_dir = workspace_path.parent / "voices"
+            speaker_to_role_path = str(voices_dir / "speaker_to_role.json")
+            role_cast_path = str(voices_dir / "role_cast.json")
 
             # 输出路径
             segments_dir = outputs.get("tts.segments_dir")
@@ -139,11 +140,13 @@ class TTSPhase(Phase):
             temp_dir = str(workspace_path / ".cache" / "tts")
             Path(temp_dir).mkdir(parents=True, exist_ok=True)
 
+            episode_id = workspace_path.name
             result = tts_run_per_segment(
                 dub_manifest=dub_manifest,
                 segments_dir=str(segments_dir),
-                speakers_to_role_path=speakers_to_role_path,
-                role_to_voice_path=role_to_voice_path,
+                speaker_to_role_path=speaker_to_role_path,
+                role_cast_path=role_cast_path,
+                episode_id=episode_id,
                 volcengine_app_id=volcengine_app_id,
                 volcengine_access_key=volcengine_access_key,
                 volcengine_resource_id=volcengine_resource_id,
@@ -177,6 +180,31 @@ class TTSPhase(Phase):
                 json.dump(tts_report_to_dict(tts_report), f, indent=2, ensure_ascii=False)
             info(f"Saved TTS report: {tts_report.total_segments} segments, {tts_report.success_count} succeeded")
 
+            # 生成 segments.json 索引（下游 Mix 消费的干净合约）
+            from pikppo.pipeline.core.fingerprints import hash_file
+            segments_index = {}
+            for seg in tts_report.segments:
+                if seg.error:
+                    continue
+                seg_file = segments_dir / seg.output_path
+                spk_info = voice_assignment.get("speakers", {}).get(
+                    next((u.speaker for u in dub_manifest.utterances if u.utt_id == seg.utt_id), ""),
+                    {},
+                )
+                segments_index[seg.utt_id] = {
+                    "wav_path": seg.output_path,
+                    "voice_id": spk_info.get("voice_type", ""),
+                    "role_id": spk_info.get("role_id", ""),
+                    "duration_ms": seg.final_ms,
+                    "rate": seg.rate,
+                    "hash": hash_file(seg_file) if seg_file.exists() else "",
+                }
+            segments_index_path = outputs.get("tts.segments_index")
+            segments_index_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(segments_index_path, "w", encoding="utf-8") as f:
+                json.dump(segments_index, f, indent=2, ensure_ascii=False)
+            info(f"Saved segments index: {len(segments_index)} entries")
+
             # 清理临时目录
             temp_path = Path(temp_dir)
             if temp_path.exists():
@@ -189,7 +217,7 @@ class TTSPhase(Phase):
             # 返回 PhaseResult
             return PhaseResult(
                 status="succeeded",
-                outputs=["tts.segments_dir", "tts.report", "tts.voice_assignment"],
+                outputs=["tts.segments_dir", "tts.segments_index", "tts.report", "tts.voice_assignment"],
                 metrics={
                     "total_segments": tts_report.total_segments,
                     "success_count": tts_report.success_count,

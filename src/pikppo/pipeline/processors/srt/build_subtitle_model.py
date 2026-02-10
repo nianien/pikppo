@@ -17,6 +17,7 @@ from pikppo.schema.subtitle_model import (
     SubtitleUtterance,
     SubtitleCue,
     SourceText,
+    SpeakerInfo,
     SpeechRate,
     SchemaInfo,
     EmotionInfo,
@@ -337,20 +338,18 @@ def build_subtitle_model(
     Returns:
         SubtitleModel: 完整的字幕模型 v1.2（SSOT）
     """
-    # 1. 从 ASR response 中提取所有 word-level timestamps
-    #    完全忽略 ASR 的 utterance 边界，只使用 words
-    all_words = extract_all_words_from_raw_response(raw_response)
+    # 1. 从 ASR response 中提取所有 word-level timestamps + speaker→gender 映射
+    all_words, speaker_gender_map = extract_all_words_from_raw_response(raw_response)
 
     if not all_words:
-        # 没有 words，返回空模型
         return SubtitleModel(
-            schema=SchemaInfo(name="subtitle.model", version="1.2"),
+            schema=SchemaInfo(name="subtitle.model", version="1.3"),
             audio={"duration_ms": audio_duration_ms} if audio_duration_ms else None,
             utterances=[],
         )
 
     # 2. 使用 Utterance Normalization 重建 utterance 边界
-    #    这是真正的 SSOT：基于 speech + silence 重建视觉友好的边界
+    #    speaker 变化是硬边界，gender 从 speaker_gender_map 继承
     norm_config = NormalizationConfig(
         silence_split_threshold_ms=silence_split_threshold_ms,
         min_utterance_duration_ms=min_utterance_duration_ms,
@@ -358,7 +357,7 @@ def build_subtitle_model(
         trailing_silence_cap_ms=trailing_silence_cap_ms,
         keep_gap_as_field=keep_gap_as_field,
     )
-    normalized_utts = normalize_utterances(all_words, norm_config)
+    normalized_utts = normalize_utterances(all_words, norm_config, speaker_gender_map)
 
     # 3. 将 NormalizedUtterance 转换为 SubtitleUtterance
     utterances: List[SubtitleUtterance] = []
@@ -411,11 +410,14 @@ def build_subtitle_model(
         utterances.append(
             SubtitleUtterance(
                 utt_id=f"utt_{idx:04d}",
-                speaker=normalized_speaker,
+                speaker=SpeakerInfo(
+                    id=normalized_speaker,
+                    gender=norm_utt.gender or None,
+                    speech_rate=SpeechRate(zh_tps=float(zh_tps)),
+                    emotion=utterance_emotion,
+                ),
                 start_ms=norm_utt.start_ms,
                 end_ms=norm_utt.end_ms,
-                speech_rate=SpeechRate(zh_tps=float(zh_tps)),
-                emotion=utterance_emotion,
                 cues=cues,
             )
         )
@@ -429,9 +431,9 @@ def build_subtitle_model(
         last_utt = utterances[-1]
         audio = {"duration_ms": last_utt.end_ms}
 
-    # 5. 构建 Subtitle Model v1.2
+    # 5. 构建 Subtitle Model v1.3
     model = SubtitleModel(
-        schema=SchemaInfo(name="subtitle.model", version="1.2"),
+        schema=SchemaInfo(name="subtitle.model", version="1.3"),
         audio=audio,
         utterances=utterances,
     )

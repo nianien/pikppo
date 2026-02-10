@@ -2,7 +2,7 @@
 Mix Phase: 混音 (Timeline-First Architecture)
 
 输入:
-  - dub.dub_manifest: Timeline SSOT
+  - dub.dub_manifest: Timeline SSOT (source/dub.model.json)
   - tts.segments_dir: Per-segment WAV files
   - tts.report: TTS synthesis report
 
@@ -48,7 +48,7 @@ class MixPhase(Phase):
         执行 Mix Phase (Timeline-First Architecture)。
 
         流程：
-        1. 读取 dub_manifest.json (timeline SSOT)
+        1. 读取 dub.model.json (timeline SSOT)
         2. 读取 tts_report.json (per-segment info)
         3. 使用 adelay 进行 timeline placement
         4. 混合 BGM + TTS

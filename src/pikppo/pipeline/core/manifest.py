@@ -206,48 +206,54 @@ class Manifest:
             obj = key
         
         # 路径映射规则（workspace-relative）
-        # 原则：只有多文件的 domain 才用子目录（audio/, tts/），其余拍平到根
+        # 按语义角色分层：
+        #   source/  — SSOT，人工可编辑
+        #   derive/  — 确定性派生，可重算
+        #   mt/      — LLM 不稳定产物
+        #   tts/     — TTS 合成产物
+        #   audio/   — 声学工程
+        #   render/  — 最终交付物
         path_map = {
             "demux": {
                 "audio": "audio/{episode_stem}.wav",
             },
             "sep": {
                 "vocals": "audio/{episode_stem}-vocals.wav",
-                "vocals_16k": "audio/{episode_stem}-vocals-16k.wav",
                 "accompaniment": "audio/{episode_stem}-accompaniment.wav",
             },
             "asr": {
-                "asr_result": "asr-result.json",
+                "asr_result": "source/asr-result.json",
             },
             "subs": {
-                "subtitle_model": "subtitle.model.json",
-                "subtitle_align": "subtitle.align.json",
-                "zh_srt": "zh.srt",
-                "en_srt": "en.srt",
+                "subtitle_model": "source/subtitle.model.json",
+                "subtitle_align": "derive/subtitle.align.json",
+                "zh_srt": "render/zh.srt",
+                "en_srt": "render/en.srt",
             },
             "mt": {
-                "mt_input": "mt_input.jsonl",
-                "mt_output": "mt_output.jsonl",
+                "mt_input": "mt/mt_input.jsonl",
+                "mt_output": "mt/mt_output.jsonl",
             },
             "tts": {
                 "audio": "audio/{episode_stem}-tts.wav",
-                "voice_assignment": "voice-assignment.json",
+                "voice_assignment": "derive/voice-assignment.json",
                 "sentence": "tts/sentence.json",
                 "segments_dir": "tts/segments",
+                "segments_index": "tts/segments.json",
                 "report": "tts/tts_report.json",
             },
             "voiceprint": {
-                "speaker_map": "voiceprint/speaker_map.json",
-                "reference_clips": "voiceprint/refs",
+                "speaker_map": "derive/voiceprint/speaker_map.json",
+                "reference_clips": "derive/voiceprint/refs",
             },
             "dub": {
-                "dub_manifest": "dub_manifest.json",
+                "dub_manifest": "source/dub.model.json",
             },
             "mix": {
                 "audio": "audio/{episode_stem}-mix.wav",
             },
             "burn": {
-                "video": "{episode_stem}-dubbed.mp4",
+                "video": "render/{episode_stem}-dubbed.mp4",
             },
         }
         

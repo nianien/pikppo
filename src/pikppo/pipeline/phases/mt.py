@@ -296,7 +296,8 @@ class MTPhase(Phase):
             utt_id = utterance.get("utt_id", "")
             start_ms = utterance.get("start_ms", 0)
             end_ms = utterance.get("end_ms", 0)
-            speech_rate = utterance.get("speech_rate", {})
+            speaker_obj = utterance.get("speaker", {})
+            speech_rate = speaker_obj.get("speech_rate", {})
             zh_tps = speech_rate.get("zh_tps", 0.0)
             
             # 直接使用 utterance 的 text 字段（从 asr-result.json 获取，与 subtitle.model.json 对齐）

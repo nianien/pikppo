@@ -409,7 +409,7 @@ def synthesize_tts(
             continue
         
         voice_info = voice_assignment["speakers"].get(speaker, {})
-        # 优先用 voice_type（speakers_to_role 模式），回退到扁平 voice_id，再回退到嵌套结构
+        # 优先用 voice_type（speaker_to_role 模式），回退到扁平 voice_id，再回退到嵌套结构
         voice_id = (
             voice_info.get("voice_type")
             or voice_info.get("voice_id")

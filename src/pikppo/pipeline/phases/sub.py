@@ -54,45 +54,6 @@ class SubtitlePhase(Phase):
     name = "sub"
     version = "1.0.0"
     
-    @staticmethod
-    def _extract_gender_from_raw_response(
-        start_ms: int,
-        end_ms: int,
-        raw_utt_map: Dict[str, Dict[str, Any]],
-    ) -> Optional[str]:
-        """
-        从 raw_response 中提取 gender 信息。
-        
-        Args:
-            start_ms: utterance 开始时间
-            end_ms: utterance 结束时间
-            raw_utt_map: 原始 utterance 映射（key: "{start}_{end}"）
-        
-        Returns:
-            gender 字符串（如 "male", "female"），如果不存在则返回 None
-        """
-        # 尝试匹配原始 utterance（使用时间范围）
-        key = f"{start_ms}_{end_ms}"
-        raw_utt = raw_utt_map.get(key)
-        if raw_utt:
-            additions = raw_utt.get("additions") or {}
-            gender = additions.get("gender")
-            if gender:
-                return str(gender).strip()
-        
-        # 如果精确匹配失败，尝试模糊匹配（找到包含此时间范围的 utterance）
-        for key, raw_utt in raw_utt_map.items():
-            utt_start = int(key.split("_")[0])
-            utt_end = int(key.split("_")[1])
-            # 检查时间范围是否重叠
-            if start_ms >= utt_start and end_ms <= utt_end:
-                additions = raw_utt.get("additions") or {}
-                gender = additions.get("gender")
-                if gender:
-                    return str(gender).strip()
-        
-        return None
-    
     def requires(self) -> list[str]:
         """需要 asr.asr_result（SSOT：原始响应，包含完整语义信息）。"""
         return ["asr.asr_result"]
@@ -206,7 +167,7 @@ class SubtitlePhase(Phase):
             
             # 计算总 cues 数
             total_cues = sum(len(utt.cues) for utt in subtitle_model.utterances)
-            info(f"Generated Subtitle Model v1.2 ({len(subtitle_model.utterances)} utterances, {total_cues} cues)")
+            info(f"Generated Subtitle Model v1.3 ({len(subtitle_model.utterances)} utterances, {total_cues} cues)")
             
             # Phase 层负责文件 IO：写入到 runner 预分配的 outputs.paths
             
@@ -214,19 +175,6 @@ class SubtitlePhase(Phase):
             # 从 raw_response 中提取 utterance 信息（用于序列化时获取 text 和 gender）
             result = raw_response.get("result") or {}
             raw_utterances = result.get("utterances") or []
-            # 构建 utterance 索引映射（按顺序，用于匹配）
-            raw_utt_by_index: Dict[int, Dict[str, Any]] = {}
-            for i, raw_utt in enumerate(raw_utterances):
-                raw_utt_by_index[i] = raw_utt
-            
-            # 构建时间范围映射（用于提取 gender）
-            raw_utt_map: Dict[str, Dict[str, Any]] = {}
-            for raw_utt in raw_utterances:
-                utt_start = int(raw_utt.get("start_time", 0))
-                utt_end = int(raw_utt.get("end_time", utt_start))
-                key = f"{utt_start}_{utt_end}"
-                raw_utt_map[key] = raw_utt
-            
             model_path = outputs.get("subs.subtitle_model")
             model_dict = {
                 "schema": {
@@ -237,24 +185,23 @@ class SubtitlePhase(Phase):
                 "utterances": [
                     {
                         "utt_id": utt.utt_id,
-                        "speaker": utt.speaker,
+                        "speaker": {
+                            "id": utt.speaker.id,
+                            "gender": utt.speaker.gender,
+                            "speech_rate": {
+                                "zh_tps": utt.speaker.speech_rate.zh_tps,
+                            },
+                            "emotion": {
+                                "label": utt.speaker.emotion.label,
+                                "confidence": utt.speaker.emotion.confidence,
+                                "intensity": utt.speaker.emotion.intensity,
+                            } if utt.speaker.emotion else None,
+                        },
                         "start_ms": utt.start_ms,  # 取自 asr-result.json
                         "end_ms": utt.end_ms,  # 取自 asr-result.json
-                        "speech_rate": {
-                            "zh_tps": utt.speech_rate.zh_tps,
-                        },
-                        "emotion": {
-                            "label": utt.emotion.label,
-                            "confidence": utt.emotion.confidence,
-                            "intensity": utt.emotion.intensity,
-                        } if utt.emotion else None,
                         # utterance 维度的 text 字段：以 cues 为准（SSOT 自洽）
-                        # 重要：SSOT 生成阶段可能会按“超长停顿”拆分 utterance，因此不能再依赖 raw_utterance 精确匹配。
+                        # 重要：SSOT 生成阶段可能会按"超长停顿"拆分 utterance，因此不能再依赖 raw_utterance 精确匹配。
                         "text": "".join(cue.source.text for cue in utt.cues),
-                        # 从 raw_response 提取 gender 信息
-                        "gender": SubtitlePhase._extract_gender_from_raw_response(
-                            utt.start_ms, utt.end_ms, raw_utt_map
-                        ),
                         "cues": [
                             {
                                 "start_ms": cue.start_ms,
@@ -284,31 +231,33 @@ class SubtitlePhase(Phase):
             for utt in subtitle_model.utterances:
                 for cue in utt.cues:
                     segments_for_srt.append(Segment(
-                        speaker=utt.speaker,  # 使用 utterance 级别的 speaker
+                        speaker=utt.speaker.id,  # 使用 utterance 级别的 speaker id
                         start_ms=cue.start_ms,
                         end_ms=cue.end_ms,
                         text=cue.source.text,  # 使用 source.text
-                        emotion=utt.emotion.label if utt.emotion else None,  # 使用 utterance 级别的 emotion
-                        gender=None,  # v1.2 不再包含 gender
+                        emotion=utt.speaker.emotion.label if utt.speaker.emotion else None,
+                        gender=utt.speaker.gender,
                     ))
             srt_path = outputs.get("subs.zh_srt")
             render_srt(segments_for_srt, srt_path)
             info(f"Rendered SRT file to: {srt_path}")
             
-            # Side-effect: 更新 speakers_to_role.json（剧集级文件）
-            # 从 model_dict 提取 unique speakers，写入 {episode}/speakers_to_role.json
+            # Side-effect: 更新 speaker_to_role.json（剧级文件，按集分 key）
+            # 路径：{series}/dub/voices/speaker_to_role.json
             try:
                 unique_speakers = list(dict.fromkeys(
-                    utt_dict["speaker"]
+                    utt_dict["speaker"]["id"]
                     for utt_dict in model_dict["utterances"]
-                    if utt_dict.get("speaker")
+                    if utt_dict.get("speaker", {}).get("id")
                 ))
                 if unique_speakers:
-                    from pikppo.pipeline.processors.voiceprint.speakers_to_role import update_speakers_to_role
-                    str_path = str(workspace_path / "speakers_to_role.json")
-                    update_speakers_to_role(unique_speakers, str_path)
+                    from pikppo.pipeline.processors.voiceprint.speaker_to_role import update_speaker_to_role
+                    voices_dir = workspace_path.parent / "voices"
+                    str_path = str(voices_dir / "speaker_to_role.json")
+                    episode_id = workspace_path.name
+                    update_speaker_to_role(unique_speakers, str_path, episode_id)
             except Exception as e:
-                info(f"Warning: failed to update speakers_to_role.json: {e}")
+                info(f"Warning: failed to update speaker_to_role.json: {e}")
 
             # 返回 PhaseResult：只声明哪些 outputs 成功
             return PhaseResult(

@@ -46,7 +46,7 @@ __all__ = [
     "UtteranceList",
     "SegmentList",
     "SrtCueList",
-    # Subtitle Model v1.2
+    # Subtitle Model v1.3
     "SubtitleModel",
     "SubtitleCue",
     "SubtitleUtterance",  # Subtitle Model 中的 Utterance（避免与 ASR Utterance 冲突）

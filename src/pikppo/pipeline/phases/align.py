@@ -3,7 +3,7 @@ Align Phase: 时间对齐与重断句（不调模型）
 
 职责：
 - 将 mt 输出的英文整段文本映射到 SSOT 的时间骨架
-- 生成 dub_manifest.json 作为 TTS/Mix 的 SSOT
+- 生成 dub.model.json 作为 TTS/Mix 的 SSOT
 - 在 utterance 内重断句生成 segments[]
 - 导出 en.srt
 """
@@ -210,9 +210,11 @@ class AlignPhase(Phase):
             start_ms = utterance.get("start_ms", 0)
             end_ms_src = utterance.get("end_ms", 0)
             cues = utterance.get("cues", [])
-            speaker = utterance.get("speaker", "")
-            speech_rate = utterance.get("speech_rate", {})
-            emotion = utterance.get("emotion")
+            speaker_obj = utterance.get("speaker", {})
+            speaker = speaker_obj.get("id", "")
+            speech_rate = speaker_obj.get("speech_rate", {})
+            emotion = speaker_obj.get("emotion")
+            gender = speaker_obj.get("gender")
             
             # 获取翻译结果
             mt_output = mt_output_map.get(utt_id)
@@ -349,7 +351,7 @@ class AlignPhase(Phase):
         write_srt_from_segments(all_segments_for_srt, str(en_srt_path), text_key="en_text")
         info(f"Saved en.srt: {len(all_segments_for_srt)} segments (所有占位符已替换)")
 
-        # Generate dub_manifest.json (SSOT for TTS + Mix phases)
+        # Generate dub.model.json (SSOT for TTS + Mix phases)
         # Get TTS policy config
         tts_config = ctx.config.get("phases", {}).get("tts", {})
         default_max_rate = float(tts_config.get("max_rate", 1.3))
@@ -394,6 +396,9 @@ class AlignPhase(Phase):
                 )
                 info(f"  {utt_id}: budget={budget_ms}ms < {min_tts_window_ms}ms, allow_extend_ms={utt_allow_extend_ms}ms")
 
+            # Extract speaker info from SSOT utterance (v1.3: speaker is object)
+            original_speaker_obj = original_utt.get("speaker", {}) if original_utt else {}
+
             dub_utterances.append(
                 DubUtterance(
                     utt_id=utt_id,
@@ -407,8 +412,8 @@ class AlignPhase(Phase):
                         max_rate=default_max_rate,
                         allow_extend_ms=utt_allow_extend_ms,
                     ),
-                    emotion=utt.get("emotion"),
-                    gender=None,  # Gender is assigned in TTS phase
+                    emotion=original_speaker_obj.get("emotion"),
+                    gender=original_speaker_obj.get("gender"),
                 )
             )
 
@@ -418,12 +423,12 @@ class AlignPhase(Phase):
             utterances=dub_utterances,
         )
 
-        # Save dub_manifest.json
+        # Save dub.model.json
         dub_manifest_path = outputs.get("dub.dub_manifest")
         dub_manifest_path.parent.mkdir(parents=True, exist_ok=True)
         with open(dub_manifest_path, "w", encoding="utf-8") as f:
             json.dump(dub_manifest_to_dict(dub_manifest), f, indent=2, ensure_ascii=False)
-        info(f"Saved dub_manifest.json: {len(dub_utterances)} utterances, audio_duration_ms={audio_duration_ms}")
+        info(f"Saved dub.model.json: {len(dub_utterances)} utterances, audio_duration_ms={audio_duration_ms}")
 
         # 返回 PhaseResult
         return PhaseResult(

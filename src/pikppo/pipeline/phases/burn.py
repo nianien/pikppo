@@ -74,11 +74,8 @@ class BurnPhase(Phase):
                 ),
             )
         
-        workspace_path = Path(ctx.workspace)
-        episode_stem = workspace_path.name
-        
-        # 输出视频路径
-        output_video_path = workspace_path / f"{episode_stem}-dubbed.mp4"
+        # 输出视频路径（使用 runner 预分配的 outputs）
+        output_video_path = outputs.get("burn.video")
         
         try:
             # 使用 ffmpeg 烧录字幕

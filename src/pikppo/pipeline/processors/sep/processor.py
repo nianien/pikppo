@@ -11,40 +11,10 @@ Separation Processor: 人声分离（唯一对外入口）
 - 内部实现放在 impl.py
 - Phase 层只调用 processor.run()
 """
-import subprocess
 from pathlib import Path
 
 from .._types import ProcessorResult
 from .impl import separate_vocals
-
-
-def _convert_to_16k_mono(input_path: str, output_path: str) -> None:
-    """
-    将音频转换为 16kHz 单声道 WAV 格式。
-    
-    Args:
-        input_path: 输入音频文件路径
-        output_path: 输出音频文件路径（16kHz mono WAV）
-    """
-    output_file = Path(output_path)
-    output_file.parent.mkdir(parents=True, exist_ok=True)
-    
-    cmd = [
-        "ffmpeg",
-        "-i", str(input_path),
-        "-ar", "16000",      # 采样率 16kHz
-        "-ac", "1",          # 单声道
-        "-acodec", "pcm_s16le",  # PCM 16-bit little-endian
-        "-y",                 # 覆盖输出文件
-        str(output_path),
-    ]
-    
-    try:
-        subprocess.run(cmd, check=True, capture_output=True, text=True)
-    except subprocess.CalledProcessError as e:
-        raise RuntimeError(
-            f"Failed to convert audio to 16kHz mono: {e.stderr or e.stdout or 'Unknown error'}"
-        ) from e
 
 
 def run(
@@ -82,7 +52,6 @@ def run(
     
     # 复制到最终输出路径
     import shutil
-    import subprocess
     vocals_output = Path(vocals_output_path)
     accompaniment_output = Path(accompaniment_output_path)
     
@@ -91,16 +60,7 @@ def run(
     
     shutil.copy2(vocals_temp_path, vocals_output)
     shutil.copy2(accompaniment_temp_path, accompaniment_output)
-    
-    # 生成 16kHz 单声道版本（用于 ASR，如果需要）
-    # vocals-16k.wav: 16kHz mono 版本的人声
-    vocals_16k_output = vocals_output.parent / f"{vocals_output.stem}-16k.wav"
-    _convert_to_16k_mono(str(vocals_output), str(vocals_16k_output))
-    
-    # raw-16k.wav: 原始音频的 16kHz mono 版本（如果输入不是 16k）
-    raw_16k_output = vocals_output.parent / "raw-16k.wav"
-    _convert_to_16k_mono(audio_path, str(raw_16k_output))
-    
+
     # 验证输出文件
     if not vocals_output.exists():
         raise RuntimeError(f"Vocal separation failed: {vocals_output_path} was not created")
