@@ -103,7 +103,6 @@ class PipelineConfig:
     # ── ASR 配置 ──
     doubao_asr_preset: str = "asr_spk_semantic"
     doubao_audio_url: str | None = None  # 音频 URL（None = 自动上传 TOS）
-    doubao_hotwords: list[str] = field(default_factory=lambda: ["平安", "平安哥", "于平安"])
     asr_use_vocals: bool = False  # True = 用分离后的 vocals 做 ASR
 
     # ── SUB 配置 ──

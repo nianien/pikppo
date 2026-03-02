@@ -361,10 +361,10 @@ export function TranscriptList() {
               onDoubleClick={() => handleDoubleClick(seg)}
               onContextMenu={e => handleContextMenu(e, seg)}
             >
-              {/* Time: start + duration */}
+              {/* Time: start + end */}
               <div className="text-xs text-gray-400 font-mono w-28 shrink-0 pt-1 leading-tight">
                 <div>{msToDisplay(seg.start_ms)}</div>
-                <div className="text-gray-600">{((seg.end_ms - seg.start_ms) / 1000).toFixed(1)}s</div>
+                <div className="text-gray-600">{msToDisplay(seg.end_ms)}</div>
               </div>
 
               {/* Speaker badge — click to open role dropdown */}
