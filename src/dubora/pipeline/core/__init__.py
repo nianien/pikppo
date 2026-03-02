@@ -6,7 +6,6 @@ from .phase import Phase
 from .manifest import Manifest, now_iso
 from .runner import PhaseRunner
 from .fingerprints import (
-    compute_inputs_fingerprint,
     compute_config_fingerprint,
     hash_file,
     hash_json,
@@ -23,7 +22,6 @@ __all__ = [
     "Manifest",
     "now_iso",
     "PhaseRunner",
-    "compute_inputs_fingerprint",
     "compute_config_fingerprint",
     "hash_file",
     "hash_json",

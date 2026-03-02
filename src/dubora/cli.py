@@ -4,12 +4,13 @@ CLI entry point for dubora pipeline (Pipeline Framework v1)
 支持批量操作：
   vsd run videos/drama/[4-70].mp4 --to burn
   vsd bless videos/drama/[1-10].mp4 parse
-  vsd fix videos/drama/[1-10].mp4 asr
 """
 import argparse
 import re
 import sys
 import uuid
+from dataclasses import asdict
+from importlib.metadata import version
 from pathlib import Path
 from typing import List
 
@@ -18,7 +19,7 @@ from dubora.pipeline.phases import ALL_PHASES, build_phases
 from dubora.pipeline.core.runner import PhaseRunner
 from dubora.pipeline.core.manifest import Manifest
 from dubora.pipeline.core.types import RunContext
-from dubora.utils.logger import info, error, success
+from dubora.utils.logger import info, warning, error, success
 
 
 def get_workdir(video_path: Path) -> Path:
@@ -32,31 +33,15 @@ def get_workdir(video_path: Path) -> Path:
     video_path = Path(video_path).resolve()
     parent_dir = video_path.parent
     video_stem = video_path.stem
-    workdir = parent_dir / "dub" / video_stem
-    workdir.mkdir(parents=True, exist_ok=True)
-    return workdir
+    return parent_dir / "dub" / video_stem
 
 
 def config_to_dict(config: PipelineConfig) -> dict:
     """将 PipelineConfig 转换为 dict，用于 RunContext。"""
-    return {
-        "video_path": None,
-        "doubao_asr_preset": config.doubao_asr_preset,
-        "doubao_postprofile": config.doubao_postprofile,
-        "doubao_hotwords": config.doubao_hotwords,
-        "openai_model": config.openai_model,
-        "openai_temperature": config.openai_temperature,
-        "azure_tts_key": config.azure_tts_key,
-        "azure_tts_region": config.azure_tts_region,
-        "azure_tts_language": config.azure_tts_language,
-        "tts_engine": config.tts_engine,
-        "tts_max_workers": config.tts_max_workers,
-        "tts_mute_original": config.tts_mute_original,
-        "voice_pool_path": config.voice_pool_path,
-        "dub_target_lufs": config.dub_target_lufs,
-        "dub_true_peak": config.dub_true_peak,
-        "phases": {},
-    }
+    d = asdict(config)
+    d["video_path"] = None
+    d["phases"] = {}
+    return d
 
 
 def expand_video_pattern(pattern: str) -> List[Path]:
@@ -87,6 +72,8 @@ def expand_video_pattern(pattern: str) -> List[Path]:
         p = Path(f"{dir_part}{i}{ext_part}")
         if p.exists():
             paths.append(p)
+        else:
+            warning(f"Skipped (not found): {p}")
 
     paths.sort(key=lambda p: int(m2.group(1)) if (m2 := re.search(r'(\d+)', p.stem)) else 0)
     return paths
@@ -97,6 +84,7 @@ def expand_video_pattern(pattern: str) -> List[Path]:
 def run_one(video_path: Path, args, config: PipelineConfig):
     """对单个视频执行 pipeline run。"""
     workdir = get_workdir(video_path)
+    workdir.mkdir(parents=True, exist_ok=True)
     manifest_path = workdir / "manifest.json"
     manifest = Manifest(manifest_path)
 
@@ -197,6 +185,10 @@ Examples:
   vsd bless videos/drama/1-10.mp4 parse                # Batch bless
         """
     )
+    parser.add_argument(
+        "-V", "--version", action="version",
+        version=f"%(prog)s {version('dubora')}",
+    )
 
     subparsers = parser.add_subparsers(dest="command", help="Command")
 
@@ -233,16 +225,30 @@ Examples:
         parser.print_help()
         sys.exit(1)
 
+    if args.command == "run" and getattr(args, "from_phase", None) and getattr(args, "to", None):
+        from_idx = phase_names.index(args.from_phase)
+        to_idx = phase_names.index(args.to)
+        if from_idx > to_idx:
+            parser.error(f"--from ({args.from_phase}) must be before --to ({args.to})")
+
     load_env_file()
 
     if args.command == "phases":
-        from dubora.pipeline.phases import GATE_AFTER
-        info("Available phases:")
-        for phase in ALL_PHASES:
-            info(f"  - {phase.name} ({phase.label}) v{phase.version}: requires={phase.requires()}, provides={phase.provides()}")
-            gate = GATE_AFTER.get(phase.name)
-            if gate:
-                info(f"    [Gate: {gate['key']} - {gate['label']}]")
+        from dubora.pipeline.phases import STAGES, GATE_AFTER
+        phase_map = {p.name: p for p in ALL_PHASES}
+        gate_count = len(GATE_AFTER)
+        print(f"\nPipeline ({len(ALL_PHASES)} phases, {gate_count} gates):\n")
+        print(f"  {'Stage':<8}{'Phase':<9}{'Version':<9}Gate")
+        print(f"  {'──────':<8}{'───────':<9}{'───────':<9}────")
+        for stage in STAGES:
+            stage_label = stage["label"]
+            for i, pname in enumerate(stage["phases"]):
+                phase = phase_map[pname]
+                label = stage_label if i == 0 else ""
+                gate = GATE_AFTER.get(pname)
+                gate_str = f"\u2190 {gate['label']}" if gate else ""
+                print(f"  {label:<8}{phase.name:<9}{phase.version:<9}{gate_str}")
+        print()
         return
 
     if args.command == "ide":
@@ -321,10 +327,14 @@ def _run_ide(args):
         dist_dir = web_dir / "dist" if web_dir else None
         needs_build = False
         if dist_dir and dist_dir.is_dir():
-            # 检查 src 是否比 dist 更新
-            src_dir = web_dir / "src"
-            if src_dir.is_dir():
-                src_mtime = max(f.stat().st_mtime for f in src_dir.rglob("*") if f.is_file())
+            # 检查 src/ public/ index.html 是否比 dist 更新
+            watch_dirs = [web_dir / "src", web_dir / "public"]
+            watch_files = [f for d in watch_dirs if d.is_dir() for f in d.rglob("*") if f.is_file()]
+            index_html = web_dir / "index.html"
+            if index_html.is_file():
+                watch_files.append(index_html)
+            if watch_files:
+                src_mtime = max(f.stat().st_mtime for f in watch_files)
                 dist_mtime = max(f.stat().st_mtime for f in dist_dir.rglob("*") if f.is_file())
                 if src_mtime > dist_mtime:
                     needs_build = True

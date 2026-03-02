@@ -25,14 +25,14 @@ from dubora.pipeline.core.types import Artifact, ErrorInfo, PhaseResult, RunCont
 from dubora.pipeline.processors.srt import run as srt_run
 from dubora.schema.asr_model import AsrModel, AsrSegment, AsrMediaInfo, AsrHistory, AsrFingerprint
 from dubora.config import resolve_emotion
-from dubora.utils.logger import info
+from dubora.utils.logger import info, warning
 
 
 class ParsePhase(Phase):
     """字幕后处理 Phase。"""
 
     name = "parse"
-    version = "1.1.0"
+    version = "2.0.0"
 
     def requires(self) -> list[str]:
         """需要 asr.asr_result（word 级时间轴）。"""
@@ -152,11 +152,12 @@ class ParsePhase(Phase):
             # 将 SubtitleModel 转换为 AsrModel 格式（dub.json SSOT）
             segments = []
             for utt in subtitle_model.utterances:
+                text = "".join(cue.source.text for cue in utt.cues).rstrip("，。,.")
                 segments.append(AsrSegment(
                     id=utt.utt_id,
                     start_ms=utt.start_ms,
                     end_ms=utt.end_ms,
-                    text="".join(cue.source.text for cue in utt.cues),
+                    text=text,
                     speaker=utt.speaker.id,
                     emotion=resolve_emotion(utt.speaker.emotion.label) if utt.speaker.emotion else "neutral",
                     gender=utt.speaker.gender,
@@ -177,16 +178,30 @@ class ParsePhase(Phase):
                 json.dump(asr_model.to_dict(), f, indent=2, ensure_ascii=False)
             info(f"Saved dub.json (SSOT) to: {model_path}")
 
+            # ── Reseg（断句优化，合并自原 ResegPhase）──
+            reseg_metrics = {}
+            reseg_config = ctx.config.get("phases", {}).get("reseg", {})
+            reseg_enabled = reseg_config.get("enabled", ctx.config.get("reseg_enabled", True))
+
+            if reseg_enabled and segments:
+                reseg_metrics = self._run_reseg(
+                    ctx, asr_model, raw_response, model_path, reseg_config,
+                )
+
+            metrics = {
+                "utterances_count": len(subtitle_model.utterances),
+                "cues_count": total_cues,
+                "segments_count": len(segments),
+            }
+            if reseg_metrics:
+                metrics["reseg"] = reseg_metrics
+
             return PhaseResult(
                 status="succeeded",
                 outputs=[
                     "dub.dub_manifest",
                 ],
-                metrics={
-                    "utterances_count": len(subtitle_model.utterances),
-                    "cues_count": total_cues,
-                    "segments_count": len(segments),
-                },
+                metrics=metrics,
             )
 
         except Exception as e:
@@ -197,3 +212,111 @@ class ParsePhase(Phase):
                     message=str(e),
                 ),
             )
+
+    def _run_reseg(
+        self,
+        ctx: RunContext,
+        asr_model,
+        raw_response: dict,
+        model_path: Path,
+        reseg_config: dict,
+    ) -> dict:
+        """执行 reseg 断句优化（合并自原 ResegPhase）。
+
+        Returns:
+            metrics 字典（空字典表示跳过或无拆分）
+        """
+        segments = asr_model.segments
+
+        # 构造 translate_fn（复用 MT 的引擎选择逻辑）
+        engine = reseg_config.get("engine")
+        if not engine:
+            model_name = reseg_config.get("model", ctx.config.get("mt_model", ""))
+            if model_name.startswith("gemini"):
+                engine = "gemini"
+            elif model_name.startswith("gpt") or model_name.startswith("o1"):
+                engine = "openai"
+            else:
+                engine = ctx.config.get("mt_engine", "gemini")
+
+        engine = engine.lower()
+        is_gemini = (engine == "gemini")
+
+        if is_gemini:
+            from dubora.config.settings import get_gemini_key
+            model = reseg_config.get(
+                "model",
+                ctx.config.get("mt_model", ctx.config.get("gemini_model", "gemini-2.0-flash")),
+            )
+            api_key = reseg_config.get("api_key") or get_gemini_key()
+            if not api_key:
+                warning("Reseg skipped: Gemini API key not found")
+                return {}
+            temperature = reseg_config.get("temperature", 0.3)
+            info(f"Reseg using Gemini engine: {model}")
+        else:
+            from dubora.config.settings import get_openai_key
+            model = reseg_config.get(
+                "model",
+                ctx.config.get("mt_model", ctx.config.get("openai_model", "gpt-4o-mini")),
+            )
+            api_key = reseg_config.get("api_key") or get_openai_key()
+            if not api_key:
+                warning("Reseg skipped: OpenAI API key not found")
+                return {}
+            temperature = reseg_config.get("temperature", 0.3)
+            info(f"Reseg using OpenAI engine: {model}")
+
+        try:
+            from dubora.pipeline.processors.mt.time_aware_impl import create_translate_fn
+            translate_fn = create_translate_fn(
+                api_key=api_key,
+                model=model,
+                temperature=temperature,
+            )
+        except Exception as e:
+            warning(f"Reseg skipped: failed to create translate function: {e}")
+            return {}
+
+        # 读取 reseg 参数
+        min_chars = reseg_config.get(
+            "min_chars", ctx.config.get("reseg_min_chars", 6),
+        )
+        max_chars_trigger = reseg_config.get(
+            "max_chars_trigger", ctx.config.get("reseg_max_chars_trigger", 25),
+        )
+        max_duration_trigger = reseg_config.get(
+            "max_duration_trigger", ctx.config.get("reseg_max_duration_trigger", 6000),
+        )
+
+        # 调用 processor
+        from dubora.pipeline.processors.reseg import run as reseg_run
+        result = reseg_run(
+            segments=segments,
+            asr_result=raw_response,
+            min_chars=min_chars,
+            max_chars_trigger=max_chars_trigger,
+            max_duration_trigger=max_duration_trigger,
+            translate_fn=translate_fn,
+        )
+
+        metrics = {
+            "candidates_count": result.candidates_count,
+            "split_count": result.split_count,
+            "new_segments_count": result.new_segments_count,
+        }
+
+        if result.split_count == 0:
+            info("Reseg: no segments were split, dub.json unchanged")
+            return metrics
+
+        # 替换 segments，更新 dub.json
+        asr_model.segments = result.new_segments
+        asr_model.bump_rev()
+        asr_model.update_fingerprint()
+
+        with open(model_path, "w", encoding="utf-8") as f:
+            json.dump(asr_model.to_dict(), f, indent=2, ensure_ascii=False)
+
+        info(f"Reseg: saved updated dub.json to: {model_path}")
+        return metrics

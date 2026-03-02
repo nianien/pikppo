@@ -4,7 +4,8 @@
 # 用于 Stage 1 流程：先分析再翻译，保证全集翻译一致性
 #
 # 使用方: translate_prompts.py:build_stage1_prompt()
-# 变量: $episode_text, $max_chars_per_line, $max_lines,
+# 变量: $episode_text, $story_background_block,
+#        $max_chars_per_line, $max_lines,
 #        $target_cps, $avoid_formal, $profanity_policy
 # ============================================================
 
@@ -28,6 +29,7 @@ system: |
   }
 
 user: |
+  $story_background_block
   Analyze the following Chinese subtitle text and generate translation context:
 
   $episode_text

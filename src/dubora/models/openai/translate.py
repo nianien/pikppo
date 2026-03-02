@@ -21,10 +21,11 @@ def build_translation_context(
     target_cps: str = "12-17",
     avoid_formal: bool = True,
     profanity_policy: str = "soften",
+    story_background: str = "",
 ) -> Dict[str, Any]:
     """
     Stage 1: 生成翻译上下文。
-    
+
     Args:
         zh_episode_text: 整集中文字幕文本（用换行符连接）
         api_key: OpenAI API key
@@ -47,6 +48,7 @@ def build_translation_context(
         target_cps=target_cps,
         avoid_formal=avoid_formal,
         profanity_policy=profanity_policy,
+        story_background=story_background,
     )
     
     info(f"Calling OpenAI for translation context (model: {model})...")

@@ -6,6 +6,17 @@ import type { ExportResult } from '../types/asr-model'
 import { usePipelineStore } from './pipeline-store'
 import { useEditorStore } from './editor-store'
 
+// Auto-save: debounce 2s after last mutation
+let _autoSaveTimer: ReturnType<typeof setTimeout> | null = null
+function scheduleAutoSave() {
+  if (_autoSaveTimer) clearTimeout(_autoSaveTimer)
+  _autoSaveTimer = setTimeout(() => {
+    _autoSaveTimer = null
+    const { dirty, saveModel } = useModelStore.getState()
+    if (dirty) saveModel()
+  }, 2000)
+}
+
 interface ModelState {
   // episode selection
   episodes: Episode[]
@@ -156,12 +167,14 @@ export const useModelStore = create<ModelState>((set, get) => ({
       seg.id === id ? { ...seg, ...patch } : seg
     )
     set({ model: { ...model, segments }, dirty: true })
+    scheduleAutoSave()
   },
 
   updateSegments: (segments) => {
     const { model } = get()
     if (!model) return
     set({ model: { ...model, segments }, dirty: true })
+    scheduleAutoSave()
   },
 
   setDirty: (dirty) => set({ dirty }),

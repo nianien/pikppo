@@ -23,27 +23,36 @@
 ### 2.1 Pipeline 总览
 
 ```
-demux → sep → asr → sub → [人工校验] → mt → align → tts → mix → burn
-  |       |      |      |                  |      |       |      |      |
-  |       |      |      |                  |      |       |      |      +-- burn.video (成片)
-  |       |      |      |                  |      |       |      +-- mix.audio (混音)
-  |       |      |      |                  |      |       +-- tts/segments/ (逐句音频)
-  |       |      |      |                  |      +-- dub.model.json (SSOT)
-  |       |      |      |                  +-- mt_output.jsonl
-  |       |      |      +-- subtitle.model.json (SSOT)
-  |       |      +-- asr-result.json
-  |       +-- vocals.wav / accompaniment.wav
-  +-- audio.wav
+Stage:  提取      识别                    [校准]  翻译          [审阅]  配音        合成
+Phase:  extract   asr → parse → reseg            mt → align            tts → mix   burn
+Gate:                                     ↑                      ↑
+                                  source_review          translation_review
 ```
 
-9 个阶段严格线性执行，通过 `manifest.json` 记录状态和指纹，支持增量跑。
+9 个阶段严格线性执行，通过 `manifest.json` 记录状态和指纹，支持增量跑。两个门控（Gate）在阶段间设置人工审核点。
+
+**产物流**：
+
+```
+extract → audio.wav, vocals.wav, accompaniment.wav
+asr     → asr-result.json
+parse   → dub.json (AsrModel v2, IDE 工作 SSOT)
+reseg   → dub.json (更新长句重断句)
+  ── [source_review gate: 人工在 IDE 中校准] ──
+mt      → mt_output.jsonl
+align   → dub.json (填入 text_en + tts_policy)
+  ── [translation_review gate: 人工审阅翻译] ──
+tts     → tts/segments/ (逐句音频)
+mix     → mix.wav (混音)
+burn    → dubbed.mp4 (成片)
+```
 
 ### 2.2 整体分层
 
 ```
 +-------------------------------------------------------------+
 |  CLI (cli.py)                                               |
-|  run / bless / fix / phases ; config_to_dict -> RunContext  |
+|  run / bless / phases / ide ; config_to_dict -> RunContext  |
 +-----------------------------+-------------------------------+
                               |
 +-----------------------------v-------------------------------+
@@ -53,8 +62,8 @@ demux → sep → asr → sub → [人工校验] → mt → align → tts → mi
                               |
 +-----------------------------v-------------------------------+
 |  Phases (pipeline/phases/)       | Processors (stateless)   |
-|  demux->sep->asr->sub->mt->     | 纯计算、可单测            |
-|  align->tts->mix->burn          |                           |
+|  extract->asr->parse->reseg->   | 纯计算、可单测            |
+|  mt->align->tts->mix->burn      |                           |
 +-----------------------------+-------------------------------+
                               |
 +-----------------------------v-------------------------------+
@@ -73,18 +82,21 @@ demux → sep → asr → sub → [人工校验] → mt → align → tts → mi
 vsd run video.mp4 --to burn                    # 全流程
 vsd run video.mp4 --from mt --to tts           # 从 mt 强制重跑到 tts
 vsd run video.mp4 --to burn                    # 增量跑（已完成的阶段自动跳过）
-vsd bless video.mp4 sub                        # 手动编辑产物后刷新指纹
-vsd fix video.mp4 asr                          # 从 asr-result.json 重新生成 asr.fix.json
+vsd bless video.mp4 parse                      # 手动编辑产物后刷新指纹
 vsd run videos/drama/4-70.mp4 --to burn        # 批量模式（4-70 集）
+vsd ide --videos ./videos                      # 启动 ASR Calibration IDE
+vsd phases                                     # 列出所有阶段
 ```
 
 ### 2.4 核心数据流（三个 SSOT）
 
-| SSOT | 产出阶段 | 消费阶段 | 说明 |
-|------|---------|---------|------|
-| `asr-result.json` | asr | sub | ASR 原始响应，包含 word 级时间戳、speaker、emotion |
-| `subtitle.model.json` | sub | mt, align | 字幕数据源，utterance + cue 结构，支持人工校验 |
-| `dub.model.json` | align | tts, mix | 配音时间轴，包含翻译文本、时长预算、voice 映射 |
+| SSOT | 文件 | 位置 | 产出阶段 | 消费阶段 | 说明 |
+|------|------|------|---------|---------|------|
+| ASR 原始结果 | `asr-result.json` | `input/` | asr | parse | ASR 原始响应，word 级时间戳 + speaker + emotion |
+| 校准模型 | `dub.json` | `state/` | parse | reseg, mt, align, tts, mix | IDE 工作文件（AsrModel v2），人工校准的 SSOT |
+| 字幕模型 | `subtitle.model.json` | `state/` | export | （外部消费） | 导出产物，utterance + cue 结构 |
+
+`dub.json` 是整个流水线的核心 SSOT：parse 阶段从 ASR 结果生成，人工在 IDE 中校准，align 阶段填入翻译和时长策略，tts/mix 阶段消费最终结果。
 
 ### 2.5 文件布局
 
@@ -98,33 +110,32 @@ videos/{剧名}/                  # 剧级目录
     |   +-- names.json                  #   人名词典（中文 -> 英文）
     +-- 1/                              # 集级 workspace
         +-- manifest.json               # Pipeline 状态机
-        +-- source/                     # SSOT（人工可编辑）
+        +-- input/                      # 不可变输入（提取后不再修改）
         |   +-- asr-result.json         #   ASR 原始输出
-        |   +-- asr.fix.json            #   人工校准层（speaker/text/时间轴修正）
-        |   +-- subtitle.model.json     #   字幕 SSOT（bless 后可手改）
-        |   +-- dub.model.json          #   配音 SSOT（align 生成）
-        +-- derive/                     # 确定性派生（可重算）
-        |   +-- subtitle.align.json     #   时间对齐结果
-        |   +-- voice-assignment.json   #   声线分配快照
-        +-- mt/                         # 翻译产物（LLM 输出）
-        |   +-- mt_input.jsonl
-        |   +-- mt_output.jsonl
-        +-- tts/                        # 合成产物
-        |   +-- segments/               #   逐句 TTS 音频
-        |   +-- segments.json           #   段索引
-        |   +-- tts_report.json
-        +-- audio/                      # 声学工程
-        |   +-- 1.wav                   #   原始音频
+        |   +-- 1.wav                   #   提取的音频
         |   +-- 1-vocals.wav            #   人声
         |   +-- 1-accompaniment.wav     #   伴奏
+        +-- state/                      # SSOT（人工可编辑）
+        |   +-- dub.json                #   校准模型（IDE 工作文件）
+        |   +-- subtitle.model.json     #   字幕模型（导出产物）
+        +-- derived/                    # 可重算的派生产物
+        |   +-- mt/                     #   翻译产物
+        |   |   +-- mt_input.jsonl
+        |   |   +-- mt_output.jsonl
+        |   +-- tts/                    #   合成产物
+        |   |   +-- segments/           #     逐句 TTS 音频
+        |   |   +-- segments.json       #     段索引
+        |   |   +-- tts_report.json
+        |   +-- voiceprint/             #   声纹分析（可选）
+        |   +-- voice-assignment.json   #   声线分配快照
         |   +-- 1-mix.wav               #   最终混音
-        +-- render/                     # 最终交付物
+        +-- output/                     # 最终交付物
             +-- en.srt                  #   英文字幕
             +-- zh.srt                  #   中文字幕
             +-- 1-dubbed.mp4            #   成片
 ```
 
-目录按语义角色分层：`source/` 是人工可编辑的事实，`derive/` 是可重算的派生，`mt/`/`tts/` 是模型产物，`audio/` 是声学工程，`render/` 是最终交付。
+目录按语义角色分层：`input/` 是提取的不可变输入，`state/` 是人工可编辑的事实源，`derived/` 是可重算的中间产物，`output/` 是最终交付。
 
 ---
 
@@ -158,14 +169,27 @@ Runner 的 7 级检查决定是否跳过：
 6. **输出文件指纹不匹配** -> 跑（人工编辑会触发）
 7. status != succeeded -> 跑
 
-**`vsd bless` 命令**：人工编辑 subtitle.model.json 后，运行 `vsd bless video.mp4 sub` 刷新 manifest 中的输出指纹，避免 sub 阶段被重跑。
+**`vsd bless` 命令**：人工编辑 `dub.json` 后，运行 `vsd bless video.mp4 parse` 刷新 manifest 中的输出指纹，避免 parse 阶段被重跑。
 
-### 3.3 Processor / Phase 分离
+### 3.3 门控（Gates）
+
+门控在指定阶段完成后暂停流水线，等待人工审核：
+
+| Gate | 位置 | 标签 | 用途 |
+|------|------|------|------|
+| `source_review` | reseg 之后 | 校准 | ASR 校准审核，在 IDE 中检查/修正 speaker、文本、时间轴 |
+| `translation_review` | align 之后 | 审阅 | 翻译审核，检查英文翻译质量 |
+
+门控状态：`pending` → `awaiting`（等待审核） → `passed`（审核通过）。
+
+在 IDE 的 PipelinePanel 中，门控处于 `awaiting` 状态时显示黄色脉冲指示，用户点击「继续」按钮通过门控。
+
+### 3.4 Processor / Phase 分离
 
 - **Processor**（`pipeline/processors/`）：无状态纯业务逻辑，不做文件 I/O
 - **Phase**（`pipeline/phases/`）：编排层，负责读输入、调 processor、写输出、更新 manifest
 
-### 3.4 消除缓存幽灵的三条规则
+### 3.5 消除缓存幽灵的三条规则
 
 | 规则 | 约定 |
 |------|------|
@@ -177,29 +201,21 @@ Runner 的 7 级检查决定是否跳过：
 
 ## 4. 各阶段实现
 
-### 4.1 Demux（音频提取）
+### 4.1 Extract（音频提取 + 人声分离）
 
 | | |
 |---|---|
 | **输入** | 原视频 mp4 |
-| **输出** | `demux.audio` -> WAV (16k, mono, PCM s16le) |
-| **实现** | FFmpeg |
+| **输出** | `extract.audio` (WAV 16k mono), `extract.vocals` (人声), `extract.accompaniment` (伴奏) |
+| **实现** | FFmpeg（提取）+ Demucs htdemucs v4（分离） |
 
-### 4.2 Sep（人声分离）
+合并了原先的 demux 和 sep 两个阶段。Demucs 是 pipeline 中最慢的环节（2 分钟音频需 3-10 分钟 CPU），但显著提升 ASR 准确率和混音质量。
 
-| | |
-|---|---|
-| **输入** | `demux.audio` |
-| **输出** | `sep.vocals` (人声), `sep.accompaniment` (伴奏) |
-| **实现** | Demucs htdemucs v4（本地 GPU/CPU） |
-
-Demucs 是 pipeline 中最慢的环节（2 分钟音频需 3-10 分钟 CPU），但显著提升 ASR 准确率和混音质量。
-
-### 4.3 ASR（语音识别 + 说话人分离）
+### 4.2 ASR（语音识别 + 说话人分离）
 
 | | |
 |---|---|
-| **输入** | `demux.audio`（可配置为 `sep.vocals`） |
+| **输入** | `extract.audio`（可配置为 `extract.vocals`） |
 | **输出** | `asr.asr_result` -> JSON (原始 ASR 响应) |
 | **服务** | 豆包大模型 ASR (ByteDance) |
 | **预设** | `asr_spk_semantic`（语义分句 + Speaker Diarization） |
@@ -209,67 +225,65 @@ Demucs 是 pipeline 中最慢的环节（2 分钟音频需 3-10 分钟 CPU），
 2. 调用豆包 ASR API（submit -> poll query）
 3. 返回 word 级时间戳 + speaker 标签 + emotion/gender
 
-### 4.4 Sub（字幕模型生成）
+### 4.3 Parse（校准模型生成）
 
 | | |
 |---|---|
 | **输入** | `asr.asr_result` |
-| **输出** | `subs.subtitle_model` (SSOT v1.3), `subs.zh_srt` |
-| **核心逻辑** | Utterance Normalization -> Subtitle Model Build -> SRT Render |
+| **输出** | `dub.dub_manifest` -> `state/dub.json` (AsrModel v2) |
+| **核心逻辑** | ASR 结果 → Utterance Normalization → AsrModel 构建 |
 
-**双数据源模式**：当 `asr.fix.json` 存在时：
-- Word 级时间轴来自 `asr-result.json`（时间骨架）
-- Speaker/text 来自 `asr.fix.json`（人工校准层）
-- 归一化用校准后的 speaker 做切分边界
+从 ASR 原始响应生成 `dub.json`（AsrModel v2 格式），作为 IDE 的工作文件和后续阶段的输入 SSOT。
 
-**asr.fix.json 操作类型**：
-
-| 操作 | 说明 | 示例 |
-|------|------|------|
-| 编辑 | 指定 idx，修改 text/speaker | `{"idx": 3, "speaker": "pa", "text": "..."}` |
-| 拆分 | 同一 idx 多条 | `{"idx": 5, "text": "前半"}, {"idx": 5, "text": "后半"}` |
-| 删除 | 原始 utterance 的 idx 不出现在 fix 中 | 跳过 idx=6 |
-| 插入 | 指定 start/end 时间（支持 MM:SS 格式） | `{"speaker": "by", "text": "...", "start": "01:15", "end": "01:20"}` |
-
-**Subtitle Model v1.3 结构**：
+**AsrModel v2 结构**（`state/dub.json`）：
 
 ```json
 {
-  "schema": {"name": "subtitle.model", "version": "1.3"},
-  "audio": {"duration_ms": 95480},
-  "utterances": [
+  "schema": "asr-model-v2",
+  "media": {"duration_ms": 95480},
+  "segments": [
     {
-      "utt_id": "utt_0001",
-      "speaker": {
-        "id": "pa",
-        "gender": "male",
-        "speech_rate": {"zh_tps": 4.2},
-        "emotion": {"label": "sad", "confidence": 0.85, "intensity": "moderate"}
-      },
+      "id": "seg_a1b2c3d4",
       "start_ms": 5280,
       "end_ms": 6520,
       "text": "坐牢十年，",
-      "cues": [
-        {"start_ms": 5280, "end_ms": 6520, "source": {"lang": "zh", "text": "坐牢十年，"}}
-      ]
+      "text_en": "",
+      "speaker": "PingAn",
+      "emotion": "sad",
+      "type": "speech",
+      "gender": "male",
+      "tts_policy": null,
+      "flags": {"overlap": false, "needs_review": false}
     }
-  ]
+  ],
+  "history": {"rev": 1, "created_at": "...", "updated_at": "..."},
+  "fingerprint": {"algo": "sha256", "value": "...", "scope": "segments"}
 }
 ```
 
 **Utterance Normalization**：ASR 的 utterance 边界不稳定，从 word 级时间戳重建边界：
 - 基于静音间隔（>=450ms，可配置）拆分
 - Speaker 变化硬边界：不同 speaker 的 word 永远不合并到同一 utterance
-- 最大时长约束（默认 8000ms）
+- 最大时长约束（默认 5000ms）
 - 附加标点：从 utterance 文本反推附加到 word
 
-**注意**：Sub 阶段不再自动注册 speaker。角色由用户在 IDE 中编辑 `dub.json` 的 speaker 字段后，手动在 `roles.json` 中配置声线。
+### 4.4 Reseg（LLM 重断句）
+
+| | |
+|---|---|
+| **输入** | `dub.dub_manifest` |
+| **输出** | `dub.dub_manifest`（更新长句断句） |
+| **服务** | OpenAI GPT-4o / Google Gemini |
+
+对超长 utterance 使用 LLM 进行语义断句，将一个长段落拆分为多个自然语句。可通过配置控制触发阈值（`reseg_min_chars`、`reseg_max_chars_trigger`、`reseg_max_duration_trigger`）。
+
+Reseg 完成后进入 `source_review` 门控，等待人工在 IDE 中校准。
 
 ### 4.5 MT（机器翻译）
 
 | | |
 |---|---|
-| **输入** | `subs.subtitle_model`, `asr.asr_result` |
+| **输入** | `dub.dub_manifest`, `asr.asr_result` |
 | **输出** | `mt.mt_input` (JSONL), `mt.mt_output` (JSONL) |
 | **服务** | Google Gemini 2.0 Flash / OpenAI GPT-4o-mini |
 
@@ -299,37 +313,18 @@ Demucs 是 pipeline 中最慢的环节（2 分钟音频需 3-10 分钟 CPU），
 
 | | |
 |---|---|
-| **输入** | `subs.subtitle_model`, `mt.mt_output`, `demux.audio` |
-| **输出** | `subs.subtitle_align`, `subs.en_srt`, `dub.dub_manifest` |
+| **输入** | `mt.mt_output`, `extract.audio` |
+| **输出** | `subs.en_srt`, `dub.dub_manifest`（更新 text_en + tts_policy） |
 
 **核心职责**：
-1. 将英文翻译映射回原始中文时间轴（不修改时间边界）
+1. 将英文翻译映射回 `dub.json` 中的中文时间轴（不修改时间边界）
 2. 计算 TTS 时长预算（`budget_ms = end_ms - start_ms`）
 3. 动态 `allow_extend_ms`（不与下一句重叠）
 4. 在 utterance 内重断句生成 en.srt
-5. 生成 `dub.model.json`（TTS 和 Mix 的输入合约）
+5. 更新 `dub.json` 的 `text_en` 和 `tts_policy` 字段
 6. `audio_duration_ms` 通过 ffprobe 从实际音频获取（非推断）
 
-**DubManifest 结构**（`source/dub.model.json`）：
-
-```json
-{
-  "audio_duration_ms": 95480,
-  "utterances": [
-    {
-      "utt_id": "utt_0001",
-      "start_ms": 5280, "end_ms": 6520,
-      "budget_ms": 1240,
-      "text_zh": "坐牢十年，",
-      "text_en": "Ten years in prison...",
-      "speaker": "pa",
-      "gender": "male",
-      "emotion": {"label": "sad", "confidence": 0.85, "intensity": "moderate"},
-      "tts_policy": {"max_rate": 1.3, "allow_extend_ms": 500}
-    }
-  ]
-}
-```
+Align 完成后进入 `translation_review` 门控，等待人工审阅翻译质量。
 
 ### 4.7 TTS（语音合成）
 
@@ -388,16 +383,16 @@ IDE 内置 Voice Casting 页面，用于可视化管理 `roles.json`。入口在
 
 | 产物 | 路径 | 说明 |
 |------|------|------|
-| `tts.segments_dir` | `tts/segments/` | 逐句 WAV 文件 |
-| `tts.segments_index` | `tts/segments.json` | 段索引：utt_id -> wav/voice/duration/hash |
-| `tts.voice_assignment` | `derive/voice-assignment.json` | 声线分配快照 |
-| `tts.report` | `tts/tts_report.json` | 诊断报告 |
+| `tts.segments_dir` | `derived/tts/segments/` | 逐句 WAV 文件 |
+| `tts.segments_index` | `derived/tts/segments.json` | 段索引：utt_id -> wav/voice/duration/hash |
+| `tts.voice_assignment` | `derived/voice-assignment.json` | 声线分配快照 |
+| `tts.report` | `derived/tts/tts_report.json` | 诊断报告 |
 
 ### 4.8 Mix（混音）
 
 | | |
 |---|---|
-| **输入** | `dub.dub_manifest`, `tts.segments_dir`, `tts.report`, `sep.accompaniment` |
+| **输入** | `dub.dub_manifest`, `tts.segments_dir`, `tts.report` |
 | **输出** | `mix.audio` |
 | **实现** | FFmpeg adelay + amix |
 
@@ -417,30 +412,23 @@ IDE 内置 Voice Casting 页面，用于可视化管理 `roles.json`。入口在
 
 ---
 
-## 5. 人工校准层（asr.fix.json）
+## 5. ASR Calibration IDE
 
-`source/asr.fix.json` 是人工对 ASR 结果的校准文件，**不在 manifest 中**（从磁盘直接读取，修改不会触发 ASR 重跑）。
+IDE 用于在 `source_review` 门控处人工校准 ASR 结果。详细操作手册见 [IDE-GUIDE.md](./IDE-GUIDE.md)。
 
-**支持的时间格式**：
-- 整数毫秒：`40920`
-- MM:SS：`"00:40"`
-- MM:SS.frac：`"00:40.9"`
-- H:MM:SS：`"1:01:23"`
+**核心能力**：
+- 可视化编辑 `dub.json` 中的 segments（文本、说话人、情绪、时间轴）
+- 段落拆分/合并/插入/删除（支持撤销重做）
+- 视频同步播放 + 字幕叠加
+- 流水线运行/取消（PipelinePanel）
+- 配音视频回放对比
+- Voice Casting（声线分配）
 
-**示例**：
-```json
-{
-  "schema": {"name": "asr.fix", "version": "1.0"},
-  "utterances": [
-    {"idx": 0, "speaker": "pa", "text": "我弃牌。"},
-    {"idx": 1, "speaker": "wmz", "text": "白爷，他上了。"},
-    {"speaker": "by", "text": "内心独白", "start": "01:15", "end": "01:20"}
-  ]
-}
+**启动**：
+```bash
+vsd ide --videos ./videos      # 默认端口 8765
+vsd ide --port 9000 --dev      # 开发模式
 ```
-
-- 有 `start`/`end` 的条目自动视为**插入**（忽略 idx 值）
-- 同时支持 `start`/`end` 和 `start_ms`/`end_ms` 两种 key
 
 ---
 
@@ -451,7 +439,7 @@ IDE 内置 Voice Casting 页面，用于可视化管理 `roles.json`。入口在
 | **豆包 ASR** | 中文语音识别 + 说话人分离 | `DOUBAO_APPID`, `DOUBAO_ACCESS_TOKEN` |
 | **火山引擎 TOS** | 音频文件存储（ASR 需要） | `TOS_ACCESS_KEY_ID`, `TOS_SECRET_ACCESS_KEY` |
 | **火山引擎 TTS** | 英文语音合成 | 同豆包 credentials |
-| **OpenAI** | 翻译（GPT-4o-mini） | `OPENAI_API_KEY` |
+| **OpenAI** | 翻译（GPT-4o-mini）、重断句 | `OPENAI_API_KEY` |
 | **Gemini** | 翻译（Gemini 2.0 Flash，默认引擎） | `GEMINI_API_KEY` |
 | **Demucs** | 人声分离 | 本地 |
 | **FFmpeg** | 音频/视频处理 | 本地 |
@@ -468,12 +456,18 @@ class PipelineConfig:
     doubao_hotwords: list[str] = ["平安", "平安哥", "于平安"]
     asr_use_vocals: bool = False
 
-    # SUB（Utterance Normalization）
+    # Parse（Utterance Normalization）
     doubao_postprofile: str = "axis"
     utt_norm_silence_split_threshold_ms: int = 450
     utt_norm_min_duration_ms: int = 900
-    utt_norm_max_duration_ms: int = 8000
+    utt_norm_max_duration_ms: int = 5000
     utt_norm_trailing_silence_cap_ms: int = 350
+
+    # Reseg
+    reseg_enabled: bool = True
+    reseg_min_chars: int = ...
+    reseg_max_chars_trigger: int = ...
+    reseg_max_duration_trigger: int = ...
 
     # MT
     gemini_model: str = "gemini-2.0-flash"
@@ -484,7 +478,8 @@ class PipelineConfig:
     tts_engine: str = "volcengine"
     tts_max_workers: int = 4
     tts_volume: float = 1.4
-    azure_tts_language: str = "en-US"
+    tts_mute_original: bool = False
+    voice_pool_path: str = ...
 
     # MIX
     dub_target_lufs: float = -16.0
@@ -496,20 +491,21 @@ class PipelineConfig:
 ## 8. 典型工作流
 
 ```bash
-# 1. 首次全流程（到 sub 暂停，检查 ASR 质量）
-vsd run videos/drama/1.mp4 --to sub
+# 1. 首次全流程（到 reseg 暂停，source_review 门控等待校准）
+vsd run videos/drama/1.mp4 --to burn
 
-# 2. 人工校准
-#    - 编辑 source/asr.fix.json（修正 speaker、文本、插入遗漏台词）
-#    - 编辑 dict/roles.json（分配角色声线）
-#    - 编辑 dict/names.json（人名映射）
+# 2. 人工校准（在 IDE 中完成）
+#    - 启动 IDE：vsd ide --videos ./videos
+#    - 选择剧集 → 校准 speaker、文本、时间轴
+#    - Cmd+S 保存 dub.json
+#    - PipelinePanel 点击「继续」通过 source_review 门控
+#    - 流水线自动从 mt 继续跑到 align
+#    - translation_review 门控暂停，审阅翻译
+#    - 点击「继续」→ 流水线跑完 tts → mix → burn
 
-# 3. 从 sub 重跑（asr.fix.json 变更需要重跑 sub）
-vsd run videos/drama/1.mp4 --from sub --to burn
-
-# 4. 如果只改了翻译相关（names.json / slang.json），从 mt 重跑
+# 3. 如果只改了翻译相关（names.json / slang.json），从 mt 重跑
 vsd run videos/drama/1.mp4 --from mt --to burn
 
-# 5. 批量处理
+# 4. 批量处理
 vsd run videos/drama/1-79.mp4 --to burn
 ```

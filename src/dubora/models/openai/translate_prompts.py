@@ -15,6 +15,7 @@ def build_stage1_prompt(
     target_cps: str = "12-17",
     avoid_formal: bool = True,
     profanity_policy: str = "soften",
+    story_background: str = "",
 ) -> List[dict]:
     """
     构建 Stage 1 提示词（生成翻译上下文）。
@@ -26,12 +27,18 @@ def build_stage1_prompt(
         target_cps: 目标字符每秒
         avoid_formal: 避免正式用语
         profanity_policy: 脏话处理策略
+        story_background: 故事背景（可选）
 
     Returns:
         messages 列表（用于 OpenAI API）
     """
+    story_background_block = ""
+    if story_background:
+        story_background_block = f"Story background:\n{story_background}\n"
+
     p = load_prompt("mt_context_analysis",
         episode_text=zh_episode_text,
+        story_background_block=story_background_block,
         max_chars_per_line=str(max_chars_per_line),
         max_lines=str(max_lines),
         target_cps=target_cps,
@@ -95,16 +102,23 @@ def build_stage2_prompt(
 
 def build_fallback_prompt(
     texts: List[str],
+    *,
+    story_background: str = "",
 ) -> List[dict]:
     """
     构建 Fallback 提示词（简单翻译，无上下文）。
 
     Args:
         texts: 要翻译的文本列表
+        story_background: 故事背景（可选）
 
     Returns:
         messages 列表（用于 OpenAI API）
     """
+    story_background_block = ""
+    if story_background:
+        story_background_block = f"Story background:\n{story_background}\n"
+
     segments_text = "\n\n".join([
         f"<<<{i}>>>\n{text}"
         for i, text in enumerate(texts)
@@ -113,6 +127,7 @@ def build_fallback_prompt(
     p = load_prompt("mt_simple_translate",
         segment_count=str(len(texts)),
         segments_text=segments_text,
+        story_background_block=story_background_block,
     )
 
     return [

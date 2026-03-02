@@ -9,7 +9,6 @@ from dubora.pipeline.core.types import Artifact, ErrorInfo, RunContext, Status, 
 from dubora.pipeline.core.phase import Phase
 from dubora.pipeline.core.manifest import Manifest, now_iso
 from dubora.pipeline.core.fingerprints import (
-    compute_inputs_fingerprint,
     compute_config_fingerprint,
     hash_path,
 )
@@ -38,9 +37,9 @@ class PhaseRunner:
         1. force 标记
         2. manifest 中是否有记录
         3. phase.version 是否变化
-        4. inputs fingerprint 是否变化（上游产物内容变了）
+        4. 输入一致性校验（逐个检查 required artifact 文件内容是否与全局注册表一致）
         5. config fingerprint 是否变化（配置参数变了）
-        6. 输出文件是否存在且 fingerprint 匹配
+        6. 输出文件是否存在
         7. status 是否为 succeeded
 
         Returns:
@@ -71,14 +70,14 @@ class PhaseRunner:
             if not artifact_path.exists():
                 return True, f"required input artifact '{key}' file not found: {artifact_path}"
 
-        # 4. inputs fingerprint 变化（上游产物内容变了 → 需要重跑）
-        stored_inputs_fp = phase_data.get("inputs_fingerprint")
-        if stored_inputs_fp and required_keys:
+        # 4. 输入一致性校验：逐个检查 required artifact 的文件内容是否与全局注册表一致
+        for key in required_keys:
             try:
-                artifacts = self.manifest.get_all_artifacts()
-                current_inputs_fp = compute_inputs_fingerprint(required_keys, artifacts)
-                if stored_inputs_fp != current_inputs_fp:
-                    return True, f"inputs fingerprint changed"
+                artifact = self.manifest.get_artifact(key)
+                artifact_path = self.workspace / artifact.relpath
+                current_fp = hash_path(artifact_path)
+                if current_fp != artifact.fingerprint:
+                    return True, f"input '{key}' content changed (file differs from registered fingerprint)"
             except Exception:
                 pass  # fingerprint 计算失败不阻塞，退化到后续检查
 
@@ -246,16 +245,13 @@ class PhaseRunner:
             self.manifest.save()
             return False
         
-        # 计算 fingerprints
+        # 计算 config fingerprint
         try:
-            artifacts = self.manifest.get_all_artifacts()
-            inputs_fp = compute_inputs_fingerprint(phase.requires(), artifacts)
             config_fp = compute_config_fingerprint(phase.name, ctx.config)
         except Exception as e:
-            warning(f"Failed to compute fingerprints for phase '{phase.name}': {e}")
-            inputs_fp = None
+            warning(f"Failed to compute config fingerprint for phase '{phase.name}': {e}")
             config_fp = None
-        
+
         # 标记为 running
         self.manifest.update_phase(
             phase.name,
@@ -264,7 +260,6 @@ class PhaseRunner:
             started_at=now_iso(),
             requires=phase.requires(),
             provides=phase.provides(),
-            inputs_fingerprint=inputs_fp,
             config_fingerprint=config_fp,
             skipped=False,  # 标记为执行（非跳过）
         )

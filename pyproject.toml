@@ -18,7 +18,6 @@ dependencies = [
 
 [project.scripts]
 vsd = "dubora.cli:main"
-vr = "dubora.cli:main"
 
 [project.optional-dependencies]
 dev = [

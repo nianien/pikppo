@@ -332,7 +332,8 @@ export function TranscriptList() {
           const isPlayingNow = seg.id === playingSegmentId
           const isEditing = seg.id === editingId
           const bgColor = speakerColor(seg.speaker, speakerList)
-          const badgeColor = speakerBadgeColor(seg.speaker, speakerList)
+          const isInvalidRole = roles != null && !(seg.speaker in (roles.roles ?? {}))
+          const badgeColor = isInvalidRole ? 'bg-gray-600' : speakerBadgeColor(seg.speaker, speakerList)
           const emoColor = emotionColor(seg.emotion)
 
           return (
@@ -360,9 +361,10 @@ export function TranscriptList() {
               onDoubleClick={() => handleDoubleClick(seg)}
               onContextMenu={e => handleContextMenu(e, seg)}
             >
-              {/* Time */}
-              <div className="text-xs text-gray-400 font-mono w-24 shrink-0 pt-1">
-                {msToDisplay(seg.start_ms)}
+              {/* Time: start + duration */}
+              <div className="text-xs text-gray-400 font-mono w-28 shrink-0 pt-1 leading-tight">
+                <div>{msToDisplay(seg.start_ms)}</div>
+                <div className="text-gray-600">{((seg.end_ms - seg.start_ms) / 1000).toFixed(1)}s</div>
               </div>
 
               {/* Speaker badge — click to open role dropdown */}
@@ -473,7 +475,7 @@ function SpeakerBadge({ seg, badgeColor, roles, isOpen, onToggle, onClose }: {
   const anchorRef = useRef<HTMLDivElement>(null)
   const updateSegment = useModelStore(s => s.updateSegment)
   const saveRoles = useModelStore(s => s.saveRoles)
-  const roleIds = roles ? Object.keys(roles.roles) : []
+  const roleIds = roles ? Object.keys(roles.roles).sort((a, b) => a.localeCompare(b, 'zh-Hans-CN')) : []
 
   const [filter, setFilter] = useState('')
   const [highlightIdx, setHighlightIdx] = useState(-1)

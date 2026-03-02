@@ -27,10 +27,11 @@ def translate_episode_segments(
     target_cps: str = "12-17",
     avoid_formal: bool = True,
     profanity_policy: str = "soften",
+    story_background: str = "",
 ) -> tuple[Dict[str, Any], List[str]]:
     """
     翻译整集 segments（Stage 1 + Stage 2）。
-    
+
     Args:
         segments: 中文 segments 列表（每个包含 text, start, end, speaker 等）
         api_key: OpenAI API key
@@ -41,7 +42,8 @@ def translate_episode_segments(
         target_cps: 目标字符每秒
         avoid_formal: 避免正式用语
         profanity_policy: 脏话处理策略
-    
+        story_background: 故事背景（可选）
+
     Returns:
         (context, en_texts) 元组
         - context: 翻译上下文字典
@@ -68,6 +70,7 @@ def translate_episode_segments(
         target_cps=target_cps,
         avoid_formal=avoid_formal,
         profanity_policy=profanity_policy,
+        story_background=story_background,
     )
     
     # Stage 2: 翻译 segments

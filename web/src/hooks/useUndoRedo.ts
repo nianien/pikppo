@@ -67,11 +67,31 @@ export function useUndoableOps() {
     // Generate new IDs
     const newId = `seg_${Math.random().toString(16).slice(2, 10)}`
 
-    // Split text roughly by time ratio
+    // Split text at nearest punctuation to time-ratio position
     const ratio = (splitMs - seg.start_ms) / (seg.end_ms - seg.start_ms)
-    const splitCharIdx = Math.max(1, Math.round(seg.text.length * ratio))
-    const text1 = seg.text.slice(0, splitCharIdx)
-    const text2 = seg.text.slice(splitCharIdx)
+    const targetIdx = Math.round(seg.text.length * ratio)
+    const punctRe = /[，。！？、；：,.\!\?;:]/
+    // Search outward from targetIdx for nearest punctuation
+    let bestIdx = -1
+    for (let d = 0; d < seg.text.length; d++) {
+      if (targetIdx + d < seg.text.length && punctRe.test(seg.text[targetIdx + d])) {
+        bestIdx = targetIdx + d; break
+      }
+      if (targetIdx - d - 1 >= 0 && punctRe.test(seg.text[targetIdx - d - 1])) {
+        bestIdx = targetIdx - d - 1; break
+      }
+    }
+    let text1: string, text2: string
+    if (bestIdx >= 0) {
+      // Split at punctuation, remove the punctuation itself
+      text1 = seg.text.slice(0, bestIdx)
+      text2 = seg.text.slice(bestIdx + 1)
+    } else {
+      // No punctuation found, fallback to ratio split
+      const splitCharIdx = Math.max(1, targetIdx)
+      text1 = seg.text.slice(0, splitCharIdx)
+      text2 = seg.text.slice(splitCharIdx)
+    }
 
     const seg1: AsrSegment = {
       ...seg,

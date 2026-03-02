@@ -74,29 +74,46 @@ export function useKeyboard() {
         return
       }
 
-      // Alt+Arrow: fine-tune start_ms ±50ms (or ±200ms with Shift)
-      if (e.altKey && !e.ctrlKey && !e.metaKey && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
+      // Shift+Alt+Arrow: snap segment edge to cursor position
+      if (e.shiftKey && e.altKey && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
         e.preventDefault()
+        const video = document.querySelector('video')
+        if (video && !video.paused) video.pause()
         if (!selectedSegmentId || selectedIdx < 0) return
         const seg = segments[selectedIdx]
-        const delta = e.shiftKey ? 200 : 50
-        const direction = e.key === 'ArrowLeft' ? -1 : 1
-        updateSegment(seg.id, {
-          start_ms: Math.max(0, seg.start_ms + direction * delta),
-        })
+        const midMs = (seg.start_ms + seg.end_ms) / 2
+        const editStart = currentTime <= midMs
+        if (editStart) {
+          updateSegment(seg.id, {
+            start_ms: Math.max(0, Math.min(currentTime, seg.end_ms - 50)),
+          })
+        } else {
+          updateSegment(seg.id, {
+            end_ms: Math.max(seg.start_ms + 50, currentTime),
+          })
+        }
         return
       }
 
-      // Ctrl+Alt+Arrow: fine-tune end_ms ±50ms (or ±200ms with Shift)
-      if ((e.ctrlKey || e.metaKey) && e.altKey && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
+      // Alt+Arrow: fine-tune segment edge ±50ms (cursor position decides start or end)
+      if (e.altKey && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
         e.preventDefault()
+        const video = document.querySelector('video')
+        if (video && !video.paused) video.pause()
         if (!selectedSegmentId || selectedIdx < 0) return
         const seg = segments[selectedIdx]
-        const delta = e.shiftKey ? 200 : 50
+        const midMs = (seg.start_ms + seg.end_ms) / 2
+        const editStart = currentTime <= midMs
         const direction = e.key === 'ArrowLeft' ? -1 : 1
-        updateSegment(seg.id, {
-          end_ms: Math.max(seg.start_ms + 100, seg.end_ms + direction * delta),
-        })
+        if (editStart) {
+          updateSegment(seg.id, {
+            start_ms: Math.max(0, Math.min(seg.start_ms + direction * 50, seg.end_ms - 50)),
+          })
+        } else {
+          updateSegment(seg.id, {
+            end_ms: Math.max(seg.start_ms + 50, seg.end_ms + direction * 50),
+          })
+        }
         return
       }
 
@@ -176,6 +193,20 @@ export function useKeyboard() {
       }
       if (e.key.toLowerCase() in emotionMap && selectedSegmentId) {
         updateSegment(selectedSegmentId, { emotion: emotionMap[e.key.toLowerCase()] })
+        return
+      }
+
+      // Arrow Left/Right (no modifier): seek playback ±50ms (±1s with Shift), auto-pause
+      if (!e.altKey && !e.ctrlKey && !e.metaKey && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
+        e.preventDefault()
+        const video = document.querySelector('video')
+        if (video && !video.paused) video.pause()
+        const step = e.shiftKey ? 1000 : 50
+        const direction = e.key === 'ArrowLeft' ? -1 : 1
+        const duration = useEditorStore.getState().duration
+        const newTime = Math.max(0, Math.min(duration, currentTime + direction * step))
+        setCurrentTime(newTime)
+        if (video) video.currentTime = newTime / 1000
         return
       }
 

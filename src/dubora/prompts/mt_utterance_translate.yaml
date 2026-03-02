@@ -6,7 +6,7 @@
 # 使用方: utterance_translate.py:build_utterance_translation_prompt()
 # 变量:
 #   首次翻译: $name_placeholder_rules, $glossary_block, $gambling_domain_hint,
-#             $plot_overview_block, $episode_context_block,
+#             $story_background_block, $episode_context_block,
 #             $budget_sec, $max_chars, $input_text, $no_chinese_policy
 #   压缩重试: $budget_sec, $max_chars, $input_text
 # ============================================================
@@ -14,7 +14,7 @@
 # 首次翻译（retry_level=0）
 default:
   system: |
-    You are a professional subtitle translator for a crime drama.
+    You are a professional subtitle translator for a Chinese TV drama.
 
     Rules:
     $name_placeholder_rules
@@ -28,7 +28,7 @@ default:
     $no_chinese_policy
 
   user: |
-    $plot_overview_block
+    $story_background_block
     $episode_context_block
 
     Constraints:

@@ -453,12 +453,16 @@ class MTPhase(Phase):
                 name_en_cache[src_name] = target
                 info(f"  DictLoader 预加载: '{src_name}' -> '{target}'")
         
-        # 获取剧情简介（可选，从配置读取）
-        plot_overview = phase_config.get("plot_overview", "")
-        if not plot_overview:
-            # 默认剧情简介（可以后续从配置或元数据读取）
-            plot_overview = "于平安蒙冤背负杀亲罪名，在狱中度过十年。出狱后，他决心查明真相，洗刷冤屈。"
-        
+        # 获取故事背景（从 drama 目录下的 story_background.txt 读取）
+        story_background = ""
+        if video_path_str:
+            bg_file = Path(video_path_str).parent / "story_background.txt"
+        else:
+            bg_file = Path(ctx.workspace).parent.parent / "story_background.txt"
+        if bg_file.is_file():
+            story_background = bg_file.read_text(encoding="utf-8").strip()
+            info(f"Loaded story background from: {bg_file}")
+
         # 翻译每个 utterance
         mt_output_lines = []
         ok_count = 0
@@ -496,7 +500,8 @@ class MTPhase(Phase):
                     translate_fn=translate_fn,
                     max_retries=max_retries,
                     episode_context=episode_context_text,
-                    plot_overview=plot_overview,
+
+                    story_background=story_background,
                     slang_glossary_text=slang_glossary_text,
                     dict_loader=dict_loader,  # 传入用于校验
                     is_gemini=is_gemini,  # 传入模型类型
@@ -531,7 +536,8 @@ class MTPhase(Phase):
                         translate_fn=translate_fn,
                         max_retries=1,  # 只重试一次
                         episode_context=episode_context_text,
-                        plot_overview=plot_overview,
+    
+                        story_background=story_background,
                         slang_glossary_text=slang_glossary_text,
                         dict_loader=dict_loader,
                         is_retry=True,  # 标记为重试
@@ -669,7 +675,8 @@ class MTPhase(Phase):
                     translate_fn=translate_fn,
                     max_retries=1,
                     episode_context=episode_context_text,
-                    plot_overview=plot_overview,
+
+                    story_background=story_background,
                     slang_glossary_text=slang_glossary_text,
                     is_gemini=is_gemini,
                 )

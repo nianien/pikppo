@@ -186,7 +186,7 @@ def build_utterance_translation_prompt(
     retry_level: int = 0,
     *,
     episode_context: str = "",
-    plot_overview: str = "",
+    story_background: str = "",
     slang_glossary_text: str = "",
     is_gemini: bool = False,
 ) -> str:
@@ -198,7 +198,7 @@ def build_utterance_translation_prompt(
         budget_ms: 时间预算（毫秒）
         retry_level: 重试级别（0=首次，1=压缩，2=更强压缩）
         episode_context: 整集对话上下文（从 asr.result.text 获取）
-        plot_overview: 剧情简介（可选）
+        story_background: 故事背景（可选，提供角色关系和剧情设定）
         slang_glossary_text: 行话词表文本（从 DictLoader 获取）
 
     Returns:
@@ -231,9 +231,9 @@ def build_utterance_translation_prompt(
                 + load_shared("gambling_glossary")
             )
 
-        plot_overview_block = ""
-        if plot_overview:
-            plot_overview_block = f"Plot overview:\n{plot_overview}\n"
+        story_background_block = ""
+        if story_background:
+            story_background_block = f"Story background:\n{story_background}\n"
 
         episode_context_block = ""
         if episode_context:
@@ -246,7 +246,7 @@ def build_utterance_translation_prompt(
             glossary_block=glossary_block,
             gambling_domain_hint=gambling_domain_hint,
             no_chinese_policy=load_shared("no_chinese_policy"),
-            plot_overview_block=plot_overview_block,
+            story_background_block=story_background_block,
             episode_context_block=episode_context_block,
             budget_sec=f"{budget_sec:.2f}",
             max_chars=str(max_chars),
@@ -278,7 +278,7 @@ def translate_utterance_with_retry(
     max_retries: int = MAX_RETRIES,
     *,
     episode_context: str = "",
-    plot_overview: str = "",
+    story_background: str = "",
     slang_glossary_text: str = "",
     dict_loader: Optional['DictLoader'] = None,  # 用于校验
     is_retry: bool = False,  # 是否为重试
@@ -294,7 +294,7 @@ def translate_utterance_with_retry(
         translate_fn: 翻译函数
         max_retries: 最大重试次数
         episode_context: 整集对话上下文
-        plot_overview: 剧情简介
+        story_background: 故事背景
         slang_glossary_text: 行话词表文本
 
     Returns:
@@ -307,7 +307,8 @@ def translate_utterance_with_retry(
             prompt = build_utterance_translation_prompt(
                 zh_text, budget_ms, retry_level=0,  # 使用首次 prompt
                 episode_context=episode_context,
-                plot_overview=plot_overview,
+
+                story_background=story_background,
                 slang_glossary_text=slang_glossary_text,
                 is_gemini=is_gemini,
             )
@@ -320,7 +321,8 @@ def translate_utterance_with_retry(
             prompt = build_utterance_translation_prompt(
                 zh_text, budget_ms, retry_level=retry,
                 episode_context=episode_context,
-                plot_overview=plot_overview,
+
+                story_background=story_background,
                 slang_glossary_text=slang_glossary_text,
                 is_gemini=is_gemini,
             )

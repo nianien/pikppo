@@ -4,9 +4,7 @@ Fingerprint 计算：确定性 hash
 import hashlib
 import json
 from pathlib import Path
-from typing import Any, Dict, List
-
-from dubora.pipeline.core.types import Artifact
+from typing import Any, Dict
 
 
 def _remove_none_and_empty(obj: Any) -> Any:
@@ -131,35 +129,6 @@ def hash_json(obj: Any) -> str:
     """
     canonical = canonicalize_json(obj)
     return hash_string(canonical)
-
-
-def compute_inputs_fingerprint(
-    required_keys: List[str],
-    artifacts: Dict[str, Artifact],
-) -> str:
-    """
-    计算 inputs fingerprint（基于上游 artifacts 的 fingerprint）。
-    
-    Args:
-        required_keys: Phase 需要的 artifact keys（已排序）
-        artifacts: manifest 中的 artifacts registry
-    
-    Returns:
-        "sha256:..." 格式的 hash
-    """
-    # 按 key 排序，确保确定性
-    sorted_keys = sorted(required_keys)
-    
-    # 构建 fingerprint 字符串：key1:fp1,key2:fp2,...
-    fp_parts = []
-    for key in sorted_keys:
-        if key not in artifacts:
-            raise ValueError(f"Required artifact '{key}' not found in manifest")
-        artifact = artifacts[key]
-        fp_parts.append(f"{key}:{artifact.fingerprint}")
-    
-    fp_string = ",".join(fp_parts)
-    return hash_string(fp_string)
 
 
 def compute_config_fingerprint(

@@ -55,20 +55,17 @@ export function TimelineView() {
     return (x / zoom) * 1000 + scrollOffset
   }, [zoom, scrollOffset])
 
-  // Auto-scroll: keep playhead visible during playback
+  // Auto-scroll: keep playhead away from edges, center when near boundary
   useEffect(() => {
-    if (!isPlaying) return
     const container = containerRef.current
     if (!container) return
     const width = container.getBoundingClientRect().width
     const phX = msToX(currentTime)
-    const rightThreshold = width * 0.75
-    const leftThreshold = width * 0.05
-    if (phX > rightThreshold || phX < leftThreshold) {
-      const targetMs = currentTime - (width * 0.25 / zoom) * 1000
+    if (phX < width * 0.1 || phX > width * 0.9) {
+      const targetMs = currentTime - (width * 0.5 / zoom) * 1000
       setScrollOffset(Math.max(0, targetMs))
     }
-  }, [currentTime, isPlaying, zoom, msToX, setScrollOffset])
+  }, [currentTime, zoom, msToX, setScrollOffset])
 
   // Auto-scroll horizontally to center the selected segment
   useEffect(() => {
@@ -162,15 +159,20 @@ export function TimelineView() {
         ctx.strokeRect(drawX, TRACK_TOP + 2, drawW, TRACK_HEIGHT - 4)
       }
 
-      // Edge handles
+      // Edge handles (active edge highlighted based on cursor position)
       if (isSelected && segWidth > 10) {
-        ctx.fillStyle = '#ffffff'
-        ctx.fillRect(drawX - 1, TRACK_TOP + 5, 3, TRACK_HEIGHT - 10)
+        const midMs = (seg.start_ms + seg.end_ms) / 2
+        const startActive = currentTime <= midMs
+        // Start handle
+        ctx.fillStyle = startActive ? '#fbbf24' : '#ffffff55'
+        ctx.fillRect(drawX - 1, TRACK_TOP + 3, 3, TRACK_HEIGHT - 6)
+        // End handle
         const rx = Math.min(x2, width)
-        ctx.fillRect(rx - 2, TRACK_TOP + 5, 3, TRACK_HEIGHT - 10)
+        ctx.fillStyle = startActive ? '#ffffff55' : '#fbbf24'
+        ctx.fillRect(rx - 2, TRACK_TOP + 3, 3, TRACK_HEIGHT - 6)
       }
 
-      // Text label (speaker + text)
+      // Text label
       if (segWidth > 20) {
         ctx.fillStyle = '#ffffff'
         ctx.font = '10px sans-serif'
@@ -178,8 +180,7 @@ export function TimelineView() {
         ctx.beginPath()
         ctx.rect(drawX, TRACK_TOP, drawW, TRACK_HEIGHT)
         ctx.clip()
-        const label = speakers.length > 1 ? `${seg.speaker}: ${seg.text}` : seg.text
-        ctx.fillText(label, drawX + 3, TRACK_TOP + TRACK_HEIGHT / 2 + 3, drawW - 6)
+        ctx.fillText(seg.text, drawX + 3, TRACK_TOP + TRACK_HEIGHT / 2 + 3, drawW - 6)
         ctx.restore()
       }
     })
@@ -246,9 +247,12 @@ export function TimelineView() {
 
     const clickedSeg = findSegmentAt(x, y)
     if (clickedSeg) {
+      // 点击 segment 只选中，不移动播放光标
       selectSegment(clickedSeg.id)
+      return
     }
 
+    // 点击空白区域：移动播放光标
     const seekMs = Math.max(0, Math.round(ms))
     setCurrentTime(seekMs)
     const video = document.querySelector('video')

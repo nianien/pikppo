@@ -4,7 +4,7 @@
 # 直接翻译，不依赖预生成的翻译上下文
 #
 # 使用方: translate_prompts.py:build_fallback_prompt()
-# 变量: $segment_count, $segments_text
+# 变量: $segment_count, $segments_text, $story_background_block
 # ============================================================
 
 system: |
@@ -13,6 +13,7 @@ system: |
   Output format: Use tags <<<0>>>, <<<1>>>, etc. to mark each translation.
 
 user: |
+  $story_background_block
   Translate the following $segment_count Chinese subtitle segments to English:
 
   $segments_text
