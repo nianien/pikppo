@@ -51,7 +51,7 @@ export function PlayerEngine() {
       const v2 = videoRef.current
       if (v2) {
         v2.currentTime = pos
-        if (wasPlaying) v2.play()
+        if (wasPlaying) v2.play().catch(() => {})
       }
     })
   }, [])
@@ -135,7 +135,7 @@ export function PlayerEngine() {
         className="max-w-full max-h-full cursor-pointer"
         onClick={() => {
           const v = videoRef.current
-          if (v) v.paused ? v.play() : v.pause()
+          if (v) v.paused ? v.play().catch(() => {}) : v.pause()
         }}
         preload="auto"
       />

@@ -3,16 +3,15 @@ PhaseRunner: 执行协议 + should_run 决策
 """
 import traceback
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
-from dubora.pipeline.core.types import Artifact, ErrorInfo, RunContext, Status, ResolvedOutputs
+from dubora.pipeline.core.types import Artifact, ErrorInfo, RunContext, ResolvedOutputs
 from dubora.pipeline.core.phase import Phase
 from dubora.pipeline.core.manifest import Manifest, now_iso
 from dubora.pipeline.core.fingerprints import (
     compute_config_fingerprint,
     hash_path,
 )
-from dubora.pipeline.core.atomic import atomic_copy
 from dubora.utils.logger import info, warning, error
 
 
@@ -87,7 +86,7 @@ class PhaseRunner:
             try:
                 current_config_fp = compute_config_fingerprint(phase.name, config)
                 if stored_config_fp != current_config_fp:
-                    return True, f"config fingerprint changed"
+                    return True, "config fingerprint changed"
             except Exception:
                 pass
 
@@ -355,182 +354,5 @@ class PhaseRunner:
             self.manifest.save()
             return False
     
-    def _auto_advance(
-        self,
-        phases: List[Phase],
-        ctx: RunContext,
-    ) -> Dict[str, str]:
-        """
-        自动推进模式：按顺序执行 phase，在 gate 处暂停等待人工确认。
-
-        Phase 是加工动作，Gate 是质量闸门。
-        每个 phase 执行后检查是否有 gate，如果有且未通过则暂停。
-
-        Gate 状态流转：
-        - pending → awaiting（首次到达，暂停）
-        - awaiting → passed（用户确认后再次调用，通过）
-
-        Returns:
-            最终输出的 artifact 路径字典（pipeline 暂停时返回空字典）
-        """
-        from dubora.pipeline.phases import GATE_AFTER
-
-        for phase in phases:
-            status = self.manifest.get_phase_status(phase.name)
-
-            if status in ("succeeded", "skipped"):
-                # Phase 已完成，但仍需检查其后的 gate
-                gate_def = GATE_AFTER.get(phase.name)
-                if gate_def:
-                    gate_status = self.manifest.get_gate_status(gate_def["key"])
-                    if gate_status == "awaiting":
-                        # 用户点了"继续"，确认通过
-                        self.manifest.update_gate(
-                            gate_def["key"],
-                            status="passed",
-                            finished_at=now_iso(),
-                        )
-                        self.manifest.save()
-                        info(f"Gate '{gate_def['key']}' passed")
-                    elif gate_status != "passed":
-                        # Gate 未通过，暂停
-                        self.manifest.update_gate(
-                            gate_def["key"],
-                            status="awaiting",
-                            started_at=now_iso(),
-                        )
-                        self.manifest.save()
-                        info(f"Pipeline paused: gate '{gate_def['key']}' ({gate_def['label']})")
-                        return {}
-                continue
-
-            # 执行 phase
-            success = self.run_phase(phase, ctx, force=False)
-            if not success:
-                raise RuntimeError(f"Phase '{phase.name}' failed")
-
-            # Phase 成功后检查 gate
-            gate_def = GATE_AFTER.get(phase.name)
-            if gate_def:
-                self.manifest.update_gate(
-                    gate_def["key"],
-                    status="awaiting",
-                    started_at=now_iso(),
-                )
-                self.manifest.save()
-                info(f"Pipeline paused: gate '{gate_def['key']}' ({gate_def['label']})")
-                return {}
-
-        # 全部完成
-        final = phases[-1]
-        outputs: Dict[str, str] = {}
-        for key in final.provides():
-            try:
-                artifact = self.manifest.get_artifact(key)
-                outputs[key] = str(self.workspace / artifact.relpath)
-            except ValueError:
-                pass
-        return outputs
-
-    def run_pipeline(
-        self,
-        phases: List[Phase],
-        ctx: RunContext,
-        *,
-        to_phase: Optional[str] = None,
-        from_phase: Optional[str] = None,
-    ) -> Dict[str, str]:
-        """
-        运行 pipeline 到指定 phase。
-
-        Args:
-            phases: 所有 phases（按顺序）
-            ctx: RunContext
-            to_phase: 目标 phase 名称（如果为 None 且无 from_phase，使用自动推进模式）
-            from_phase: 起始 phase 名称（如果指定，从该 phase 开始强制刷新）
-
-        Returns:
-            最终输出的 artifact 路径字典
-        """
-        # 无 --from/--to 时使用自动推进模式
-        if from_phase is None and to_phase is None:
-            return self._auto_advance(phases, ctx)
-
-        # 找到目标 phase 索引
-        phase_dict = {p.name: i for i, p in enumerate(phases)}
-        
-        if to_phase and to_phase not in phase_dict:
-            raise ValueError(f"Unknown phase: {to_phase}")
-        
-        if from_phase and from_phase not in phase_dict:
-            raise ValueError(f"Unknown phase: {from_phase}")
-        
-        # 确定需要运行的 phases
-        if to_phase:
-            to_idx = phase_dict[to_phase]
-            phases_to_run = phases[:to_idx + 1]
-        else:
-            phases_to_run = phases
-        
-        # 确定强制刷新的起始索引
-        force_from_idx = None
-        if from_phase:
-            force_from_idx = phase_dict[from_phase]
-            if force_from_idx > len(phases_to_run) - 1:
-                raise ValueError(f"from_phase ({from_phase}) must be before to_phase ({to_phase})")
-        
-        # 运行 phases（--from/--to 模式下也检查 gate）
-        from dubora.pipeline.phases import GATE_AFTER
-
-        for idx, phase in enumerate(phases_to_run):
-            force = force_from_idx is not None and idx >= force_from_idx
-
-            info(f"\n{'=' * 60}")
-            info(f"Phase: {phase.name}")
-            info(f"{'=' * 60}")
-
-            # --from 之前的 phase：只跳过，不重跑（即使之前失败）
-            if force_from_idx is not None and idx < force_from_idx:
-                should, reason = self.should_run(phase, force=False, config=ctx.config)
-                if should:
-                    info(f"Phase '{phase.name}' skipped (before --from {from_phase}): {reason}")
-                    continue
-
-            success = self.run_phase(phase, ctx, force=force)
-
-            if not success:
-                raise RuntimeError(f"Phase '{phase.name}' failed")
-
-            # Phase 完成后检查 gate（--to 模式下最后一个 phase 不检查）
-            if to_phase and phase.name == to_phase:
-                break
-            gate_def = GATE_AFTER.get(phase.name)
-            if gate_def:
-                gate_status = self.manifest.get_gate_status(gate_def["key"])
-                if gate_status == "passed":
-                    info(f"Gate '{gate_def['key']}' already passed, continuing")
-                else:
-                    # 设置为 awaiting，暂停 pipeline
-                    self.manifest.update_gate(
-                        gate_def["key"],
-                        status="awaiting",
-                        started_at=now_iso(),
-                    )
-                    self.manifest.save()
-                    info(f"Pipeline paused: gate '{gate_def['key']}' ({gate_def['label']})")
-                    return {}
-
-        # 返回最终输出
-        if to_phase:
-            final_phase = phases[phase_dict[to_phase]]
-        else:
-            final_phase = phases_to_run[-1]
-        provides = final_phase.provides()
-        outputs = {}
-        for key in provides:
-            try:
-                artifact = self.manifest.get_artifact(key)
-                outputs[key] = str(self.workspace / artifact.relpath)
-            except ValueError:
-                pass
-        return outputs
+    # run_pipeline() and _auto_advance() removed — orchestration is now
+    # handled by PipelineEngine (pipeline/core/engine.py).

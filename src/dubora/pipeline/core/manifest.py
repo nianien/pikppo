@@ -2,14 +2,12 @@
 Manifest IO + registry + 状态管理
 """
 import json
-import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from dubora.pipeline.core.types import Artifact, ErrorInfo, GateStatus, Status
-from dubora.pipeline.core.atomic import atomic_write, atomic_copy
-from dubora.pipeline.core.fingerprints import hash_file
+from dubora.pipeline.core.atomic import atomic_write
 
 
 class Manifest:
@@ -222,87 +220,248 @@ class Manifest:
         }
     
     def _resolve_artifact_path(self, key: str, workspace: Path) -> Path:
-        """
-        根据 artifact key 解析最终文件路径。
-        
-        Args:
-            key: artifact key（如 "subs.subtitle_model"）
-            workspace: workspace 根目录
-        
-        Returns:
-            最终文件路径（绝对路径）
-        """
-        # 根据 key 的 domain 和 object 确定路径
-        parts = key.split(".", 1)
-        if len(parts) == 2:
-            domain, obj = parts
-        else:
-            domain = "misc"
-            obj = key
-        
-        # 路径映射规则（workspace-relative）
-        # 按资产生命周期分层：
-        #   input/   — 不可变，创建后不修改
-        #   state/   — SSOT，人工可编辑
-        #   derived/ — 可重算的中间产物
-        #   output/  — 最终交付物
-        path_map = {
-            "extract": {
-                "audio": "input/{episode_stem}.wav",
-                "vocals": "input/{episode_stem}-vocals.wav",
-                "accompaniment": "input/{episode_stem}-accompaniment.wav",
-            },
-            "asr": {
-                "asr_result": "input/asr-result.json",
-                "asr_model": "state/dub.json",
-            },
-            "subs": {
-                "subtitle_model": "state/subtitle.model.json",
-                "subtitle_align": "derived/subtitle.align.json",
-                "zh_srt": "output/zh.srt",
-                "en_srt": "output/en.srt",
-            },
-            "mt": {
-                "mt_input": "derived/mt/input.jsonl",
-                "mt_output": "derived/mt/output.jsonl",
-            },
-            "tts": {
-                "audio": "derived/{episode_stem}-tts.wav",
-                "voice_assignment": "derived/voice-assignment.json",
-                "sentence": "derived/tts/sentence.json",
-                "segments_dir": "derived/tts/segments",
-                "segments_index": "derived/tts/segments.json",
-                "report": "derived/tts/report.json",
-            },
-            "voiceprint": {
-                "speaker_map": "derived/voiceprint/speaker_map.json",
-                "reference_clips": "derived/voiceprint/refs",
-            },
-            "dub": {
-                "dub_manifest": "state/dub.json",
-            },
-            "mix": {
-                "audio": "derived/{episode_stem}-mix.wav",
-            },
-            "burn": {
-                "video": "output/{episode_stem}-dubbed.mp4",
-            },
-        }
-        
-        # 获取路径模板
-        if domain in path_map and obj in path_map[domain]:
-            path_template = path_map[domain][obj]
-        else:
-            # 默认路径：domain/obj
-            path_template = f"{domain}/{obj}"
-        
-        # 替换 episode_stem（从 workspace 名称提取）
-        episode_stem = workspace.name
-        path_str = path_template.format(episode_stem=episode_stem)
-        
-        return workspace / path_str
+        return resolve_artifact_path(key, workspace)
+
+
+# ── Module-level functions ─────────────────────────────────────
+
+def resolve_artifact_path(key: str, workspace: Path) -> Path:
+    """
+    根据 artifact key 解析最终文件路径。
+
+    Shared by Manifest and DbManifest.
+
+    Args:
+        key: artifact key（如 "subs.subtitle_model"）
+        workspace: workspace 根目录
+
+    Returns:
+        最终文件路径（绝对路径）
+    """
+    parts = key.split(".", 1)
+    if len(parts) == 2:
+        domain, obj = parts
+    else:
+        domain = "misc"
+        obj = key
+
+    # 路径映射规则（workspace-relative）
+    # 按资产生命周期分层：
+    #   input/   — 不可变，创建后不修改
+    #   state/   — SSOT，人工可编辑
+    #   derived/ — 可重算的中间产物
+    #   output/  — 最终交付物
+    path_map = {
+        "extract": {
+            "audio": "input/{episode_stem}.wav",
+            "vocals": "input/{episode_stem}-vocals.wav",
+            "accompaniment": "input/{episode_stem}-accompaniment.wav",
+        },
+        "asr": {
+            "asr_result": "input/asr-result.json",
+            "asr_model": "state/dub.json",
+        },
+        "subs": {
+            "subtitle_model": "state/subtitle.model.json",
+            "subtitle_align": "derived/subtitle.align.json",
+            "zh_srt": "output/zh.srt",
+            "en_srt": "output/en.srt",
+        },
+        "mt": {
+            "mt_input": "derived/mt/input.jsonl",
+            "mt_output": "derived/mt/output.jsonl",
+        },
+        "tts": {
+            "audio": "derived/{episode_stem}-tts.wav",
+            "voice_assignment": "derived/voice-assignment.json",
+            "sentence": "derived/tts/sentence.json",
+            "segments_dir": "derived/tts/segments",
+            "segments_index": "derived/tts/segments.json",
+            "report": "derived/tts/report.json",
+        },
+        "voiceprint": {
+            "speaker_map": "derived/voiceprint/speaker_map.json",
+            "reference_clips": "derived/voiceprint/refs",
+        },
+        "dub": {
+            "dub_manifest": "state/dub.json",
+        },
+        "mix": {
+            "audio": "derived/{episode_stem}-mix.wav",
+        },
+        "burn": {
+            "video": "output/{episode_stem}-dubbed.mp4",
+        },
+    }
+
+    if domain in path_map and obj in path_map[domain]:
+        path_template = path_map[domain][obj]
+    else:
+        path_template = f"{domain}/{obj}"
+
+    episode_stem = workspace.name
+    path_str = path_template.format(episode_stem=episode_stem)
+
+    return workspace / path_str
 
 
 def now_iso() -> str:
     """返回当前时间的 ISO 格式字符串。"""
     return datetime.now(timezone.utc).isoformat()
+
+
+# ── DbManifest ─────────────────────────────────────────────────
+
+class DbManifest:
+    """DB-backed Manifest: episode-level, phase data from tasks table."""
+
+    def __init__(self, store, episode_id: int, workspace: Path):
+        self.store = store
+        self.episode_id = episode_id
+        self.workspace = workspace
+        self._current_task_id: Optional[int] = None
+
+    def set_current_task(self, task_id: int) -> None:
+        """Set the task that update_phase writes to."""
+        self._current_task_id = task_id
+
+    def save(self) -> None:
+        """DB operations are immediate; no-op for compatibility."""
+        pass
+
+    def set_job(self, job_id: str, workspace: str) -> None:
+        pass  # no-op, episode-based now
+
+    def get_artifact(self, key: str, required_by: Optional[str] = None) -> Artifact:
+        row = self.store.get_artifact(self.episode_id, key)
+        if row is None:
+            error_msg = f"Required artifact '{key}' not found in manifest"
+            if required_by:
+                error_msg += f" (required by phase '{required_by}')"
+            raise ValueError(error_msg)
+        return Artifact(
+            key=row["key"],
+            relpath=row["relpath"],
+            kind=row["kind"],
+            fingerprint=row["fingerprint"],
+        )
+
+    def register_artifact(self, artifact: Artifact) -> None:
+        self.store.upsert_artifact(
+            self.episode_id,
+            artifact.key,
+            artifact.relpath,
+            artifact.kind,
+            artifact.fingerprint,
+        )
+
+    def get_all_artifacts(self) -> Dict[str, Artifact]:
+        rows = self.store.get_all_artifacts(self.episode_id)
+        return {
+            r["key"]: Artifact(
+                key=r["key"],
+                relpath=r["relpath"],
+                kind=r["kind"],
+                fingerprint=r["fingerprint"],
+            )
+            for r in rows
+        }
+
+    def get_phase_status(self, phase_name: str) -> Optional[Status]:
+        task = self.store.get_latest_succeeded_task(self.episode_id, phase_name)
+        return task["status"] if task else None
+
+    def get_phase_data(self, phase_name: str) -> Optional[Dict[str, Any]]:
+        """Get phase data from the latest succeeded task."""
+        task = self.store.get_latest_succeeded_task(self.episode_id, phase_name)
+        if task is None:
+            return None
+        ctx = json.loads(task["context"] or "{}")
+        # Build artifacts sub-dict from provides list in context
+        provides = ctx.get("provides", [])
+        phase_artifacts = {}
+        for key in provides:
+            art = self.store.get_artifact(self.episode_id, key)
+            if art:
+                phase_artifacts[key] = art
+        return {
+            "name": phase_name,
+            "version": ctx.get("version"),
+            "status": task["status"],
+            "config_fingerprint": ctx.get("config_fingerprint"),
+            "started_at": task.get("claimed_at"),
+            "finished_at": task.get("finished_at"),
+            "error": task.get("error"),
+            "skipped": ctx.get("skipped", False),
+            "metrics": ctx.get("metrics", {}),
+            "artifacts": phase_artifacts,
+        }
+
+    def update_phase(
+        self,
+        phase_name: str,
+        *,
+        version: str,
+        status: Status,
+        started_at: Optional[str] = None,
+        finished_at: Optional[str] = None,
+        attempt: int = 1,
+        requires: Optional[List[str]] = None,
+        provides: Optional[List[str]] = None,
+        inputs_fingerprint: Optional[str] = None,
+        config_fingerprint: Optional[str] = None,
+        artifacts: Optional[Dict[str, Artifact]] = None,
+        metrics: Optional[Dict[str, Any]] = None,
+        warnings: Optional[List[str]] = None,
+        error: Optional[ErrorInfo] = None,
+        skipped: Optional[bool] = None,
+    ) -> None:
+        # Write metadata to the current task's context
+        if self._current_task_id is not None:
+            updates: Dict[str, Any] = {"version": version}
+            if requires is not None:
+                updates["requires"] = requires
+            if provides is not None:
+                updates["provides"] = provides
+            if config_fingerprint:
+                updates["config_fingerprint"] = config_fingerprint
+            if metrics:
+                updates["metrics"] = metrics
+            if skipped is not None:
+                updates["skipped"] = skipped
+            if error:
+                updates["error_detail"] = {
+                    "type": error.type,
+                    "message": error.message,
+                    "traceback": error.traceback,
+                }
+            self.store.update_task_context(self._current_task_id, updates)
+
+        # Register artifacts to the episode-level artifacts table
+        if artifacts:
+            for artifact in artifacts.values():
+                self.register_artifact(artifact)
+
+    def get_gate_status(self, gate_key: str) -> Optional[GateStatus]:
+        task = self.store.get_gate_task(self.episode_id, gate_key)
+        if task is None:
+            return None
+        # Map task status to gate status
+        if task["status"] == "succeeded":
+            return "passed"
+        if task["status"] == "pending":
+            return "awaiting"
+        return "pending"
+
+    def update_gate(
+        self,
+        gate_key: str,
+        *,
+        status: GateStatus,
+        started_at: Optional[str] = None,
+        finished_at: Optional[str] = None,
+    ) -> None:
+        pass  # Gates are now tasks, managed by reactor
+
+    def _resolve_artifact_path(self, key: str, workspace: Path) -> Path:
+        return resolve_artifact_path(key, workspace)

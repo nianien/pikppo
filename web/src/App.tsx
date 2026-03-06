@@ -13,6 +13,16 @@ import { useKeyboard } from './hooks/useKeyboard'
 import { VoicePreview } from './components/VoicePreview'
 import type { Episode } from './types/asr-model'
 
+function episodeLabel(ep: Episode): string {
+  if (ep.dubbed_video) return '[已译制]'
+  switch (ep.status) {
+    case 'running': return '[译制中]'
+    case 'failed': return '[译制失败]'
+    case 'review': return '[人工校准]'
+    default: return ''
+  }
+}
+
 export default function App() {
   const {
     episodes, currentDrama, currentEpisode,
@@ -34,19 +44,34 @@ export default function App() {
 
   useKeyboard()
 
-  const [selectedDrama, setSelectedDrama] = useState<string>('')
+  const [selectedDrama, setSelectedDrama] = useState<string>(
+    () => localStorage.getItem('selectedDrama') ?? ''
+  )
 
   const handleDramaChange = useCallback((e: React.ChangeEvent<HTMLSelectElement>) => {
     setSelectedDrama(e.target.value)
+    localStorage.setItem('selectedDrama', e.target.value)
   }, [])
 
   const handleEpisodeChange = useCallback((e: React.ChangeEvent<HTMLSelectElement>) => {
     const ep = e.target.value
     if (!ep || !selectedDrama) return
     selectEpisode(selectedDrama, ep)
+    localStorage.setItem('selectedEpisode', ep)
   }, [selectedDrama, selectEpisode])
 
-  // Sync selectedDrama when currentDrama changes (e.g. initial load)
+  // Restore last selection after episodes load
+  useEffect(() => {
+    if (episodes.length === 0) return
+    const savedDrama = localStorage.getItem('selectedDrama')
+    const savedEp = localStorage.getItem('selectedEpisode')
+    if (savedDrama && !currentDrama) {
+      setSelectedDrama(savedDrama)
+      if (savedEp) selectEpisode(savedDrama, savedEp)
+    }
+  }, [episodes.length, currentDrama, selectEpisode])
+
+  // Sync selectedDrama when currentDrama changes
   useEffect(() => {
     if (currentDrama && !selectedDrama) setSelectedDrama(currentDrama)
   }, [currentDrama, selectedDrama])
@@ -94,7 +119,7 @@ export default function App() {
               <option value="">Select episode...</option>
               {(dramaGroups[selectedDrama] ?? []).map(ep => (
                 <option key={ep.episode} value={ep.episode}>
-                  Ep {ep.episode}
+                  Ep {ep.episode} {episodeLabel(ep)}
                 </option>
               ))}
             </select>

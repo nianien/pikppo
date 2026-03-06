@@ -1,65 +1,53 @@
 """
-Pipeline API: 状态查询 + 流式执行 + 阻塞式执行
+Pipeline API: submit tasks + SSE status polling.
 
-dub.json 是 pipeline 唯一 SSOT，不再需要 export/sync/merge 中间步骤。
+Submit endpoints write to DB. Worker thread (in ide) or standalone worker executes.
+SSE endpoint only polls task status from DB.
 """
 import asyncio
 import json
 import logging
-import sys
 from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
-from dubora.pipeline.phases import ALL_PHASES, GATES, STAGES
+from dubora.config.settings import PipelineConfig
+from dubora.pipeline.phases import ALL_PHASES, GATE_AFTER, GATES, STAGES, build_phases
+from dubora.pipeline.core.store import PipelineStore
+from dubora.pipeline.core.events import EventEmitter
+from dubora.pipeline.core.worker import PipelineReactor, submit_pipeline
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-# Phase metadata from backend registry
 PHASES_META = [{"name": p.name, "label": p.label} for p in ALL_PHASES]
 
-# In-memory lock: one running pipeline per episode
-_running: dict[str, asyncio.subprocess.Process] = {}
+
+def _get_store(videos_dir: Path) -> PipelineStore:
+    db_path = videos_dir / "pipeline.db"
+    return PipelineStore(db_path)
 
 
-def _workdir(videos_dir: Path, drama: str, ep: str) -> Path:
-    return videos_dir / drama / "dub" / ep
-
-
-def _find_video(videos_dir: Path, drama: str, ep: str) -> Optional[Path]:
-    for ext in (".mp4", ".mkv", ".avi"):
-        vf = videos_dir / drama / f"{ep}{ext}"
-        if vf.is_file():
-            return vf
-    return None
-
-
-def _read_manifest_phases(workdir: Path) -> list[dict]:
-    """Read manifest.json and return phase status summary for all 8 phases."""
-    manifest_path = workdir / "manifest.json"
-    phases_data: dict = {}
-    if manifest_path.is_file():
-        with open(manifest_path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        phases_data = data.get("phases", {})
+def _derive_phase_status(store: PipelineStore, episode_id: int) -> list[dict]:
+    tasks = store.get_tasks(episode_id)
+    task_map: dict[str, dict] = {}
+    for t in tasks:
+        task_map[t["type"]] = t
 
     result = []
     for meta in PHASES_META:
-        pd = phases_data.get(meta["name"])
-        if pd:
+        t = task_map.get(meta["name"])
+        if t:
             result.append({
                 "name": meta["name"],
                 "label": meta["label"],
-                "status": pd.get("status", "pending"),
-                "started_at": pd.get("started_at"),
-                "finished_at": pd.get("finished_at"),
-                "skipped": pd.get("skipped", False),
-                "metrics": pd.get("metrics", {}),
-                "error": pd.get("error"),
+                "status": t["status"],
+                "started_at": t.get("claimed_at"),
+                "finished_at": t.get("finished_at"),
+                "error": t.get("error"),
             })
         else:
             result.append({
@@ -68,15 +56,40 @@ def _read_manifest_phases(workdir: Path) -> list[dict]:
                 "status": "pending",
                 "started_at": None,
                 "finished_at": None,
-                "skipped": False,
-                "metrics": {},
                 "error": None,
             })
     return result
 
 
+def _derive_gate_status(store: PipelineStore, episode_id: int) -> list[dict]:
+    tasks = store.get_tasks(episode_id)
+    task_map: dict[str, dict] = {}
+    for t in tasks:
+        task_map[t["type"]] = t
+
+    result = []
+    for gate_def in GATES:
+        gate_task = task_map.get(gate_def["key"])
+        before_phase = task_map.get(gate_def["after"])
+
+        if gate_task and gate_task["status"] == "succeeded":
+            status = "passed"
+        elif before_phase and before_phase["status"] == "succeeded":
+            # phase 已完成但 gate 未通过 → 等待人工审核
+            status = "awaiting"
+        else:
+            status = "pending"
+
+        result.append({
+            "key": gate_def["key"],
+            "after": gate_def["after"],
+            "label": gate_def["label"],
+            "status": status,
+        })
+    return result
+
+
 def _derive_stages(phases: list[dict]) -> list[dict]:
-    """Derive stage status from phase statuses."""
     phase_map = {p["name"]: p for p in phases}
     result = []
     for stage_def in STAGES:
@@ -98,134 +111,124 @@ def _derive_stages(phases: list[dict]) -> list[dict]:
     return result
 
 
-def _read_manifest_gates(workdir: Path) -> list[dict]:
-    """Read manifest.json and return gate status for all gates."""
-    manifest_path = workdir / "manifest.json"
-    gates_data: dict = {}
-    if manifest_path.is_file():
-        with open(manifest_path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        gates_data = data.get("gates", {})
-
-    result = []
-    for gate_def in GATES:
-        gd = gates_data.get(gate_def["key"])
-        result.append({
-            "key": gate_def["key"],
-            "after": gate_def["after"],
-            "label": gate_def["label"],
-            "status": gd.get("status", "pending") if gd else "pending",
-        })
-    return result
-
-
 # --------------------------------------------------------------------------- #
 # GET /episodes/{drama}/{ep}/pipeline/status
 # --------------------------------------------------------------------------- #
 
 @router.get("/episodes/{drama}/{ep}/pipeline/status")
 async def pipeline_status(request: Request, drama: str, ep: str) -> dict:
-    """Return phase status summary from manifest.json."""
     videos_dir: Path = request.app.state.videos_dir
-    workdir = _workdir(videos_dir, drama, ep)
-    manifest_path = workdir / "manifest.json"
+    store = _get_store(videos_dir)
 
-    phases = _read_manifest_phases(workdir)
+    episode = store.get_episode_by_names(drama, ep)
+
+    if episode is None:
+        phases = [{
+            "name": m["name"], "label": m["label"], "status": "pending",
+            "started_at": None, "finished_at": None, "error": None,
+        } for m in PHASES_META]
+        gates = [{"key": g["key"], "after": g["after"], "label": g["label"], "status": "pending"} for g in GATES]
+        return {
+            "has_manifest": False,
+            "phases": phases,
+            "gates": gates,
+            "stages": _derive_stages(phases),
+        }
+
+    episode_id = episode["id"]
+    phases = _derive_phase_status(store, episode_id)
     return {
-        "has_manifest": manifest_path.is_file(),
+        "has_manifest": True,
         "phases": phases,
-        "gates": _read_manifest_gates(workdir),
+        "gates": _derive_gate_status(store, episode_id),
         "stages": _derive_stages(phases),
     }
 
 
 # --------------------------------------------------------------------------- #
-# POST /episodes/{drama}/{ep}/pipeline/run-stream  (SSE)
+# POST /episodes/{drama}/{ep}/pipeline/run  (submit only)
 # --------------------------------------------------------------------------- #
 
-@router.post("/episodes/{drama}/{ep}/pipeline/run-stream")
-async def run_pipeline_stream(request: Request, drama: str, ep: str):
-    """
-    SSE streaming pipeline execution.
-
-    Request body:
-        {"from_phase": "mt", "to_phase": "burn"}
-
-    SSE events:
-        event: log     data: {"line": "..."}
-        event: phase   data: {"name": "mt"}
-        event: done    data: {"returncode": 0}
-        event: error   data: {"message": "..."}
-    """
+@router.post("/episodes/{drama}/{ep}/pipeline/run")
+async def run_pipeline(request: Request, drama: str, ep: str) -> dict:
+    """Submit pipeline tasks to DB. Worker thread executes them."""
     videos_dir: Path = request.app.state.videos_dir
+    store = _get_store(videos_dir)
 
-    # Concurrency guard
-    lock_key = f"{drama}/{ep}"
-    if lock_key in _running:
-        raise HTTPException(status_code=409, detail="Pipeline already running for this episode")
+    episode = store.get_episode_by_names(drama, ep)
+    if episode is None:
+        raise HTTPException(status_code=404, detail=f"Episode not found: {drama}/{ep}")
 
-    video_path = _find_video(videos_dir, drama, ep)
-    if not video_path:
-        raise HTTPException(status_code=404, detail=f"Video file not found for {drama}/{ep}")
+    if store.has_running_tasks(episode["id"]):
+        raise HTTPException(status_code=409, detail="Pipeline has running tasks")
 
     body = await request.json() if await request.body() else {}
     from_phase = body.get("from_phase")
     to_phase = body.get("to_phase")
 
-    async def event_stream():
+    phases = build_phases(PipelineConfig())
+    submit_pipeline(store, episode["id"], phases, GATE_AFTER,
+                    from_phase=from_phase, to_phase=to_phase)
+
+    return {"status": "submitted", "episode_id": episode["id"]}
+
+
+# --------------------------------------------------------------------------- #
+# GET /episodes/{drama}/{ep}/pipeline/stream  (SSE, poll only)
+# --------------------------------------------------------------------------- #
+
+@router.get("/episodes/{drama}/{ep}/pipeline/stream")
+async def pipeline_stream(request: Request, drama: str, ep: str):
+    """SSE: poll task status changes from DB. Does NOT execute tasks."""
+    videos_dir: Path = request.app.state.videos_dir
+
+    async def event_generator():
         def sse(event: str, data: dict) -> str:
             return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
-        # dub.json is the single SSOT - no export/sync/merge needed
+        store = _get_store(videos_dir)
+        episode = store.get_episode_by_names(drama, ep)
+        if episode is None:
+            yield sse("error", {"message": f"Episode not found: {drama}/{ep}"})
+            return
 
-        cmd = [
-            sys.executable, "-m", "dubora.cli",
-            "run", str(video_path),
-        ]
-        if from_phase:
-            cmd += ["--from", from_phase]
-        if to_phase:
-            cmd += ["--to", to_phase]
+        episode_id = episode["id"]
+        seen: set[tuple[int, str]] = set()
 
-        desc = f"--from {from_phase} --to {to_phase}" if from_phase or to_phase else "auto-advance"
-        yield sse("log", {"line": f"Pipeline started: {desc}"})
+        while True:
+            if await request.is_disconnected():
+                break
 
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.STDOUT,
-            )
-            _running[lock_key] = proc
+            tasks = store.get_tasks(episode_id)
+            for t in tasks:
+                key = (t["id"], t["status"])
+                if key not in seen and t["status"] != "pending":
+                    seen.add(key)
+                    yield sse(
+                        f"{t['type']}_{t['status']}",
+                        {"type": t["type"], "task_id": t["id"]},
+                    )
 
-            async for raw_line in proc.stdout:
-                line = raw_line.decode("utf-8", errors="replace").rstrip()
-                if not line:
-                    continue
+            ep_row = store.get_episode(episode_id)
+            ep_status = ep_row["status"] if ep_row else "unknown"
+            if ep_status in ("succeeded", "failed"):
+                yield sse(f"pipeline_{ep_status}", {})
+                break
+            if ep_status == "ready":
+                # Stopped — no more tasks to watch
+                yield sse("pipeline_stopped", {})
+                break
+            if ep_status == "review":
+                gate_tasks = [t for t in tasks if t["type"] in
+                              {g["key"] for g in GATES} and t["status"] == "pending"]
+                gate_key = gate_tasks[0]["type"] if gate_tasks else ""
+                yield sse("gate_awaiting", {"gate": gate_key})
+                break
 
-                yield sse("log", {"line": line})
-
-                # Detect phase transitions from log output
-                line_lower = line.lower()
-                for meta in PHASES_META:
-                    if meta["name"] in line_lower and ("phase" in line_lower or "running" in line_lower):
-                        yield sse("phase", {"name": meta["name"]})
-                        break
-
-            returncode = await proc.wait()
-            yield sse("done", {"returncode": returncode})
-
-        except asyncio.CancelledError:
-            if lock_key in _running:
-                _running[lock_key].kill()
-            yield sse("error", {"message": "Pipeline cancelled"})
-        except Exception as e:
-            yield sse("error", {"message": str(e)})
-        finally:
-            _running.pop(lock_key, None)
+            await asyncio.sleep(0.3)
 
     return StreamingResponse(
-        event_stream(),
+        event_generator(),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
@@ -241,16 +244,74 @@ async def run_pipeline_stream(request: Request, drama: str, ep: str):
 
 @router.post("/episodes/{drama}/{ep}/pipeline/cancel")
 async def cancel_pipeline(request: Request, drama: str, ep: str) -> dict:
-    """Cancel a running pipeline for this episode."""
-    lock_key = f"{drama}/{ep}"
-    proc = _running.get(lock_key)
-    if proc is None:
-        raise HTTPException(status_code=404, detail="No running pipeline for this episode")
+    videos_dir: Path = request.app.state.videos_dir
+    store = _get_store(videos_dir)
 
-    try:
-        proc.kill()
-    except ProcessLookupError:
-        pass
-    _running.pop(lock_key, None)
+    episode = store.get_episode_by_names(drama, ep)
+    if episode is None:
+        raise HTTPException(status_code=404, detail=f"Episode not found: {drama}/{ep}")
 
-    return {"status": "cancelled"}
+    store.delete_pending_tasks(episode["id"])
+    status = store.derive_episode_status(episode["id"])
+    store.update_episode_status(episode["id"], status)
+
+    return {"status": "stopped", "episode_status": status}
+
+
+# --------------------------------------------------------------------------- #
+# POST /episodes/{drama}/{ep}/pipeline/gate/{gate_key}/pass
+# --------------------------------------------------------------------------- #
+
+@router.post("/episodes/{drama}/{ep}/pipeline/gate/{gate_key}/pass")
+async def pass_gate(request: Request, drama: str, ep: str, gate_key: str) -> dict:
+    videos_dir: Path = request.app.state.videos_dir
+    store = _get_store(videos_dir)
+
+    episode = store.get_episode_by_names(drama, ep)
+    if episode is None:
+        raise HTTPException(status_code=404, detail=f"Episode not found: {drama}/{ep}")
+    episode_id = episode["id"]
+
+    # Idempotency: if already has pending/running phase task, skip
+    latest = store.get_latest_task(episode_id)
+    if latest and latest["status"] in ("pending", "running") and latest["type"] != gate_key:
+        return {"status": "passed", "gate": gate_key}
+
+    task_id = store.pass_gate_task(episode_id, gate_key)
+    if task_id is None:
+        # No pending gate task — create and pass, or already passed
+        gate_task = store.get_gate_task(episode_id, gate_key)
+        if gate_task and gate_task["status"] == "succeeded":
+            return {"status": "passed", "gate": gate_key}
+        task_id = store.create_task(episode_id, gate_key)
+        store.complete_task(task_id)
+
+    # Reactor creates the next phase task
+    emitter = EventEmitter()
+    phases = build_phases(PipelineConfig())
+    reactor = PipelineReactor(
+        store, emitter, episode_id, phases, GATE_AFTER,
+    )
+    from dubora.pipeline.core.events import PipelineEvent
+    reactor._on_succeeded(PipelineEvent(
+        kind="task_succeeded",
+        run_id=str(episode_id),
+        data={"type": gate_key},
+    ))
+
+    return {"status": "passed", "gate": gate_key}
+
+
+# --------------------------------------------------------------------------- #
+# GET /episodes/{drama}/{ep}/pipeline/events
+# --------------------------------------------------------------------------- #
+
+@router.get("/episodes/{drama}/{ep}/pipeline/events")
+async def get_pipeline_events(request: Request, drama: str, ep: str) -> dict:
+    videos_dir: Path = request.app.state.videos_dir
+    store = _get_store(videos_dir)
+    episode = store.get_episode_by_names(drama, ep)
+    if episode is None:
+        return {"events": []}
+    events = store.get_events_for_episode(episode["id"])
+    return {"events": events}

@@ -8,7 +8,7 @@ export function ToolBar() {
 
   if (!model) return null
 
-  const selectedSeg = model.segments.find(s => s.id === selectedSegmentId)
+  const selectedSeg = (model.segments ?? []).find(s => s.id === selectedSegmentId)
 
   return (
     <div className="flex items-center gap-4 px-3 py-2 text-xs overflow-x-auto">

@@ -6,17 +6,35 @@ import { fetchJson } from '../utils/api'
 
 // ---- Action derivation ----
 
+export type ActionKind = 'start' | 'resume' | 'pass_gate' | 'retry'
+
 export interface WorkflowAction {
   label: string
+  kind: ActionKind
+  gateKey?: string     // for pass_gate
+  fromPhase?: string   // for retry
 }
 
 function deriveAction(phases: PhaseStatus[], gates: GateStatus[]): WorkflowAction | null {
   if (phases.some(p => p.status === 'running')) return null
+
+  // All done
   if (phases.every(p => p.status === 'succeeded' || p.status === 'skipped')
       && gates.every(g => g.status === 'passed')) return null
-  if (gates.some(g => g.status === 'awaiting')) return { label: '继续' }
-  if (phases.some(p => p.status === 'failed')) return { label: '重试' }
-  return { label: '开始' }
+
+  // Gate awaiting → pass gate
+  const awaitingGate = gates.find(g => g.status === 'awaiting')
+  if (awaitingGate) return { label: '继续', kind: 'pass_gate', gateKey: awaitingGate.key }
+
+  // Failed → retry from failed phase
+  const failedPhase = phases.find(p => p.status === 'failed')
+  if (failedPhase) return { label: '重试', kind: 'retry', fromPhase: failedPhase.name }
+
+  // Some succeeded → resume
+  if (phases.some(p => p.status === 'succeeded')) return { label: '继续', kind: 'resume' }
+
+  // Nothing started
+  return { label: '开始', kind: 'start' }
 }
 
 // ---- Store ----
@@ -32,7 +50,13 @@ interface PipelineState {
 
   // Actions
   loadStatus: (drama: string, ep: string) => Promise<void>
+  _fetchStatus: (drama: string, ep: string) => Promise<void>
+  _startPolling: () => void
+  _stopPolling: () => void
   runPipeline: (drama: string, ep: string, fromPhase?: string) => Promise<void>
+  passGate: (drama: string, ep: string, gateKey: string) => Promise<void>
+  executeAction: (drama: string, ep: string) => Promise<void>
+  _connectStream: (drama: string, ep: string) => Promise<void>
   cancelRun: () => void
   clearLogs: () => void
 }
@@ -62,6 +86,8 @@ let _abortController: AbortController | null = null
 // Track current drama/ep for re-fetching status
 let _currentDrama = ''
 let _currentEp = ''
+// Polling timer for auto-refresh
+let _pollTimer: ReturnType<typeof setInterval> | null = null
 
 export const usePipelineStore = create<PipelineState>((set, get) => ({
   phases: defaultPhases,
@@ -82,6 +108,12 @@ export const usePipelineStore = create<PipelineState>((set, get) => ({
       stages: defaultStages,
       currentAction: deriveAction(defaultPhases, defaultGates),
     })
+    await get()._fetchStatus(drama, ep)
+    // Start polling
+    get()._startPolling()
+  },
+
+  _fetchStatus: async (drama, ep) => {
     try {
       const data = await fetchJson<PipelineStatusResponse>(
         `/episodes/${encodeURIComponent(drama)}/${encodeURIComponent(ep)}/pipeline/status`,
@@ -95,44 +127,126 @@ export const usePipelineStore = create<PipelineState>((set, get) => ({
         currentAction: deriveAction(data.phases, gates),
       })
     } catch {
-      set({
-        phases: defaultPhases,
-        gates: defaultGates,
-        stages: defaultStages,
-        currentAction: deriveAction(defaultPhases, defaultGates),
-      })
+      // keep current state on fetch error
+    }
+  },
+
+  _startPolling: () => {
+    if (_pollTimer) clearInterval(_pollTimer)
+    _pollTimer = setInterval(() => {
+      if (_currentDrama && _currentEp) {
+        get()._fetchStatus(_currentDrama, _currentEp)
+      }
+    }, 2000)
+  },
+
+  _stopPolling: () => {
+    if (_pollTimer) {
+      clearInterval(_pollTimer)
+      _pollTimer = null
     }
   },
 
   runPipeline: async (drama, ep, fromPhase?) => {
-    // Cancel any existing run
-    get().cancelRun()
+    // Only abort SSE, do NOT send cancel (would race with the run request)
+    if (_abortController) {
+      _abortController.abort()
+      _abortController = null
+    }
 
     _currentDrama = drama
     _currentEp = ep
 
     set({ isRunning: true, logs: [], runError: null })
 
-    _abortController = new AbortController()
-    const { signal } = _abortController
-
     const body: Record<string, string> = {}
     if (fromPhase) body.from_phase = fromPhase
 
+    // Step 1: Submit pipeline tasks to DB
     try {
       const res = await fetch(
-        `/api/episodes/${encodeURIComponent(drama)}/${encodeURIComponent(ep)}/pipeline/run-stream`,
+        `/api/episodes/${encodeURIComponent(drama)}/${encodeURIComponent(ep)}/pipeline/run`,
         {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(body),
-          signal,
         },
+      )
+      if (!res.ok) {
+        const text = await res.text()
+        set({ isRunning: false, runError: `API ${res.status}: ${text}` })
+        return
+      }
+    } catch (err) {
+      set({ runError: (err as Error).message, isRunning: false })
+      return
+    }
+
+    // Step 2: Connect SSE stream
+    await get()._connectStream(drama, ep)
+  },
+
+  passGate: async (drama, ep, gateKey) => {
+    // Only abort SSE, do NOT cancel pipeline (would delete the gate task)
+    if (_abortController) {
+      _abortController.abort()
+      _abortController = null
+    }
+
+    _currentDrama = drama
+    _currentEp = ep
+    set({ isRunning: true, logs: [], runError: null })
+
+    // Step 1: Pass the gate (backend reactor creates next task)
+    try {
+      const res = await fetch(
+        `/api/episodes/${encodeURIComponent(drama)}/${encodeURIComponent(ep)}/pipeline/gate/${encodeURIComponent(gateKey)}/pass`,
+        { method: 'POST' },
+      )
+      if (!res.ok) {
+        const text = await res.text()
+        set({ isRunning: false, runError: `API ${res.status}: ${text}` })
+        return
+      }
+    } catch (err) {
+      set({ runError: (err as Error).message, isRunning: false })
+      return
+    }
+
+    // Step 2: Connect SSE stream to watch progress (no submit needed, reactor already enqueued)
+    await get()._connectStream(drama, ep)
+  },
+
+  executeAction: async (drama, ep) => {
+    const action = get().currentAction
+    if (!action) return
+    switch (action.kind) {
+      case 'pass_gate':
+        if (action.gateKey) await get().passGate(drama, ep, action.gateKey)
+        break
+      case 'retry':
+        await get().runPipeline(drama, ep, action.fromPhase)
+        break
+      case 'start':
+      case 'resume':
+        await get().runPipeline(drama, ep)
+        break
+    }
+  },
+
+  _connectStream: async (drama, ep) => {
+    _abortController = new AbortController()
+    const { signal } = _abortController
+
+    try {
+      const res = await fetch(
+        `/api/episodes/${encodeURIComponent(drama)}/${encodeURIComponent(ep)}/pipeline/stream`,
+        { signal },
       )
 
       if (!res.ok) {
         const text = await res.text()
-        set({ isRunning: false, runError: `API ${res.status}: ${text}` })
+        set({ isRunning: false, runError: `SSE ${res.status}: ${text}` })
         return
       }
 
@@ -151,7 +265,6 @@ export const usePipelineStore = create<PipelineState>((set, get) => ({
 
         buffer += decoder.decode(value, { stream: true })
         const lines = buffer.split('\n')
-        // Keep incomplete last line in buffer
         buffer = lines.pop() ?? ''
 
         let currentEvent = ''
@@ -162,27 +275,32 @@ export const usePipelineStore = create<PipelineState>((set, get) => ({
             const dataStr = line.slice(6)
             try {
               const data = JSON.parse(dataStr)
-              switch (currentEvent) {
-                case 'log':
-                  set(s => ({ logs: [...s.logs, data.line] }))
-                  break
-                case 'phase':
-                  // Re-fetch manifest status to update chips
-                  get().loadStatus(drama, ep)
-                  break
-                case 'done':
-                  // Final status refresh
-                  await get().loadStatus(drama, ep)
-                  if (data.returncode !== 0) {
-                    set({ runError: `Pipeline exited with code ${data.returncode}` })
-                  }
-                  set({ isRunning: false })
-                  return
-                case 'error':
-                  set({ runError: data.message, isRunning: false })
-                  // Refresh status on error too
-                  await get().loadStatus(drama, ep)
-                  return
+
+              if (currentEvent === 'error') {
+                set({ runError: data.message, isRunning: false })
+                await get().loadStatus(drama, ep)
+                return
+              }
+
+              if (currentEvent === 'gate_awaiting') {
+                await get().loadStatus(drama, ep)
+                set({ isRunning: false })
+                return
+              }
+
+              if (currentEvent.startsWith('pipeline_')) {
+                const result = currentEvent.replace('pipeline_', '')
+                if (result === 'failed') {
+                  set({ runError: 'Pipeline failed' })
+                }
+                set({ isRunning: false })
+                await get().loadStatus(drama, ep)
+                return
+              }
+
+              // Task status events
+              if (data.type) {
+                get().loadStatus(drama, ep)
               }
             } catch {
               // Ignore malformed JSON
@@ -192,16 +310,14 @@ export const usePipelineStore = create<PipelineState>((set, get) => ({
         }
       }
 
-      // Stream ended without explicit done event
       set({ isRunning: false })
       await get().loadStatus(drama, ep)
     } catch (err) {
       if ((err as Error).name === 'AbortError') {
-        set(s => ({ logs: [...s.logs, 'Pipeline cancelled'], isRunning: false }))
+        set(s => ({ logs: [...s.logs, 'Pipeline stopped'], isRunning: false }))
       } else {
         set({ runError: (err as Error).message, isRunning: false })
       }
-      // Refresh status
       get().loadStatus(drama, ep)
     } finally {
       _abortController = null

@@ -171,7 +171,7 @@ export function PipelinePanel() {
   const {
     phases, gates, stages, currentAction, isRunning,
     logs, runError,
-    runPipeline, cancelRun,
+    runPipeline, executeAction, cancelRun,
   } = usePipelineStore()
 
   const hasEpisode = !!(currentDrama && currentEpisode)
@@ -197,8 +197,8 @@ export function PipelinePanel() {
       await saveModel()
     }
 
-    runPipeline(currentDrama, currentEpisode)
-  }, [currentDrama, currentEpisode, dirty, saveModel, runPipeline, currentAction])
+    executeAction(currentDrama, currentEpisode)
+  }, [currentDrama, currentEpisode, dirty, saveModel, executeAction, currentAction])
 
   const handleRerun = useCallback(async (fromPhase: string) => {
     if (!currentDrama || !currentEpisode || isRunning) return

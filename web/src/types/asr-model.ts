@@ -53,13 +53,21 @@ export interface Roles {
   default_roles: Record<string, string>  // gender → role_id
 }
 
+export type EpisodeStatus = 'ready' | 'running' | 'succeeded' | 'failed' | 'review'
+
 export interface Episode {
+  id: number
   drama: string
+  drama_id: number
   episode: string
+  path: string
+  status: EpisodeStatus
   video_file: string
   has_asr_result: boolean
   has_asr_model: boolean
   has_subtitle_model: boolean
+  dubbed_video: string
+  subtitle_file: string
 }
 
 export interface ExportResult {
