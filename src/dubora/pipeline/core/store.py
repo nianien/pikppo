@@ -7,9 +7,11 @@ Tables:
   tasks             — task queue (type = phase name or gate key)
   events            — audit log (task lifecycle events)
   artifacts         — episode-level file registry for manifest
-  cues              — atomic segments (SRC=source, DST=subtitle), content entity
+  cues              — atomic segments, content entity
   utterances        — grouping shell + TTS cache (content via utterance_cues → cues)
-  utterance_cues    — junction: utterance ↔ SRC cues
+  utterance_cues    — junction: utterance ↔ cues
+  roles             — per-drama speaker voice mapping
+  dictionary        — per-drama glossary (names, slang)
 """
 import json
 import sqlite3

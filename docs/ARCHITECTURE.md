@@ -1,21 +1,37 @@
 # Dubora Architecture Document
 
-> 本文档为新 session 提供完整的架构参考。基于 2026-03 重构后的 DB-first 架构。
+> 国产短剧英文配音流水线完整架构参考。基于 2026-03 DB-First 架构。
+
+## 1. 项目定位
+
+将中文短剧（竖屏 9:16，单集 2-5 分钟）自动转化为英文配音版本。
+
+**输入**：单集 mp4 视频（无剧本、无角色表）
+
+**输出**：
+- 英文配音成片（多角色声线、保留 BGM）
+- 英文字幕（硬烧到视频）
+
+**设计原则**：
+- 效果优先：宁可慢，也要质量稳定
+- 在线服务为主：ASR/MT/TTS 全在线，仅人声分离在本地
+- 声线池模式：不做原演员克隆，用预定义声线池区分角色
+- DB-First：SQLite 是所有元数据的 SSOT，支持增量重跑和前端实时编辑
 
 ---
 
-## 1. 整体架构
+## 2. 系统架构
 
-### 1.1 Pipeline 流程
+### 2.1 Pipeline 总览
 
 ```
-Stage:  提取      识别              翻译              配音              合成
-Phase:  extract → asr → parse  →  translate  →  tts → align → mix  →  burn
+Stage:  提取      识别              翻译              配音        合成
+Phase:  extract → asr → parse  →  translate  →  tts → mix  →  burn
 Gate:                        ↑              ↑
                       source_review   translation_review
 ```
 
-8 个 Phase + 2 个 Gate，5 个 Stage。
+7 个 Phase + 2 个 Gate，5 个 Stage。数据存储在 SQLite DB (`data/dubora.db`)，task 队列驱动异步执行。
 
 | Phase | 职责 | 技术 |
 |-------|------|------|
@@ -23,12 +39,25 @@ Gate:                        ↑              ↑
 | asr | 语音识别 + 说话人分离 | Doubao ASR (ByteDance) |
 | parse | ASR 后处理 → DB cues (含 reseg + emotion) | 本地 + LLM |
 | translate | 增量翻译 (utterance 级, per-cue 回填) | OpenAI / Gemini |
-| tts | 语音合成 (增量, voice_hash 判脏) | VolcEngine seed-tts-1.0 |
-| align | drift_score 安全阀 + 生成 en.srt | 本地 |
+| tts | 语音合成 (增量, voice_hash 判脏) + drift_score 检查 | VolcEngine seed-tts-1.0 |
 | mix | 混音 (adelay timeline placement) | FFmpeg |
-| burn | 烧字幕到视频 | FFmpeg subtitles filter |
+| burn | 从 DB cues 生成 en.srt + 烧字幕到视频 | FFmpeg subtitles filter |
 
-### 1.2 Task 执行架构
+**数据流**：
+
+```
+extract → audio.wav, vocals.wav, accompaniment.wav (文件)
+asr     → asr-result.json (文件)
+parse   → DB cues 表 (含 reseg + emotion 修正)
+  ── [source_review gate: 人工在 IDE 中校准] ──
+translate → DB cues.text_en (翻译回填) + utterances (分组 + TTS 缓存)
+  ── [translation_review gate: 人工审阅翻译] ──
+tts     → derived/tts/segments/ (逐句音频) + DB utterances 更新
+mix     → derived/mix.wav (混音)
+burn    → output/en.srt (从 DB cues 生成) + output/dubbed.mp4 (成片)
+```
+
+### 2.2 Task 执行架构
 
 ```
 submit_pipeline()  → 写第一个 task 到 DB，退出
@@ -45,7 +74,7 @@ Worker.tick() 流程：
 4. 成功 → complete_task + emit task_succeeded → Reactor 创建下一个 task
 5. 失败 → fail_task + emit task_failed → Reactor 设 episode status=failed
 
-### 1.3 Gate 机制
+### 2.3 Gate 机制
 
 Gate 在指定 phase 完成后暂停，等待人工确认。
 
@@ -60,16 +89,86 @@ GATES = [
 - 用户通过 Web UI 确认 → `pass_gate_task()` → gate task status=succeeded → Reactor 继续
 - translate 完成后 → 同理 translation_review
 
-### 1.4 Phase/Processor 分层
+Gate 作为 task 存储在 tasks 表 (type=gate key)。
 
-- **Phase** (`pipeline/phases/`): 编排层 — 文件 I/O、DB 读写、错误处理。实现 `Phase` 抽象类。
-- **Processor** (`pipeline/processors/`): 无状态业务逻辑 — 纯计算，无文件 I/O。可独立测试。
+### 2.4 整体分层
+
+```
++-------------------------------------------------------------+
+|  CLI (cli.py)                                               |
+|  run / worker / phases / ide                                |
++-----------------------------+-------------------------------+
+                              |
++-----------------------------v-------------------------------+
+|  Pipeline Framework (pipeline/core/)                        |
+|  PipelineWorker, PipelineReactor, PipelineStore, Manifest   |
++-----------------------------+-------------------------------+
+                              |
++-----------------------------v-------------------------------+
+|  Phases (pipeline/phases/)       | Processors (stateless)   |
+|  extract->asr->parse->          | 纯计算、可单测            |
+|  translate->tts->mix->burn      |                           |
++-----------------------------+-------------------------------+
+                              |
++-----------------------------v-------------------------------+
+|  Schema (schema/)  | Config (config/)  | Models / Infra    |
+|  数据模型           | PipelineConfig    | Doubao, OpenAI    |
++-------------------------------------------------------------+
+```
+
+- **Phase**：编排层，实现 `Phase` 抽象（`requires` / `provides` / `run`），负责 DB 读写、调用 Processor、返回 `PhaseResult`。
+- **Processor**：无状态业务逻辑，只做计算，不直接依赖 DB 或 workspace 路径约定，便于单测与替换。
+- **Worker**：轮询 DB task 队列，claim → execute → complete/fail。Reactor 监听事件，自动创建下一个 task。
+
+Phase 通过 `_LazyPhase` 延迟加载，避免在不需要的阶段导入重型依赖（如 torchaudio）。DB-only phases (parse, translate) 的 `provides()` 返回 `[]`，不产生文件 artifact。
+
+### 2.5 CLI 用法
+
+```bash
+vsd run 家里家外 5 --to burn               # 提交 pipeline tasks 到 DB
+vsd run 家里家外 5 --from translate --to tts  # 从指定阶段强制重跑
+vsd run 家里家外 4-70 --to burn            # 批量提交
+vsd worker                                 # 启动独立 worker 进程
+vsd ide                                    # Web IDE (含内嵌 worker 线程)
+vsd ide --port 9000 --dev                  # 开发模式
+vsd phases                                 # 列出所有阶段
+```
+
+### 2.6 文件布局
+
+```
+videos/{剧名}/                  # 剧级目录
++-- 1.mp4                      # 原视频
++-- story_background.txt       # 故事背景（可选，翻译 prompt 注入）
++-- dub/
+    +-- {集号}/                        # 集级 workspace
+        +-- input/                     # 不可变输入（提取后不再修改）
+        |   +-- asr-result.json        #   ASR 原始输出
+        |   +-- audio.wav              #   提取的音频
+        |   +-- vocals.wav             #   人声
+        |   +-- accompaniment.wav      #   伴奏
+        +-- derived/                   # 可重算的派生产物
+        |   +-- tts/                   #   合成产物
+        |   |   +-- segments/          #     逐句 TTS 音频
+        |   |   +-- segments.json      #     段索引
+        |   |   +-- report.json        #     TTS 报告
+        |   +-- voice-assignment.json  #   声线分配快照
+        |   +-- mix.wav                #   最终混音
+        +-- output/                    # 最终交付物
+        |   +-- en.srt                 #   英文字幕 (burn 阶段生成)
+        |   +-- dubbed.mp4             #   成片
+        +-- .cache/                    # 内部优化缓存
+data/
++-- dubora.db                  # SQLite DB (所有元数据 SSOT)
+```
+
+目录按语义角色分层：`input/` 是提取的不可变输入，`derived/` 是可重算的中间产物，`output/` 是最终交付。
 
 ---
 
-## 2. 表结构
+## 3. 表结构
 
-### 2.1 核心表关系
+### 3.1 核心表关系
 
 ```
 dramas (1) ──┬── (N) episodes (1) ──┬── (N) cues
@@ -78,18 +177,17 @@ dramas (1) ──┬── (N) episodes (1) ──┬── (N) cues
              │                      └── (N) artifacts
              ├── (N) roles
              └── (N) dictionary
-                         utterance_cues (junction: utterance ↔ SRC cues)
+                         utterance_cues (junction: utterance ↔ cues)
 ```
 
-### 2.2 cues 表 — 原子段
+### 3.2 cues 表 — 原子段
 
 ```sql
 CREATE TABLE cues (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
     episode_id   INTEGER NOT NULL REFERENCES episodes(id),
-    type         TEXT NOT NULL DEFAULT 'SRC',    -- 'SRC' 或 'DST'
-    text         TEXT NOT NULL DEFAULT '',        -- 中文原文 (SRC) 或英文 (DST)
-    text_en      TEXT NOT NULL DEFAULT '',        -- SRC cue 上的英文翻译
+    text         TEXT NOT NULL DEFAULT '',        -- 中文原文
+    text_en      TEXT NOT NULL DEFAULT '',        -- 英文翻译
     start_ms     INTEGER NOT NULL,
     end_ms       INTEGER NOT NULL,
     speaker      TEXT NOT NULL DEFAULT '',        -- 实际存 roles.id 的整数字符串
@@ -102,9 +200,9 @@ CREATE TABLE cues (
 );
 ```
 
-**类型约定：**
-- `type='SRC'`: 来自 ASR，用户可编辑。text=中文，text_en=翻译。
-- `type='DST'`: 由 translate phase 从 SRC.text_en 生成，用于 SRT 字幕。
+**字段约定：**
+- `text`: 中文原文，来自 ASR，用户可编辑。
+- `text_en`: 英文翻译，由 translate phase 回填到 cue 上。burn phase 直接读 cues.text_en 生成 en.srt。
 - `speaker`: SQLite 列类型为 TEXT，但存储 roles.id 的整数字符串 (如 "10001")。应用层通过 `_cast_speaker()` 读取时转为 int。
 - `cv`: content version，text/speaker/start_ms/end_ms/emotion/kind/gender 变化时 cv++。
 
@@ -114,7 +212,7 @@ CREATE TABLE cues (
 text_en 编辑 → 不 bump cv (翻译审阅编辑)，但更新 voice_hash
 ```
 
-### 2.3 utterances 表 — 分组壳 + TTS 缓存
+### 3.3 utterances 表 — 分组壳 + TTS 缓存
 
 ```sql
 CREATE TABLE utterances (
@@ -145,7 +243,7 @@ CREATE TABLE utterances (
 - `tts_policy`: JSON 字符串 `{"max_rate": 1.3, "allow_extend_ms": 500}`。由 translate phase 根据 utterance 间隙计算。
 - `start_ms`, `end_ms`: **不存储在表中**，由 `get_utterances()` 从 junction 关联的 cues 实时计算。
 
-### 2.4 utterance_cues 表 — 关联表
+### 3.4 utterance_cues 表 — 关联表
 
 ```sql
 CREATE TABLE utterance_cues (
@@ -157,7 +255,7 @@ CREATE TABLE utterance_cues (
 
 由 `calculate_utterances()` 管理。utterance 本身不存 start_ms/end_ms，从关联的 cues 实时计算。
 
-### 2.5 roles 表 — 角色声线映射
+### 3.5 roles 表 — 角色声线映射
 
 ```sql
 CREATE TABLE roles (
@@ -165,6 +263,7 @@ CREATE TABLE roles (
     drama_id    INTEGER NOT NULL REFERENCES dramas(id),
     name        TEXT NOT NULL,         -- 角色名 (如 "平安")
     voice_type  TEXT NOT NULL DEFAULT '', -- 音色 ID (如 "zh_male_jieshuonansheng_mars_bigtts")
+    role_type   TEXT NOT NULL DEFAULT 'extra', -- 'lead' / 'supporting' / 'extra' / 'narrator'
     UNIQUE(drama_id, name)
 );
 ```
@@ -180,7 +279,7 @@ ASR 输出 speaker="0","1" → parse phase: ensure_role(drama_id, "0") → role.
 → volcengine.py: speakers.get(speaker) → 匹配
 ```
 
-### 2.6 其他表
+### 3.6 其他表
 
 | 表 | 用途 |
 |---|------|
@@ -193,26 +292,57 @@ ASR 输出 speaker="0","1" → parse phase: ensure_role(drama_id, "0") → role.
 
 ---
 
-## 3. 各 Phase 执行逻辑
+## 4. 各阶段实现
 
-### 3.1 parse — ASR 后处理
+### 4.1 Extract（音频提取 + 人声分离）
 
-```
-ASR raw response (JSON) → parse_utterances() → SubtitleModel
-→ 转 AsrModel segments → reseg (LLM 断句优化) → emotion_correct (LLM 情绪修正)
-→ 为每个 speaker 调 ensure_role() 创建角色 (speaker name → role.id)
-→ 写入 SRC cues 到 DB (speaker 存 role.id 字符串)
-```
+| | |
+|---|---|
+| **输入** | 原视频 mp4 |
+| **输出** | `extract.audio` (WAV 16k mono), `extract.vocals` (人声), `extract.accompaniment` (伴奏) |
+| **实现** | FFmpeg（提取）+ Demucs htdemucs v4（分离） |
 
-- 清空旧 cues + utterances 后全量写入
-- speaker_to_role_id 映射: `{ASR speaker name → role.id}`
+Demucs 是 pipeline 中最慢的环节（2 分钟音频需 3-10 分钟 CPU），但显著提升 ASR 准确率和混音质量。
 
-### 3.2 calculate_utterances — Greedy Merge
+### 4.2 ASR（语音识别 + 说话人分离）
+
+| | |
+|---|---|
+| **输入** | `extract.audio`（可配置为 `extract.vocals`） |
+| **输出** | `asr.asr_result` -> JSON (原始 ASR 响应) |
+| **服务** | 豆包大模型 ASR (ByteDance) |
+| **预设** | `asr_spk_semantic`（语义分句 + Speaker Diarization） |
+
+**流程**：
+1. 音频上传至 TOS（火山引擎对象存储），基于内容哈希去重
+2. 调用豆包 ASR API（submit -> poll query）
+3. 返回 word 级时间戳 + speaker 标签 + emotion/gender
+4. ASR 热词从 DB dictionary 表 (type='name') 自动加载
+
+### 4.3 Parse（ASR 后处理 → DB cues）
+
+| | |
+|---|---|
+| **输入** | `asr.asr_result` |
+| **输出** | DB cues 表 (写入 cues) |
+| **核心逻辑** | ASR 结果 → Utterance Normalization → reseg (LLM 断句) → emotion_correct (LLM 情绪修正) → 写 DB |
+
+**流程**：
+1. ASR raw JSON → parse_utterances() → segments
+2. Utterance Normalization：基于静音间隔拆分、speaker 变化硬边界、最大时长约束
+3. Reseg (LLM)：对超长段使用 LLM 语义断句
+4. Emotion Correct (LLM)：根据台词语义修正情绪标注
+5. 为每个 speaker 调 `ensure_role()` 创建角色 (speaker name → role.id)
+6. 清空旧 cues + utterances，全量写入新 cues
+
+Parse 完成后进入 `source_review` 门控，等待人工在 IDE 中校准。
+
+### 4.4 calculate_utterances — Greedy Merge
 
 由 `store.calculate_utterances()` 执行（在 translate phase 和 diff_and_save 中调用）。
 
 ```
-SRC cues (按 start_ms 排序) → 贪心合并:
+cues (按 start_ms 排序) → 贪心合并:
   同 speaker + 同 emotion + gap ≤ 500ms + 总时长 ≤ 10000ms → 合入同组
   否则 → 新组
 
@@ -224,40 +354,58 @@ SRC cues (按 start_ms 排序) → 贪心合并:
 
 关键设计：**用 cue_id 集合匹配**，不用 source_hash。这保证了 TTS 缓存的精确复用。
 
-### 3.3 translate — 增量翻译
+### 4.5 Translate（增量翻译）
 
-```
-1. calculate_utterances() 合并 SRC cues → utterances + junction
-2. get_dirty_utterances_for_translate() 找脏行:
-   - source_hash 为 NULL (从未翻译)
-   - source_hash 不匹配 (cues 内容变了)
-   - 任何 sub-cue 的 text_en 为空
+| | |
+|---|---|
+| **输入** | DB cues (text), `extract.audio` (for duration probe) |
+| **输出** | DB cues.text_en (翻译回填), utterances (分组 + TTS 缓存) |
+| **服务** | Google Gemini 2.0 Flash / OpenAI GPT-4o-mini |
+
+**流程**：
+1. `calculate_utterances()`: 贪心合并 cues → utterances + junction
+2. `get_dirty_utterances_for_translate()`: 找脏行 (source_hash 不匹配或 NULL)
 3. 对每个脏 utterance:
    - 单 cue → 直接翻译
-   - 多 cue → 编号格式 [1] text1\n[2] text2 送 LLM，返回 per-cue 翻译
-   - 写 cue.text_en
+   - 多 cue → 编号格式 `[1] text1\n[2] text2` 送 LLM，返回 per-cue 翻译
+   - 翻译结果回填到 cue.text_en
 4. 计算 tts_policy (根据 utterance 间隙)
 5. 更新 utterance: text_en cache + source_hash + tts_policy
-6. _sync_dst_cues: 从 SRC cue.text_en 创建 DST cues (用于字幕)
-```
 
-**Name Guard 机制：**
+**Name Guard 机制**：
 - 提取中文人名 → 替换为占位符 `<<NAME_1>>` → 翻译 → 还原为英文名
-- 英文名从 dictionary 表 (type='name') 查找
+- 英文名从 DB dictionary 表 (type='name') 查找
 - 缺失的名字通过 LLM 补全
 
-### 3.4 tts — 增量语音合成
+Translate 完成后进入 `translation_review` 门控，等待人工审阅翻译质量。
+
+### 4.6 TTS（增量语音合成 + Drift 检查）
+
+| | |
+|---|---|
+| **输入** | DB utterances, `extract.audio` (for duration probe) |
+| **输出** | `tts.segments_dir` (逐句 WAV 文件), DB utterances 更新 |
+| **服务** | 火山引擎 TTS (VolcEngine seed-tts-1.0) |
+
+**声线映射（DB roles 表）**：
 
 ```
-1. 读所有 utterances，构建 full DubManifest
-2. get_dirty_utterances_for_tts() 找脏行 (voice_hash 不匹配)
-3. 无脏行 → no-op
-4. _check_voice_assignment(): 检查所有 speaker(role_id) 在 roles 表中有 voice_type
-   - 未分配 → 返回错误 "以下角色未分配音色"
-5. 构建 dirty-only DubManifest
-6. tts_run_per_segment(): VolcEngine API 合成
-7. 更新 DB: audio_path, tts_duration_ms, tts_rate, voice_hash
+roles 表: {id: 10001, name: "平安", voice_type: "en_male_hades_moon_bigtts", role_type: "lead"}
 ```
+
+解析链路：
+- `roles_map: {role_id → voice_type}`
+- TTS 前检查所有 speaker(role_id) 是否在 roles 表中有 voice_type
+- 未分配 → 返回错误，提示在 Voice Casting 中完成分配
+
+**合成流程**：
+1. 读所有 utterances，构建 full DubManifest
+2. `get_dirty_utterances_for_tts()`: 找脏行 (voice_hash 不匹配)
+3. 无脏行 → no-op
+4. 并行逐句合成（默认 4 workers）
+5. 静音裁剪 + 语速调整（超 budget 加速到 max_rate 1.3x）
+6. 更新 DB: audio_path, tts_duration_ms, tts_rate, voice_hash
+7. Drift score 检查: tts_duration_ms / physical_ms > 1.1 则警告
 
 **voice_assignment 构建 (str-keyed)：**
 ```python
@@ -268,56 +416,60 @@ str_roles_map = {str(k): v for k, v in roles_map.items()}
 # volcengine.py: speakers.get(speaker) 用 speaker str key 查找，匹配
 ```
 
-### 3.5 align — Drift 检查 + SRT 生成
+### 4.7 Mix（混音）
 
-```
-1. 读 utterances (有 text_en 的)
-2. drift_score = tts_duration_ms / physical_ms → > 1.1 则警告
-   - drift 警告中显示角色名: role_names.get(int(speaker_id), str(speaker_id))
-3. 读 DST cues → 生成 en.srt
-```
+| | |
+|---|---|
+| **输入** | `extract.audio`, `tts.segments_dir`, DB utterances + cues |
+| **输出** | `mix.audio` |
+| **实现** | FFmpeg adelay + amix |
 
-### 3.6 mix — 混音
+**Timeline-First 架构**：
+- 用 FFmpeg `adelay` 滤镜将每段 TTS 精确放置到时间轴位置
+- 伴奏轨 + TTS 轨混合，TTS 播放时伴奏自动压低（ducking，10:1 压缩比）
+- Singing cues (kind='singing') 保留原始人声时间窗
+- `apad + atrim` 强制输出与原音频等长
+- 校验输出时长 (tolerance ±50ms)
 
-```
-1. 读所有 utterances (无 tts_error 的)
-2. 构建 DubManifest (使用 dub_manifest_from_utterances)
-3. 读 singing cues (kind='singing') → 保留原始人声时间窗
-4. adelay filter 进行 timeline placement (每个 TTS segment 按 start_ms 定位)
-5. 混合: accompaniment + TTS + (可选)原始 vocals (ducking 模式)
-6. apad + atrim 强制精确时长
-7. 校验输出时长 (tolerance ±50ms)
-```
+### 4.8 Burn（生成 SRT + 字幕烧录）
 
-### 3.7 burn — 烧字幕
+| | |
+|---|---|
+| **输入** | `mix.audio`, DB cues (text_en) |
+| **输出** | `burn.video` -> 最终成片 mp4, `output/en.srt` |
+| **实现** | FFmpeg subtitles 滤镜硬烧 |
 
-```
-mix.audio + subs.en_srt → FFmpeg subtitles filter → dubbed video
-```
+**流程**：
+1. 从 DB cues.text_en 生成 en.srt (写到 output/en.srt)
+2. mix.audio + en.srt → FFmpeg subtitles filter → dubbed video
 
 ---
 
-## 4. Dirty 判脏机制
+## 5. Dirty 判脏机制
 
-### 4.1 source_hash — 翻译判脏
+### 5.1 source_hash — 翻译判脏
 
 ```python
 def _compute_source_hash(src_cues: list[dict]) -> str:
-    """子 cue text 合并后的 SHA256[:16]。"""
-    merged = "".join(c.get("text", "") for c in src_cues)
-    return sha256(merged.encode()).hexdigest()[:16]
+    """子 cue 内容指纹 (text + timing + speaker + emotion) 的 SHA256[:16]。"""
+    parts: list[str] = []
+    for c in src_cues:
+        parts.append(c.get("text", ""))
+        parts.append(str(c.get("start_ms", 0)))
+        parts.append(str(c.get("end_ms", 0)))
+        parts.append(str(c.get("speaker", "")))
+        parts.append(c.get("emotion", "neutral"))
+    return sha256("|".join(parts).encode()).hexdigest()[:16]
 ```
 
 **触发翻译的条件 (get_dirty_utterances_for_translate)：**
 1. `source_hash IS NULL` → 从未翻译 (新 utterance)
-2. `source_hash != _compute_source_hash(当前 sub-cues)` → 中文文本变了
+2. `source_hash != _compute_source_hash(当前 sub-cues)` → 内容变了
 3. 任何 sub-cue 的 `text_en` 为空 → 翻译不完整
 
-**source_hash 写入时机：** translate phase 翻译成功后。
+**source_hash 写入时机：** translate phase 翻译成功后。不在 calculate_utterances 中更新，保证新 utterance 的 source_hash=NULL 自动标记为脏。
 
-**source_hash 不在 calculate_utterances 中更新** — 只有 translate phase 才写。这样新 utterance 的 source_hash=NULL，自动标记为脏。
-
-### 4.2 voice_hash — TTS 判脏
+### 5.2 voice_hash — TTS 判脏
 
 ```python
 def _compute_voice_hash(text_en: str, speaker: str = "", emotion: str = "") -> str:
@@ -332,13 +484,7 @@ def _compute_voice_hash(text_en: str, speaker: str = "", emotion: str = "") -> s
 
 **voice_hash 写入时机：** TTS phase 合成成功后。
 
-**voice_hash 中的 speaker 值：**
-- 之前: 角色名字符串 (如 "平安")
-- 现在: role.id 字符串 (如 "10001")
-- 迁移后一次性 hash 变化 → 全量 TTS 重跑（预期行为，之后稳定）
-- id 和 name 都唯一标识同一角色，hash 稳定性等价
-
-### 4.3 cv (content version) — 前端编辑判脏
+### 5.3 cv (content version) — 前端编辑判脏
 
 ```python
 _CV_FIELDS = ("text", "speaker", "start_ms", "end_ms", "emotion", "kind", "gender")
@@ -348,7 +494,7 @@ _CV_FIELDS = ("text", "speaker", "start_ms", "end_ms", "emotion", "kind", "gende
 
 cv 变化 → `calculate_utterances()` 可能生成新 utterance → source_hash=NULL → 触发翻译。
 
-### 4.4 sync_utterance_text_cache
+### 5.4 sync_utterance_text_cache
 
 用户在前端编辑 cue.text_en → `diff_and_save()` → `sync_utterance_text_cache()`:
 - 重算 utterance 的 text_cn/text_en 缓存
@@ -356,9 +502,9 @@ cv 变化 → `calculate_utterances()` 可能生成新 utterance → source_hash
 
 ---
 
-## 5. 前端显示规则
+## 6. 前端显示规则
 
-### 5.1 数据类型
+### 6.1 数据类型
 
 ```typescript
 interface Cue {
@@ -370,10 +516,11 @@ interface Role {
   id: number
   name: string
   voice_type: string
+  role_type: string    // 'lead' | 'supporting' | 'extra' | 'narrator'
 }
 ```
 
-### 5.2 Speaker 显示
+### 6.2 Speaker 显示
 
 - **SpeakerBadge**: `roles.find(r => r.id === cue.speaker)?.name ?? String(cue.speaker)`
 - **颜色**: `deriveSpeakers(cues)` 返回 `number[]` (去重, 保持出现顺序)，speaker 在数组中的 index 决定颜色
@@ -381,54 +528,106 @@ interface Role {
 - **切换角色**: 下拉列表展示 `role.name`，选中后 `updateCue(id, { speaker: role.id })`
 - **新建角色**: 先 `saveRoles()` 获取真实 id，再 `updateCue(id, { speaker: newId })`
 
-### 5.3 Roles API
+### 6.3 Roles API
 
 ```
-GET  /episodes/{drama}/roles  → {"roles": [{id, name, voice_type}, ...]}
-PUT  /episodes/{drama}/roles  → body: {"roles": [{id?, name, voice_type}, ...]}
+GET  /episodes/{drama}/roles  → {"roles": [{id, name, voice_type, role_type}, ...]}
+PUT  /episodes/{drama}/roles  → body: {"roles": [{id?, name, voice_type, role_type?}, ...]}
      有 id → 更新, 无 id → 新建, 缺失 → 删除
 ```
 
-### 5.4 Voice Casting 页面 (VoicePreview)
-
-- `roles: Role[]` state
-- assigned/unassigned 按 `role.voice_type` 是否为空分组
-- 分配音色: `roles.map(r => r.id === selectedRole ? {...r, voice_type: voiceId} : r)`
-- 新建角色: `{id: -Date.now(), name, voice_type: ''}`（负数临时 ID，保存时 DB 分配真实 ID）
-
-### 5.5 快捷键 (useKeyboard)
+### 6.4 快捷键 (useKeyboard)
 
 - 1-9: 快速切换 speaker (`speakerList[idx]`，已是 number)
 - Ctrl+B: 分割 cue
 - Ctrl+M: 合并 cue
 - Ctrl+I: 插入空 cue (默认 speaker: `refCue?.speaker ?? 0`)
 - Delete/Backspace: 删除 cue
-- Alt+Arrow: 微调 cue 边界 ±30ms
-- Shift+Alt+Arrow: 吸附 cue 边界到播放位置
+- Alt+Arrow: 微调 cue 边界 ±50ms
+- Shift+Alt+Arrow: 微调 cue 边界 ±200ms
 
-### 5.6 Undo/Redo
+### 6.5 Undo/Redo
 
 - Command 模式: `{apply, inverse, description}`
 - 所有 cue 操作通过 `useUndoableOps()` hook
 - `changeSpeaker(id, oldSpeaker: number, newSpeaker: number)`
 
-### 5.7 Auto-save
+### 6.6 Auto-save
 
 - cue 修改后 2 秒自动保存 (`scheduleAutoSave`)
 - 保存调用 `diff_and_save()` → cv bump → calculate_utterances → sync_utterance_text_cache
 
 ---
 
-## 6. 技术债
+## 7. 外部服务依赖
 
-### 6.1 SQLite TEXT 列存 int 的类型不一致
+| 服务 | 用途 | 环境变量 |
+|------|------|---------|
+| **豆包 ASR** | 中文语音识别 + 说话人分离 | `DOUBAO_APPID`, `DOUBAO_ACCESS_TOKEN` |
+| **火山引擎 TOS** | 音频文件存储（ASR 需要） | `TOS_ACCESS_KEY_ID`, `TOS_SECRET_ACCESS_KEY` |
+| **火山引擎 TTS** | 英文语音合成 | 同豆包 credentials |
+| **OpenAI** | 翻译（GPT-4o-mini）、重断句、情绪修正 | `OPENAI_API_KEY` |
+| **Gemini** | 翻译（Gemini 2.0 Flash，默认引擎） | `GEMINI_API_KEY` |
+| **Demucs** | 人声分离 | 本地 |
+| **FFmpeg** | 音频/视频处理 | 本地 |
+
+---
+
+## 8. ASR Calibration IDE
+
+IDE 用于在 `source_review` 门控处人工校准 ASR 结果。详细操作手册见 [IDE-GUIDE.md](./IDE-GUIDE.md)。
+
+**核心能力**：
+- 可视化编辑 DB cues（文本、说话人、情绪、时间轴）
+- 段落拆分/合并/插入/删除（支持撤销重做）
+- 视频同步播放 + 字幕叠加
+- 流水线运行/取消（PipelinePanel）
+- 配音视频回放对比
+- Voice Casting（声线分配，DB roles 表）
+
+**启动**：
+```bash
+vsd ide                       # 默认端口 8765，含内嵌 worker 线程
+vsd ide --port 9000 --dev     # 开发模式
+```
+
+---
+
+## 9. 典型工作流
+
+```bash
+# 1. 首次全流程
+vsd run 家里家外 5 --to burn
+#    pipeline 自动在 source_review 门控暂停
+
+# 2. 人工校准（在 IDE 中完成）
+vsd ide
+#    - 选择剧集 → 校准 speaker、文本、时间轴
+#    - Cmd+S 保存 (自动保存到 DB)
+#    - PipelinePanel 点击「继续」通过 source_review 门控
+#    - 流水线自动从 translate 继续
+#    - translation_review 门控暂停，审阅翻译
+#    - 点击「继续」→ 流水线跑完 tts → mix → burn
+
+# 3. 如果只改了翻译相关，从 translate 重跑
+vsd run 家里家外 5 --from translate --to burn
+
+# 4. 批量处理
+vsd run 家里家外 1-79 --to burn
+```
+
+---
+
+## 10. 技术债
+
+### 10.1 SQLite TEXT 列存 int 的类型不一致
 
 - `cues.speaker` 和 `utterances.speaker` 列类型为 TEXT，存储整数字符串
 - 应用层通过 `_cast_speaker()` 转 int，但 SQL 查询时仍为字符串比较
 - 理想方案：ALTER TABLE 改列类型（SQLite 不支持，需 recreate table）
 - 当前方案可工作，`_cast_speaker()` 保证了应用层一致性
 
-### 6.2 store.py 中的遗留方法
+### 10.2 store.py 中的遗留方法
 
 以下方法已被新的 id-keyed 方法替代，但尚未删除：
 - `get_roles_map()` — 被 `get_roles_by_id()` 替代 (TTS 用)
@@ -436,31 +635,41 @@ PUT  /episodes/{drama}/roles  → body: {"roles": [{id?, name, voice_type}, ...]
 - `delete_role()` — 被 `set_roles_by_list()` 的删除逻辑替代
 - `set_roles()` — 被 `set_roles_by_list()` 替代
 
-### 6.3 DubManifest.speaker 类型
+### 10.3 DubManifest.speaker 类型
 
 - `DubUtterance.speaker` 声明为 `str`
 - `dub_manifest_from_utterances()` 中显式 `speaker=str(u.get("speaker", ""))` 转换
 - 因为 DB 读出的 speaker 经 `_cast_speaker()` 已是 int，必须显式 str() 才能匹配 voice_assignment 的 str key
 
-### 6.4 _probe_duration_ms 重复定义
+### 10.4 _probe_duration_ms 重复定义
 
 - `translate.py`, `tts.py`, `mix.py` 各有一份相同的 `_probe_duration_ms()` 函数
 - 应提取为公共 util
 
-### 6.5 utterances.start_ms / end_ms 不存储
+### 10.5 utterances.start_ms / end_ms 不存储
 
 - `get_utterances()` 每次从 junction + cues 实时计算 start_ms/end_ms
 - utterances 表无 start_ms/end_ms 列（新 schema 设计如此）
 - 如果查询频繁可考虑冗余存储，但当前性能可接受
 
-### 6.6 Gate task 与 Phase task 混在 tasks 表
+---
 
-- tasks.type 既可以是 phase name (如 "tts") 也可以是 gate key (如 "source_review")
-- Worker 只 claim phase names，gate tasks 由 Web API `pass_gate_task()` 处理
-- 不是严重问题，但可读性欠佳
+## 附录：JSON → DB 迁移记录
 
-### 6.7 emotion 快捷键与 speaker 数字键冲突
+> 2026-03 从 JSON 文件驱动的 PhaseRunner 升级到 DB-First + Task 队列架构。
 
-- 1-9 切换 speaker，n/a/s/e/i/f 切换 emotion
-- 如果 emotion 快捷键字母刚好是某些常用文字输入，可能误触
-- 已有 `isInput` 检查排除输入框内的触发
+| 旧 (JSON) | 新 (DB 表) | 说明 |
+|-----------|-----------|------|
+| `dub.json` (segments) | `cues` 表 | 原子段，用户可编辑 |
+| `dub.json` (segments merged) | `utterances` + `utterance_cues` | 分组壳 + TTS 缓存 |
+| `roles.json` | `roles` 表 | 角色声线映射 |
+| `manifest.json` (phases) | `tasks` 表 | 任务队列 |
+| `manifest.json` (artifacts) | `artifacts` 表 | 文件注册表 |
+| `names.json` / `slang.json` | `dictionary` 表 | 术语表 |
+| — | `events` 表 | 审计日志（新增） |
+
+**移除的 Phase**：
+| Phase | 原因 | 替代 |
+|-------|------|------|
+| reseg | 合并到 parse | parse 内部调用 reseg processor |
+| align | 职责拆分 | drift check → tts, SRT 生成 → burn |

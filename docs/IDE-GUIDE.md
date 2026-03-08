@@ -2,18 +2,18 @@
 
 ## 1. 概述
 
-ASR Calibration IDE 是 Dubora 配音流水线的字幕校准工具。ASR 自动识别完成后，通过 IDE 可视化校准说话人、文本和时间轴，校准完成后保存并运行下游流水线，接入翻译和配音流程。
+ASR Calibration IDE 是 Dubora 配音流水线的字幕校准工具。ASR 自动识别完成后，通过 IDE 可视化校准说话人、文本和时间轴，校准完成后保存（自动写入 DB）并运行下游流水线，接入翻译和配音流程。
 
 **适用角色**：字幕校准员、运维人员
 
 **所处位置**：
 
 ```
-Stage:  提取      识别                    [校准]  翻译          [审阅]  配音        合成
-Phase:  extract   asr → parse → reseg            mt → align            tts → mix   burn
-Gate:                                     ↑                      ↑
-                                  source_review          translation_review
-                                     你在这里
+Stage:  提取      识别              翻译              配音        合成
+Phase:  extract → asr → parse  →  translate  →  tts → mix  →  burn
+Gate:                        ↑              ↑
+                      source_review   translation_review
+                         你在这里
 ```
 
 ---
@@ -97,7 +97,7 @@ vsd ide --dev
 ### 4.1 选择剧集
 
 1. 点击顶部下拉框，选择剧名和集数
-2. 系统自动加载校准数据（首次自动从 `asr-result.json` 导入生成 `dub.json`）
+2. 系统自动从 DB 加载 cues 数据
 3. 视频和段落列表同时加载
 
 ### 4.2 播放与定位
@@ -126,7 +126,7 @@ vsd ide --dev
 2. 顶部搜索框可按前缀筛选角色
 3. 上下箭头导航，Enter 选择
 4. 如果输入的文本不匹配任何现有角色，底部出现 **"+ Create ..."** 选项
-5. 选择「创建」会立即将新角色添加到 `roles.json` 并分配给该段落
+5. 选择「创建」会立即将新角色添加到 DB roles 表并分配给该段落
 
 **快捷方式**：选中段落后按 **数字键 1-9** 快速切换（对应说话人列表顺序）。
 
@@ -211,18 +211,18 @@ vsd ide --dev
 
 ### 4.12 保存
 
-- 按 **Cmd/Ctrl+S** 或点击顶部 Save 按钮
-- 保存后版本号 +1，指纹自动更新，服务端自动检测重叠
-- 文件保存到 `state/dub.json`
+- 按 **Cmd/Ctrl+S** 或点击顶部 Save 按钮（修改后 2 秒也会自动保存）
+- 保存时调用 `diff_and_save()` 写入 DB，cv 自动递增，服务端自动检测重叠
+- 数据保存到 SQLite DB (cues 表)
 
 ### 4.13 导出
 
-通过 API 调用 `POST /api/episodes/{drama}/{ep}/export`，生成两个文件：
+通过 API 调用 `POST /api/episodes/{drama}/{ep}/export`，生成字幕文件：
 
 | 文件 | 路径 | 用途 |
 |------|------|------|
-| `subtitle.model.json` | `state/` | 下游 MT/Align 阶段的输入（SSOT） |
-| `zh.srt` | `output/` | 中文字幕文件 |
+| `zh.srt` | `output/` | 中文字幕文件（从 DB cues.text 导出） |
+| `en.srt` | `output/` | 英文字幕文件（从 DB cues.text_en 导出） |
 
 ---
 
@@ -232,13 +232,13 @@ vsd ide --dev
 
 ### 5.1 阶段状态
 
-将 9 个 Phase 聚合为 5 个可视化阶段：
+将 7 个 Phase 聚合为 5 个可视化阶段：
 
 | 阶段 | 名称 | 包含 Phase |
 |------|------|-----------|
 | extract | 提取 | extract |
-| recognize | 识别 | asr, parse, reseg |
-| translate | 翻译 | mt, align |
+| recognize | 识别 | asr, parse |
+| translate | 翻译 | translate |
 | dub | 配音 | tts, mix |
 | compose | 合成 | burn |
 
@@ -355,38 +355,38 @@ vsd ide --dev
 ### 9.1 新集校准
 
 ```bash
-# 1. 先跑 ASR
-vsd run videos/drama/1.mp4 --to asr
+# 1. 先跑到 parse（含 ASR + 后处理）
+vsd run 剧名 集号 --to parse
 
 # 2. 启动 IDE
-vsd ide --videos ./videos
+vsd ide
 
 # 3. 浏览器打开 http://localhost:8765
-#    选择剧集 → 自动加载 ASR 结果
+#    选择剧集 → 自动从 DB 加载 cues
 
 # 4. 校准工作：
 #    - 逐段检查文本，双击修正错别字
 #    - 点击说话人徽章修正角色，或用 1-9 快速切换
 #    - 点击情绪徽章修正情绪
 #    - 拆分/合并错误分段
-#    - Cmd/Ctrl+S 保存
+#    - Cmd/Ctrl+S 保存（或等待自动保存）
 
 # 5. 直接在面板运行下游
-#    PipelinePanel → 点击「继续」→ 自动从 mt 跑到 burn
+#    PipelinePanel → 点击「继续」→ 自动从 translate 跑到 burn
 ```
 
 ### 9.2 批量校准
 
 ```bash
-# 1. 批量跑 ASR
-vsd run videos/drama/1-20.mp4 --to asr
+# 1. 批量跑到 parse
+vsd run 剧名 1-20 --to parse
 
 # 2. 启动 IDE，逐集校准
-vsd ide --videos ./videos
+vsd ide
 
 # 3. 每集校准完保存后，可在 PipelinePanel 直接运行下游
 #    或命令行批量跑：
-vsd run videos/drama/1-20.mp4 --from mt --to burn
+vsd run 剧名 1-20 --from translate --to burn
 ```
 
 ### 9.3 返工修正
@@ -396,13 +396,13 @@ vsd run videos/drama/1-20.mp4 --from mt --to burn
 1. 回到 IDE 修改
 2. Cmd/Ctrl+S 保存
 3. PipelinePanel 右键对应阶段 → 从该阶段重跑
-4. 或命令行：`vsd run --from mt --to burn`
+4. 或命令行：`vsd run 剧名 集号 --from translate --to burn`
 
 ---
 
 ## 10. Voice Casting（声线分配）
 
-Voice Casting 是独立于 ASR 校准的全屏视图，用于管理 `roles.json`——将角色绑定到 TTS 音色。
+Voice Casting 是独立于 ASR 校准的全屏视图，用于管理 DB roles 表——将角色绑定到 TTS 音色。
 
 ### 10.1 进入 / 退出
 
@@ -437,7 +437,7 @@ Voice Casting 是独立于 ASR 校准的全屏视图，用于管理 `roles.json`
 |------|------|
 | Header | 独立 header，含剧名下拉框（只选剧、不选集）、Save 按钮 |
 | 播放条 | 全局音频播放器，试听 / 合成结果共用 |
-| 左栏 | 角色列表（`roles` + `default_roles`），蓝色高亮选中角色 |
+| 左栏 | 角色列表（来自 DB roles 表），蓝色高亮选中角色 |
 | 右栏 | 音色目录，支持 Category / Gender 筛选 |
 
 ### 10.3 操作流程
@@ -448,7 +448,7 @@ Voice Casting 是独立于 ASR 校准的全屏视图，用于管理 `roles.json`
 2. 左栏点击角色（如 "PingAn"），进入分配模式
 3. 右栏浏览音色，点击 ▶ 试听官方 trial
 4. 点击目标音色卡片 → 该音色自动分配给当前角色（蓝色圆点标记）
-5. 点击 **Save** 写回 `roles.json`
+5. 点击 **Save** 写回 DB roles 表
 
 **自动滚动**：如果被选中的角色已有绑定音色，右栏会自动滚动到该音色卡片并居中显示。
 
@@ -463,26 +463,28 @@ Voice Casting 是独立于 ASR 校准的全屏视图，用于管理 `roles.json`
 
 ### 10.4 注意事项
 
-- `roles.json` 是**剧级别**配置，所有集共享同一份声线映射
+- roles 是**剧级别**配置（DB roles 表），所有集共享同一份声线映射
 - Voice Casting 不涉及剧集选择，只需选择剧名
 - 合成试听会调用 VolcEngine TTS API，需要配置 `DOUBAO_APPID` / `DOUBAO_ACCESS_TOKEN`
 - 合成结果缓存在 `.cache/voice-preview/`，相同 voice + text + emotion 不会重复调用 API
 
 ---
 
-## 11. 文件说明
+## 11. 数据存储说明
 
-| 文件 | 位置 | 说明 |
-|------|------|------|
+| 数据 | 存储位置 | 说明 |
+|------|---------|------|
+| cues (原子段) | DB cues 表 | IDE 编辑的主要对象，含 text/text_en/speaker/emotion/timing |
+| utterances (分组) | DB utterances 表 | 由 `calculate_utterances()` 自动管理，TTS 缓存 |
+| roles (角色声线) | DB roles 表 | Voice Casting 页面编辑，剧级共享 |
+| dictionary (术语) | DB dictionary 表 | 人名/术语词典 |
 | `asr-result.json` | `input/` | ASR 原始输出（只读，不要手动修改） |
-| `dub.json` | `state/` | IDE 工作文件（保存/加载用），含 segments、rev、fingerprint |
-| `subtitle.model.json` | `state/` | 导出产物，下游 MT/Align 阶段的输入（SSOT） |
-| `zh.srt` | `output/` | 导出产物，中文字幕文件 |
-| `roles.json` | `dub/dict/` | 声线映射，Voice Casting 页面编辑 |
+| TTS 音频 | `derived/tts/segments/` | 逐句合成的 WAV 文件 |
+| `en.srt` | `output/` | burn 阶段从 DB cues.text_en 生成 |
 
 **注意**：
-- `dub.json` 是 IDE 的工作文件，每次保存自动递增版本号（rev）和指纹（fingerprint）
-- 首次打开一集时，自动从 `asr-result.json` 导入生成 `dub.json`
+- DB (`data/dubora.db`) 是所有元数据的 SSOT
+- 编辑 cue 后自动保存到 DB，cv (content version) 自动递增
 - 原始 `asr-result.json` 永远不会被修改
 
 ---
@@ -502,11 +504,11 @@ videos/
           asr-result.json
 ```
 
-### Q: 选择剧集后报 "asr-result.json not found"？
+### Q: 选择剧集后没有数据？
 
-该集尚未运行 ASR 阶段，先执行：
+该集尚未运行 ASR + parse 阶段，先执行：
 ```bash
-vsd run videos/剧名/集号.mp4 --to asr
+vsd run 剧名 集号 --to parse
 ```
 
 ### Q: 视频播放不了？
@@ -519,18 +521,17 @@ vsd run videos/剧名/集号.mp4 --to asr
 
 查看底部状态栏：
 - "Unsaved changes"（黄色）= 有未保存的修改
-- "Saved"（绿色）= 已保存
-- Rev 数字会 +1，fp 指纹会更新
+- "Saved"（绿色）= 已保存到 DB
 
 ### Q: 如何运行下游流水线？
 
 两种方式：
 1. **IDE 内**：PipelinePanel 点击运行按钮（自动保存后运行）
-2. **命令行**：`vsd run videos/剧名/集号.mp4 --from mt --to burn`
+2. **命令行**：`vsd run 剧名 集号 --from translate --to burn`
 
 ### Q: 如何回退到 ASR 原始结果？
 
-删除 `state/dub.json`，重新在 IDE 中打开该集，会自动从 `asr-result.json` 重新导入。
+在 PipelinePanel 中右键 "识别" 阶段，选择从 parse 重跑。parse 会清空旧 cues 并从 `asr-result.json` 重新导入。
 
 ---
 
@@ -556,7 +557,7 @@ IDE 启动后日志输出在终端，包含请求日志和错误信息。
 
 ### 13.4 数据安全
 
-- 所有修改通过原子写入（先写临时文件再重命名），断电不会损坏文件
-- 每次保存自动递增版本号（rev），可追溯修改历史
+- SQLite 使用 WAL 模式，支持并发读取
+- 所有 cue 修改通过 `diff_and_save()` 原子写入 DB
 - 原始 `asr-result.json` 永远不会被修改
 - 流水线运行限制单集单实例并发（同一集不会重复启动）
