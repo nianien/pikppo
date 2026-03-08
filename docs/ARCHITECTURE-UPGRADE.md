@@ -562,7 +562,7 @@ def run_one(video_path, args, config):
     manifest = Manifest(workdir / "manifest.json")
 
     # 存储 + 事件系统
-    store = PipelineStore(workdir.parent / "pipeline.db")
+    store = PipelineStore(workdir.parent / "dubora.db")
     emitter = EventEmitter(store=store)
     emitter.on(LogListener())
 

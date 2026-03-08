@@ -1,19 +1,16 @@
 """
-Parse Phase: 字幕后处理（从 ASR raw-response 生成 dub.json）
+Parse Phase: 字幕后处理（从 ASR raw-response 生成 DB cues）
 
 职责：
 - 读取 ASR raw response（asr.asr_result，SSOT）
 - 解析为 Utterance[]（使用 models/doubao/parser.py）
 - 应用后处理策略（切句、speaker 处理等）
-- 生成 dub.json（AsrModel 格式，pipeline 唯一 SSOT）
+- 执行 reseg + emotion_correct
+- 写入 DB SRC cues（唯一输出）
 
 不负责：
 - ASR 识别（由 ASR Phase 负责）
 - 翻译（由 MT Phase 负责）
-
-架构原则：
-- 直接从 raw-response 生成（SSOT，包含完整语义信息）
-- raw-response 是事实源，dub.json 从事实源生成
 """
 import json
 from datetime import datetime, timezone
@@ -39,8 +36,8 @@ class ParsePhase(Phase):
         return ["asr.asr_result"]
 
     def provides(self) -> list[str]:
-        """生成 dub.dub_manifest (SSOT dub.json)。"""
-        return ["dub.dub_manifest"]
+        """DB cues 是唯一输出，不再声明文件产物。"""
+        return []
 
     def run(
         self,
@@ -55,7 +52,7 @@ class ParsePhase(Phase):
         1. 读取 ASR raw response（asr.asr_result，SSOT）
         2. 解析为 Utterance[]（使用 models/doubao/parser.py）
         3. 应用后处理策略生成 SubtitleModel
-        4. 转换为 AsrModel 格式写入 dub.json
+        4. 转换为 AsrModel 格式，经 reseg + emotion 修正后写入 DB cues
         """
         # 获取输入（raw response，SSOT）
         asr_raw_response_artifact = inputs["asr.asr_result"]
@@ -100,8 +97,6 @@ class ParsePhase(Phase):
         info(f"Parsed {len(utterances)} utterances from ASR raw response (SSOT)")
 
         # 获取配置
-        workspace_path = Path(ctx.workspace)
-
         phase_config = ctx.config.get("phases", {}).get("parse", {})
         postprofile = phase_config.get("postprofile", ctx.config.get("doubao_postprofile", "axis"))
 
@@ -149,7 +144,7 @@ class ParsePhase(Phase):
             total_cues = sum(len(utt.cues) for utt in subtitle_model.utterances)
             info(f"Generated Subtitle Model ({len(subtitle_model.utterances)} utterances, {total_cues} cues)")
 
-            # 将 SubtitleModel 转换为 AsrModel 格式（dub.json SSOT）
+            # 将 SubtitleModel 转换为 AsrModel 格式（内存中，最终写 DB）
             segments = []
             for utt in subtitle_model.utterances:
                 text = "".join(cue.source.text for cue in utt.cues).rstrip("，。,.")
@@ -171,13 +166,6 @@ class ParsePhase(Phase):
             )
             asr_model.update_fingerprint()
 
-            # 写入 dub.json
-            model_path = outputs.get("dub.dub_manifest")
-            model_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(model_path, "w", encoding="utf-8") as f:
-                json.dump(asr_model.to_dict(), f, indent=2, ensure_ascii=False)
-            info(f"Saved dub.json (SSOT) to: {model_path}")
-
             # ── LLM 初始化（reseg + emotion_correct 共用）──
             reseg_config = ctx.config.get("phases", {}).get("reseg", {})
             reseg_enabled = reseg_config.get("enabled", ctx.config.get("reseg_enabled", True))
@@ -191,7 +179,7 @@ class ParsePhase(Phase):
             reseg_metrics = {}
             if reseg_enabled and segments and translate_fn:
                 reseg_metrics = self._run_reseg(
-                    ctx, asr_model, raw_response, model_path, reseg_config,
+                    ctx, asr_model, raw_response, reseg_config,
                     translate_fn,
                 )
 
@@ -199,13 +187,41 @@ class ParsePhase(Phase):
             emotion_metrics = {}
             if emotion_correct_enabled and asr_model.segments and translate_fn:
                 emotion_metrics = self._run_emotion_correct(
-                    ctx, asr_model, model_path, translate_fn,
+                    ctx, asr_model, translate_fn,
                 )
+
+            # ── 写入 SRC cues 到 DB（reseg + emotion 修正后的最终结果）──
+            if ctx.store and ctx.episode_id:
+                ctx.store.delete_episode_cues(ctx.episode_id)
+                ctx.store.delete_episode_utterances(ctx.episode_id)
+
+                # Auto-create roles for each speaker, map speaker name → role_id
+                ep = ctx.store.get_episode(ctx.episode_id)
+                drama_id = ep["drama_id"] if ep else 0
+                speaker_to_role_id: dict[str, int] = {}
+                for seg in asr_model.segments:
+                    if seg.speaker and seg.speaker not in speaker_to_role_id:
+                        speaker_to_role_id[seg.speaker] = ctx.store.ensure_role(drama_id, seg.speaker)
+
+                cue_rows = []
+                for seg in asr_model.segments:
+                    cue_rows.append({
+                        "start_ms": seg.start_ms,
+                        "end_ms": seg.end_ms,
+                        "text": seg.text,
+                        "speaker": str(speaker_to_role_id.get(seg.speaker, 0)),
+                        "emotion": seg.emotion or "neutral",
+                        "kind": seg.type if hasattr(seg, "type") and seg.type else "speech",
+                        "gender": seg.gender,
+                        "cv": 1,
+                    })
+                ctx.store.insert_cues(ctx.episode_id, cue_rows)
+                info(f"Wrote {len(cue_rows)} SRC cues to DB (after reseg + emotion)")
 
             metrics = {
                 "utterances_count": len(subtitle_model.utterances),
                 "cues_count": total_cues,
-                "segments_count": len(segments),
+                "segments_count": len(asr_model.segments),
             }
             if reseg_metrics:
                 metrics["reseg"] = reseg_metrics
@@ -214,9 +230,7 @@ class ParsePhase(Phase):
 
             return PhaseResult(
                 status="succeeded",
-                outputs=[
-                    "dub.dub_manifest",
-                ],
+                outputs=[],
                 metrics=metrics,
             )
 
@@ -293,7 +307,6 @@ class ParsePhase(Phase):
         ctx: RunContext,
         asr_model,
         raw_response: dict,
-        model_path: Path,
         reseg_config: dict,
         translate_fn,
     ) -> dict:
@@ -333,25 +346,21 @@ class ParsePhase(Phase):
         }
 
         if result.split_count == 0:
-            info("Reseg: no segments were split, dub.json unchanged")
+            info("Reseg: no segments were split")
             return metrics
 
-        # 替换 segments，更新 dub.json
+        # 替换 segments（内存中，最终由 run() 统一写 DB）
         asr_model.segments = result.new_segments
         asr_model.bump_rev()
         asr_model.update_fingerprint()
 
-        with open(model_path, "w", encoding="utf-8") as f:
-            json.dump(asr_model.to_dict(), f, indent=2, ensure_ascii=False)
-
-        info(f"Reseg: saved updated dub.json to: {model_path}")
+        info(f"Reseg: {result.split_count} segments split, {result.new_segments_count} new segments")
         return metrics
 
     def _run_emotion_correct(
         self,
         ctx: RunContext,
         asr_model,
-        model_path: Path,
         translate_fn,
     ) -> dict:
         """执行 LLM 情绪修正。
@@ -380,8 +389,5 @@ class ParsePhase(Phase):
         asr_model.bump_rev()
         asr_model.update_fingerprint()
 
-        with open(model_path, "w", encoding="utf-8") as f:
-            json.dump(asr_model.to_dict(), f, indent=2, ensure_ascii=False)
-
-        info(f"Emotion correct: {result.corrected_count} segments corrected, saved dub.json")
+        info(f"Emotion correct: {result.corrected_count} segments corrected")
         return {"corrected_count": result.corrected_count}

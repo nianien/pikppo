@@ -1,27 +1,25 @@
-/** Toolbar — selected segment info */
+/** Toolbar — selected cue info */
 import { useModelStore } from '../stores/model-store'
 import { useEditorStore } from '../stores/editor-store'
 
 export function ToolBar() {
-  const model = useModelStore(s => s.model)
-  const { selectedSegmentId } = useEditorStore()
+  const cues = useModelStore(s => s.cues)
+  const loaded = useModelStore(s => s.loaded)
+  const selectedCueId = useEditorStore(s => s.selectedCueId)
 
-  if (!model) return null
+  if (!loaded) return null
 
-  const selectedSeg = (model.segments ?? []).find(s => s.id === selectedSegmentId)
+  const selectedCue = cues.find(c => c.id === selectedCueId)
 
   return (
     <div className="flex items-center gap-4 px-3 py-2 text-xs overflow-x-auto">
-      {selectedSeg ? (
-        <>
-          <span className="text-gray-500 shrink-0">
-            {(selectedSeg.start_ms / 1000).toFixed(1)}s - {(selectedSeg.end_ms / 1000).toFixed(1)}s
-            ({((selectedSeg.end_ms - selectedSeg.start_ms) / 1000).toFixed(1)}s)
-          </span>
-          {selectedSeg.flags.overlap && <span className="text-red-400 shrink-0">Overlap</span>}
-        </>
+      {selectedCue ? (
+        <span className="text-gray-500 shrink-0">
+          {(selectedCue.start_ms / 1000).toFixed(1)}s - {(selectedCue.end_ms / 1000).toFixed(1)}s
+          ({((selectedCue.end_ms - selectedCue.start_ms) / 1000).toFixed(1)}s)
+        </span>
       ) : (
-        <span className="text-gray-500">No segment selected</span>
+        <span className="text-gray-500">No cue selected</span>
       )}
     </div>
   )

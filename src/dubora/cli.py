@@ -24,7 +24,7 @@ from dubora.pipeline.core.store import PipelineStore
 from dubora.pipeline.core.worker import PipelineWorker, submit_pipeline
 from dubora.utils.logger import info, warning, error, success
 
-DEFAULT_DB = "videos/pipeline.db"
+DEFAULT_DB = "data/dubora.db"
 
 
 def expand_episode_range(ep_arg: str) -> List[str]:
@@ -337,7 +337,7 @@ def _cmd_ide(args):
 
     # Start worker thread unless --no-worker
     if not args.no_worker:
-        db_path = Path(videos_dir) / "pipeline.db"
+        db_path = Path(DEFAULT_DB)
         if db_path.exists():
             store = PipelineStore(db_path)
             config = PipelineConfig()

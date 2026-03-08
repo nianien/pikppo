@@ -89,7 +89,11 @@ def submit_pipeline(
     # Idempotency: skip if already has pending/running tasks
     latest = store.get_latest_task(episode_id)
     if latest and latest["status"] in ("pending", "running"):
-        return
+        if force:
+            # Explicit rerun: cancel pending tasks (e.g. gate tasks) to allow backtracking
+            store.delete_pending_tasks(episode_id)
+        else:
+            return
 
     if from_phase is not None:
         first = active[0]
@@ -312,6 +316,8 @@ class PipelineWorker:
             job_id=str(episode_id),
             workspace=str(workdir),
             config=config_dict,
+            store=self.store,
+            episode_id=episode_id,
         )
 
         # Per-task emitter + reactor

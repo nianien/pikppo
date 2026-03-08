@@ -1,14 +1,9 @@
 """
-ASR Model: 人工校准 IDE 的工作文件 SSOT v2
+ASR Model: segments 数据结构定义
 
-设计理念：
-- 替代 asr.fix.json，成为人工校准的完整工作文件
 - 支持 split/merge/时间轴微调等 IDE 操作
-- 导出时转为 subtitle.model.json（v1.3），无缝接入下游 pipeline
 - 时间单位统一用 int 毫秒（与全代码库 start_ms/end_ms 一致）
-
-数据流：
-  asr-result.json → import → dub.json → human calibration → export → subtitle.model.json
+- DB cues 是运行时 SSOT，此模块定义内存中的数据结构
 """
 import hashlib
 import secrets

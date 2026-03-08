@@ -1,13 +1,11 @@
 """
-Machine Translation (MT) module for video remix pipeline.
+Machine Translation (MT) processors.
 
-公共 API：
-- run(): 唯一对外入口（翻译整集 segments）
-
-内部模块（不直接导入）：
-- impl.py: 内部实现
-- openai_translate.py: 向后兼容接口（不导出）
+Active modules:
+- utterance_translate.py: Utterance-level translation (used by translate phase)
+- time_aware_impl.py: LLM translate function factory (used by parse + translate)
+- time_aware_translate.py: Time-aware translation core
+- name_guard.py: Name protection during translation
+- name_map_complete.py: LLM-based name completion
+- dict_loader.py: Dictionary loading
 """
-from .processor import run
-
-__all__ = ["run"]

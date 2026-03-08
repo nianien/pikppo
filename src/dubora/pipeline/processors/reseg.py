@@ -205,7 +205,7 @@ def run(
     """执行断句处理。
 
     Args:
-        segments: 当前 dub.json 中的 segments
+        segments: AsrSegment 列表
         asr_result: 原始 ASR 响应（含 word timestamps）
         min_chars: 拆分后每段最少中文字数（防止碎片）
         max_chars_trigger: 触发拆分的字数阈值

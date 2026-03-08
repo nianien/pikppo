@@ -1,56 +1,52 @@
-/** ASR Model TypeScript types — mirrors Python schema/asr_model.py */
-
-export interface AsrSegmentFlags {
-  overlap: boolean
-  needs_review: boolean
-}
+/** ASR Model TypeScript types — DB-backed Cue is the single source of truth */
 
 export interface TTSPolicy {
   max_rate: number
   allow_extend_ms: number
 }
 
-export interface AsrSegment {
-  id: string
+/** Cue: DB-backed atomic unit, independent of utterances */
+export interface Cue {
+  id: number
+  episode_id: number
+  text: string
+  text_en?: string      // MT fills this on SRC cues
   start_ms: number
   end_ms: number
-  text: string
-  text_en: string
-  speaker: string
+  speaker: number       // roles.id FK
   emotion: string
-  type: 'speech' | 'singing'
   gender?: string | null
+  kind: 'speech' | 'singing'
+  cv: number
+}
+
+/** Utterance: self-contained group computed from SRC cues + TTS cache */
+export interface Utterance {
+  id: number
+  episode_id: number
+  text_cn: string
+  text_en: string
+  start_ms: number
+  end_ms: number
+  speaker: number       // roles.id FK
+  emotion: string
+  gender?: string | null
+  kind: string
+  source_hash?: string | null
+  voice_hash?: string | null
   tts_policy?: TTSPolicy | null
-  flags: AsrSegmentFlags
+  audio_path?: string | null
+  tts_duration_ms?: number | null
+  tts_rate?: number | null
+  tts_error?: string | null
 }
 
-export interface AsrMediaInfo {
-  duration_ms: number
-}
-
-export interface AsrHistory {
-  rev: number
-  created_at: string
-  updated_at: string
-}
-
-export interface AsrFingerprint {
-  algo: string
-  value: string
-  scope: string
-}
-
-export interface AsrModel {
-  schema: string
-  media: AsrMediaInfo
-  segments: AsrSegment[]
-  history: AsrHistory
-  fingerprint: AsrFingerprint
-}
-
-export interface Roles {
-  roles: Record<string, string>          // role_id → voice_type
-  default_roles: Record<string, string>  // gender → role_id
+/** Role: per-drama voice assignment entity */
+export interface Role {
+  id: number
+  name: string
+  voice_type: string
+  role_type: string   // 'lead' | 'supporting' | 'extra' | 'narrator'
 }
 
 export type EpisodeStatus = 'ready' | 'running' | 'succeeded' | 'failed' | 'review'
@@ -65,14 +61,6 @@ export interface Episode {
   video_file: string
   has_asr_result: boolean
   has_asr_model: boolean
-  has_subtitle_model: boolean
   dubbed_video: string
   subtitle_file: string
-}
-
-export interface ExportResult {
-  status: string
-  exported: string[]
-  segments: number
-  utterances: number
 }

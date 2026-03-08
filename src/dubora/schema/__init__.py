@@ -45,7 +45,7 @@ from .asr_model import (
 )
 
 __all__ = [
-    # ASR Model（IDE 工作文件 SSOT）
+    # ASR Model
     "AsrModel",
     "AsrSegment",
     "AsrSegmentFlags",

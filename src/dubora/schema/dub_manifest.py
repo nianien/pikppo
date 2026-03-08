@@ -115,88 +115,42 @@ class DubManifest:
                 )
 
 
-def dub_manifest_to_dict(manifest: DubManifest) -> dict:
-    """Serialize DubManifest to dict for JSON output."""
-    return {
-        "audio_duration_ms": manifest.audio_duration_ms,
-        "utterances": [
-            {
-                "utt_id": u.utt_id,
-                "start_ms": u.start_ms,
-                "end_ms": u.end_ms,
-                "budget_ms": u.budget_ms,
-                "text_zh": u.text_zh,
-                "text_en": u.text_en,
-                "speaker": u.speaker,
-                "tts_policy": {
-                    "max_rate": u.tts_policy.max_rate,
-                    "allow_extend_ms": u.tts_policy.allow_extend_ms,
-                },
-                "emotion": u.emotion,
-                "gender": u.gender,
-            }
-            for u in manifest.utterances
-        ],
-    }
+def dub_manifest_from_utterances(utterances: list[dict], audio_duration_ms: int) -> DubManifest:
+    """Build DubManifest from enriched utterance dicts for TTS/Mix consumption.
 
-
-def dub_manifest_from_asr_model(model: "AsrModel") -> DubManifest:
-    """AsrModel -> DubManifest adapter for TTS/Mix processor consumption."""
-    utterances = []
-    for seg in model.segments:
-        if seg.type == "singing":
+    Expects enriched utterances with: text_cn, text_en, start_ms, end_ms,
+    speaker, emotion, gender, kind, tts_policy.
+    """
+    dub_utts = []
+    for u in utterances:
+        if u.get("kind") == "singing":
             continue
-        if not seg.text_en or not seg.text_en.strip():
+        en_text = u.get("text_en", "").strip()
+        if not en_text:
             continue
-        budget_ms = seg.end_ms - seg.start_ms
+        budget_ms = u["end_ms"] - u["start_ms"]
         if budget_ms <= 0:
             continue
-        policy = seg.tts_policy or {}
-        utterances.append(DubUtterance(
-            utt_id=seg.id,
-            start_ms=seg.start_ms,
-            end_ms=seg.end_ms,
+        policy_data = u.get("tts_policy") or {}
+        if isinstance(policy_data, str):
+            import json
+            policy_data = json.loads(policy_data)
+        dub_utts.append(DubUtterance(
+            utt_id=f"utt_{u['id']:08x}" if isinstance(u.get("id"), int) else str(u["id"]),
+            start_ms=u["start_ms"],
+            end_ms=u["end_ms"],
             budget_ms=budget_ms,
-            text_zh=seg.text,
-            text_en=seg.text_en,
-            speaker=seg.speaker,
+            text_zh=u.get("text_cn", ""),
+            text_en=en_text,
+            speaker=str(u.get("speaker", "")),
             tts_policy=TTSPolicy(
-                max_rate=policy.get("max_rate", 1.3),
-                allow_extend_ms=policy.get("allow_extend_ms", 0),
+                max_rate=policy_data.get("max_rate", 1.3),
+                allow_extend_ms=policy_data.get("allow_extend_ms", 0),
             ),
-            emotion=seg.emotion if seg.emotion != "neutral" else None,
-            gender=seg.gender,
+            emotion=u.get("emotion") if u.get("emotion") != "neutral" else None,
+            gender=u.get("gender"),
         ))
-    duration_ms = model.media.duration_ms
-    if duration_ms <= 0 and utterances:
-        duration_ms = utterances[-1].end_ms
-    return DubManifest(audio_duration_ms=duration_ms, utterances=utterances)
-
-
-def dub_manifest_from_dict(data: dict) -> DubManifest:
-    """Deserialize DubManifest from dict (JSON input)."""
-    utterances = []
-    for u in data["utterances"]:
-        policy_data = u.get("tts_policy", {})
-        policy = TTSPolicy(
-            max_rate=policy_data.get("max_rate", 1.3),
-            allow_extend_ms=policy_data.get("allow_extend_ms", 0),
-        )
-        utterances.append(
-            DubUtterance(
-                utt_id=u["utt_id"],
-                start_ms=u["start_ms"],
-                end_ms=u["end_ms"],
-                budget_ms=u["budget_ms"],
-                text_zh=u["text_zh"],
-                text_en=u["text_en"],
-                speaker=u["speaker"],
-                tts_policy=policy,
-                emotion=u.get("emotion"),
-                gender=u.get("gender"),
-            )
-        )
-    return DubManifest(
-        audio_duration_ms=data["audio_duration_ms"],
-        utterances=utterances,
-    )
+    duration = audio_duration_ms
+    if duration <= 0 and dub_utts:
+        duration = dub_utts[-1].end_ms
+    return DubManifest(audio_duration_ms=duration, utterances=dub_utts)

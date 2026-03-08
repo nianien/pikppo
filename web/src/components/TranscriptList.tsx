@@ -1,5 +1,5 @@
-/** Transcript segment list with virtual scrolling */
-import { useRef, useCallback, useState, useEffect } from 'react'
+/** Transcript cue list with virtual scrolling */
+import { useRef, useCallback, useState, useEffect, useMemo } from 'react'
 import { createPortal } from 'react-dom'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { useModelStore } from '../stores/model-store'
@@ -10,7 +10,11 @@ import { emotionColor } from '../utils/emotion-colors'
 import { deriveSpeakers } from '../utils/derive-speakers'
 import { ContextMenu } from './ContextMenu'
 import type { ContextMenuItem } from './ContextMenu'
-import type { AsrSegment } from '../types/asr-model'
+import type { Cue, Role } from '../types/asr-model'
+import { matchPinyin } from '../utils/pinyin-match'
+
+/** Negative temp IDs for new cues */
+let _nextTempId = -1
 
 const SPEAKER_COLORS = [
   'bg-blue-900/40',
@@ -42,12 +46,12 @@ const SPEAKER_BADGE_COLORS = [
   'bg-fuchsia-600',
 ]
 
-function speakerColor(speaker: string, speakers: string[]): string {
+function speakerColor(speaker: number, speakers: number[]): string {
   const idx = speakers.indexOf(speaker)
   return SPEAKER_COLORS[idx >= 0 ? idx % SPEAKER_COLORS.length : 0]
 }
 
-function speakerBadgeColor(speaker: string, speakers: string[]): string {
+function speakerBadgeColor(speaker: number, speakers: number[]): string {
   const idx = speakers.indexOf(speaker)
   return SPEAKER_BADGE_COLORS[idx >= 0 ? idx % SPEAKER_BADGE_COLORS.length : 0]
 }
@@ -103,95 +107,113 @@ function InlineDropdown({ anchorRef, onClose, children }: {
 }
 
 export function TranscriptList() {
-  const model = useModelStore(s => s.model)
-  const updateSegment = useModelStore(s => s.updateSegment)
-  const { selectedSegmentId, selectSegment, setCurrentTime, currentTime, playingSegmentId, setPlayingSegment, isPlaying } = useEditorStore()
-  const { splitSegment, mergeWithNext, insertSegment, deleteSegment } = useUndoableOps()
+  const cues = useModelStore(s => s.cues)
+  const loaded = useModelStore(s => s.loaded)
+  const updateCue = useModelStore(s => s.updateCue)
+  const selectedCueId = useEditorStore(s => s.selectedCueId)
+  const selectCue = useEditorStore(s => s.selectCue)
+  const setCurrentTime = useEditorStore(s => s.setCurrentTime)
+  const playingCueId = useEditorStore(s => s.playingCueId)
+  const setPlayingCue = useEditorStore(s => s.setPlayingCue)
+  const isPlaying = useEditorStore(s => s.isPlaying)
+  // Read currentTime via ref to avoid re-rendering TranscriptList on every timeupdate (~4/s)
+  const currentTimeRef = useRef(useEditorStore.getState().currentTime)
+  const { splitCue, mergeWithNext, insertCue, deleteCue } = useUndoableOps()
 
   const roles = useModelStore(s => s.roles)
+  const emotions = useModelStore(s => s.emotions)
+
+  const speakerList = deriveSpeakers(cues)
 
   const parentRef = useRef<HTMLDivElement>(null)
-  const [editingId, setEditingId] = useState<string | null>(null)
+  const [editingId, setEditingId] = useState<number | null>(null)
   const [editingField, setEditingField] = useState<'text' | 'text_en'>('text')
   const [editText, setEditText] = useState('')
 
-  // Dropdown state: which segment + which dropdown type is open
-  const [dropdownSegId, setDropdownSegId] = useState<string | null>(null)
+  // Dropdown state: which cue + which dropdown type is open
+  const [dropdownCueId, setDropdownCueId] = useState<number | null>(null)
   const [dropdownType, setDropdownType] = useState<'speaker' | 'emotion' | null>(null)
 
-  const emotions = useModelStore(s => s.emotions)
-
-  const segments = model?.segments ?? []
-  const speakerList = deriveSpeakers(segments)
-
   const virtualizer = useVirtualizer({
-    count: segments.length,
+    count: cues.length,
     getScrollElement: () => parentRef.current,
     estimateSize: () => 76,
     overscan: 10,
   })
 
-  // Track which segment is currently playing (separate from user selection)
+  // Track which cue is currently playing via subscribe (avoids re-render on every timeupdate)
+  const cuesRef = useRef(cues)
+  cuesRef.current = cues
   useEffect(() => {
-    if (!segments.length || !isPlaying) return
-    const idx = segments.findIndex(
-      seg => seg.start_ms <= currentTime && currentTime < seg.end_ms
-    )
-    if (idx >= 0 && segments[idx].id !== playingSegmentId) {
-      setPlayingSegment(segments[idx].id)
-    }
-  }, [currentTime, segments, playingSegmentId, isPlaying, setPlayingSegment])
-
-  // Clear playing segment when playback stops
-  useEffect(() => {
-    if (!isPlaying) {
-      setPlayingSegment(null)
-    }
-  }, [isPlaying, setPlayingSegment])
-
-  // Auto-scroll to playing segment during playback
-  useEffect(() => {
-    if (!playingSegmentId || editingId) return
-    const idx = segments.findIndex(s => s.id === playingSegmentId)
-    if (idx >= 0) {
-      virtualizer.scrollToIndex(idx, { align: 'auto' })
-    }
-  }, [playingSegmentId, segments, editingId, virtualizer])
-
-  // Scroll to user-selected segment — only when selection actually changes
-  const prevSelectedRef = useRef<string | null>(null)
-  useEffect(() => {
-    if (!selectedSegmentId || selectedSegmentId === prevSelectedRef.current) return
-    prevSelectedRef.current = selectedSegmentId
-    const idx = segments.findIndex(s => s.id === selectedSegmentId)
-    if (idx >= 0) {
-      virtualizer.scrollToIndex(idx, { align: 'auto' })
-    }
-  }, [selectedSegmentId, segments, virtualizer])
-
-  const handleClick = useCallback((seg: AsrSegment) => {
-    selectSegment(seg.id)
-    // Seek to segment start (playhead + video both go to same position)
-    setCurrentTime(seg.start_ms)
-    const video = document.querySelector('video')
-    if (video) {
-      video.currentTime = seg.start_ms / 1000
-    }
-  }, [selectSegment, setCurrentTime])
-
-  const handleDoubleClick = useCallback((seg: AsrSegment, field: 'text' | 'text_en' = 'text') => {
-    setEditingId(seg.id)
-    setEditingField(field)
-    setEditText(field === 'text' ? seg.text : (seg.text_en ?? ''))
+    const unsub = useEditorStore.subscribe((state, prev) => {
+      if (state.currentTime === prev.currentTime) return
+      currentTimeRef.current = state.currentTime
+      if (!state.isPlaying || !cuesRef.current.length) return
+      const t = state.currentTime
+      const cue = cuesRef.current.find(c => c.start_ms <= t && t < c.end_ms)
+      if (cue && cue.id !== state.playingCueId) {
+        state.setPlayingCue(cue.id)
+      }
+    })
+    return unsub
   }, [])
 
-  const handleTextCommit = useCallback((id: string) => {
-    const trimmed = editText.trim()
-    updateSegment(id, { [editingField]: trimmed })
-    setEditingId(null)
-  }, [editText, editingField, updateSegment])
+  // Clear playing cue when playback stops
+  useEffect(() => {
+    if (!isPlaying) {
+      setPlayingCue(null)
+    }
+  }, [isPlaying, setPlayingCue])
 
-  const handleTextKeyDown = useCallback((e: React.KeyboardEvent, id: string) => {
+  // Stable ref to virtualizer to avoid infinite re-render loops
+  const virtualizerRef = useRef(virtualizer)
+  virtualizerRef.current = virtualizer
+
+  // Auto-scroll to playing cue during playback
+  useEffect(() => {
+    if (playingCueId == null || editingId != null) return
+    const idx = cues.findIndex(c => c.id === playingCueId)
+    if (idx >= 0) {
+      requestAnimationFrame(() => {
+        virtualizerRef.current.scrollToIndex(idx, { align: 'auto' })
+      })
+    }
+  }, [playingCueId, cues, editingId])
+
+  // Scroll to user-selected cue — only when selection actually changes
+  const prevSelectedRef = useRef<number | null>(null)
+  useEffect(() => {
+    if (selectedCueId == null || selectedCueId === prevSelectedRef.current) return
+    prevSelectedRef.current = selectedCueId
+    const idx = cues.findIndex(c => c.id === selectedCueId)
+    if (idx >= 0) {
+      virtualizerRef.current.scrollToIndex(idx, { align: 'auto' })
+    }
+  }, [selectedCueId, cues])
+
+  const handleClick = useCallback((cue: Cue) => {
+    selectCue(cue.id)
+    // Seek to cue start (playhead + video both go to same position)
+    setCurrentTime(cue.start_ms)
+    const video = document.querySelector('video')
+    if (video) {
+      video.currentTime = cue.start_ms / 1000
+    }
+  }, [selectCue, setCurrentTime])
+
+  const handleDoubleClick = useCallback((cue: Cue, field: 'text' | 'text_en' = 'text') => {
+    setEditingId(cue.id)
+    setEditingField(field)
+    setEditText(field === 'text' ? cue.text : (cue.text_en ?? ''))
+  }, [])
+
+  const handleTextCommit = useCallback((id: number) => {
+    const trimmed = editText.trim()
+    updateCue(id, { [editingField]: trimmed })
+    setEditingId(null)
+  }, [editText, editingField, updateCue])
+
+  const handleTextKeyDown = useCallback((e: React.KeyboardEvent, id: number) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
       handleTextCommit(id)
@@ -200,116 +222,114 @@ export function TranscriptList() {
     }
   }, [handleTextCommit])
 
-  const toggleDropdown = useCallback((segId: string, type: 'speaker' | 'emotion') => {
-    if (dropdownSegId === segId && dropdownType === type) {
-      setDropdownSegId(null)
+  const toggleDropdown = useCallback((cueId: number, type: 'speaker' | 'emotion') => {
+    if (dropdownCueId === cueId && dropdownType === type) {
+      setDropdownCueId(null)
       setDropdownType(null)
     } else {
-      setDropdownSegId(segId)
+      setDropdownCueId(cueId)
       setDropdownType(type)
     }
-  }, [dropdownSegId, dropdownType])
+  }, [dropdownCueId, dropdownType])
 
   const closeDropdown = useCallback(() => {
-    setDropdownSegId(null)
+    setDropdownCueId(null)
     setDropdownType(null)
   }, [])
 
   // Context menu state
-  const [contextMenu, setContextMenu] = useState<{ segId: string; x: number; y: number } | null>(null)
+  const [contextMenu, setContextMenu] = useState<{ cueId: number; x: number; y: number } | null>(null)
 
-  const handleContextMenu = useCallback((e: React.MouseEvent, seg: AsrSegment) => {
+  const handleContextMenu = useCallback((e: React.MouseEvent, cue: Cue) => {
     e.preventDefault()
     e.stopPropagation()
-    selectSegment(seg.id)
-    setContextMenu({ segId: seg.id, x: e.clientX, y: e.clientY })
-  }, [selectSegment])
+    selectCue(cue.id)
+    setContextMenu({ cueId: cue.id, x: e.clientX, y: e.clientY })
+  }, [selectCue])
 
   const closeContextMenu = useCallback(() => setContextMenu(null), [])
 
-  /** Helper: create a new empty segment */
-  const makeEmptySeg = useCallback((startMs: number, endMs: number, speaker: string): AsrSegment => ({
-    id: `seg_${Math.random().toString(16).slice(2, 10)}`,
+  /** Helper: create a new empty cue */
+  const makeEmptyCue = useCallback((startMs: number, endMs: number, speaker: number): Cue => ({
+    id: _nextTempId--,
+    episode_id: 0,
+    text: '',
     start_ms: startMs,
     end_ms: Math.max(endMs, startMs + 100),
-    text: '',
-    text_en: '',
     speaker,
     emotion: 'neutral',
-    type: 'speech',
-    flags: { overlap: false, needs_review: false },
+    kind: 'speech',
+    cv: 1,
   }), [])
 
-  const buildContextMenuItems = useCallback((segId: string): ContextMenuItem[] => {
-    const segs = model?.segments ?? []
-    const idx = segs.findIndex(s => s.id === segId)
+  const buildContextMenuItems = useCallback((cueId: number): ContextMenuItem[] => {
+    const idx = cues.findIndex(c => c.id === cueId)
     if (idx < 0) return []
-    const seg = segs[idx]
-    const isLast = idx >= segs.length - 1
+    const cue = cues[idx]
+    const isLast = idx >= cues.length - 1
     const isFirst = idx === 0
-    const canSplit = currentTime > seg.start_ms && currentTime < seg.end_ms
+    const ct = currentTimeRef.current
+    const canSplit = ct > cue.start_ms && ct < cue.end_ms
 
-    const prev = !isFirst ? segs[idx - 1] : null
-    const next = !isLast ? segs[idx + 1] : null
+    const prev = !isFirst ? cues[idx - 1] : null
+    const next = !isLast ? cues[idx + 1] : null
 
     return [
       {
         label: 'Split at Playhead',
         shortcut: '\u2318B',
-        onClick: () => splitSegment(segId, currentTime),
+        onClick: () => splitCue(cueId, ct),
         disabled: !canSplit,
         dividerAfter: true,
       },
       {
         label: 'Insert Before',
         onClick: () => {
-          const newStart = prev ? prev.end_ms : Math.max(0, seg.start_ms - 1000)
-          const newSeg = makeEmptySeg(newStart, seg.start_ms, seg.speaker)
-          insertSegment(idx, newSeg)
-          selectSegment(newSeg.id)
-          // 自动进入中文文本编辑模式
-          setTimeout(() => handleDoubleClick(newSeg, 'text'), 50)
+          const newStart = prev ? prev.end_ms : Math.max(0, cue.start_ms - 1000)
+          const newCue = makeEmptyCue(newStart, cue.start_ms, cue.speaker)
+          insertCue(idx, newCue)
+          selectCue(newCue.id)
+          setTimeout(() => handleDoubleClick(newCue, 'text'), 50)
         },
       },
       {
         label: 'Insert After',
         onClick: () => {
-          const newEnd = next ? next.start_ms : seg.end_ms + 1000
-          const newSeg = makeEmptySeg(seg.end_ms, newEnd, seg.speaker)
-          insertSegment(idx + 1, newSeg)
-          selectSegment(newSeg.id)
-          // 自动进入中文文本编辑模式
-          setTimeout(() => handleDoubleClick(newSeg, 'text'), 50)
+          const newEnd = next ? next.start_ms : cue.end_ms + 1000
+          const newCue = makeEmptyCue(cue.end_ms, newEnd, cue.speaker)
+          insertCue(idx + 1, newCue)
+          selectCue(newCue.id)
+          setTimeout(() => handleDoubleClick(newCue, 'text'), 50)
         },
       },
       {
         label: 'Merge with Next',
         shortcut: '\u2318M',
-        onClick: () => mergeWithNext(segId),
+        onClick: () => mergeWithNext(cueId),
         disabled: isLast,
         dividerAfter: true,
       },
       {
-        label: seg.type === 'singing' ? 'Set as Speech' : 'Set as Singing',
-        onClick: () => updateSegment(segId, { type: seg.type === 'singing' ? 'speech' : 'singing' }),
+        label: cue.kind === 'singing' ? 'Set as Speech' : 'Set as Singing',
+        onClick: () => updateCue(cueId, { kind: cue.kind === 'singing' ? 'speech' : 'singing' }),
         dividerAfter: true,
       },
       {
         label: 'Delete',
         shortcut: '\u232B',
         onClick: () => {
-          deleteSegment(segId)
-          const remaining = segs.filter(s => s.id !== segId)
+          deleteCue(cueId)
+          const remaining = cues.filter(c => c.id !== cueId)
           if (remaining.length > 0) {
             const newIdx = Math.min(idx, remaining.length - 1)
-            selectSegment(remaining[newIdx].id)
+            selectCue(remaining[newIdx].id)
           }
         },
       },
     ]
-  }, [model, currentTime, splitSegment, mergeWithNext, insertSegment, deleteSegment, selectSegment, makeEmptySeg, updateSegment])
+  }, [cues, splitCue, mergeWithNext, insertCue, deleteCue, selectCue, makeEmptyCue, updateCue])
 
-  if (!model) {
+  if (!loaded) {
     return (
       <div className="flex items-center justify-center h-full text-gray-500">
         Select an episode to begin
@@ -327,18 +347,18 @@ export function TranscriptList() {
         }}
       >
         {virtualizer.getVirtualItems().map(virtualRow => {
-          const seg = segments[virtualRow.index]
-          const isSelected = seg.id === selectedSegmentId
-          const isPlayingNow = seg.id === playingSegmentId
-          const isEditing = seg.id === editingId
-          const bgColor = speakerColor(seg.speaker, speakerList)
-          const isInvalidRole = roles != null && !(seg.speaker in (roles.roles ?? {}))
-          const badgeColor = isInvalidRole ? 'bg-gray-600' : speakerBadgeColor(seg.speaker, speakerList)
-          const emoColor = emotionColor(seg.emotion)
+          const cue = cues[virtualRow.index]
+          const isSelected = cue.id === selectedCueId
+          const isPlayingNow = cue.id === playingCueId
+          const isEditing = cue.id === editingId
+          const bgColor = speakerColor(cue.speaker, speakerList)
+          const isInvalidRole = roles.length > 0 && !roles.some(r => r.id === cue.speaker)
+          const badgeColor = isInvalidRole ? 'bg-gray-600' : speakerBadgeColor(cue.speaker, speakerList)
+          const emoColor = emotionColor(cue.emotion)
 
           return (
             <div
-              key={seg.id}
+              key={cue.id}
               style={{
                 position: 'absolute',
                 top: 0,
@@ -346,52 +366,50 @@ export function TranscriptList() {
                 width: '100%',
                 height: `${virtualRow.size}px`,
                 transform: `translateY(${virtualRow.start}px)`,
-                zIndex: dropdownSegId === seg.id ? 10 : 1,
+                zIndex: dropdownCueId === cue.id ? 10 : 1,
               }}
               className={`
                 flex items-start gap-2 px-3 py-1 border-b border-gray-700 cursor-pointer
                 ${isPlayingNow ? 'bg-green-900/50 border-l-[3px] border-l-green-400' : bgColor}
                 ${isSelected && !isPlayingNow ? 'ring-1 ring-blue-400' : ''}
-                ${seg.flags.overlap ? 'border-l-2 border-l-red-500' : ''}
-                ${seg.flags.needs_review ? 'border-l-2 border-l-yellow-500' : ''}
                 hover:bg-gray-700/50
                 transition-colors duration-150
               `}
-              onClick={() => handleClick(seg)}
-              onDoubleClick={() => handleDoubleClick(seg)}
-              onContextMenu={e => handleContextMenu(e, seg)}
+              onClick={() => handleClick(cue)}
+              onDoubleClick={() => handleDoubleClick(cue)}
+              onContextMenu={e => handleContextMenu(e, cue)}
             >
               {/* Time: start + end */}
               <div className="text-xs text-gray-400 font-mono w-28 shrink-0 pt-1 leading-tight">
-                <div>{msToDisplay(seg.start_ms)}</div>
-                <div className="text-gray-600">{msToDisplay(seg.end_ms)}</div>
+                <div>{msToDisplay(cue.start_ms)}</div>
+                <div className="text-gray-600">{msToDisplay(cue.end_ms)}</div>
               </div>
 
               {/* Speaker badge — click to open role dropdown */}
               <SpeakerBadge
-                seg={seg}
+                cue={cue}
                 badgeColor={badgeColor}
                 roles={roles}
-                isOpen={dropdownSegId === seg.id && dropdownType === 'speaker'}
-                onToggle={() => toggleDropdown(seg.id, 'speaker')}
+                isOpen={dropdownCueId === cue.id && dropdownType === 'speaker'}
+                onToggle={() => toggleDropdown(cue.id, 'speaker')}
                 onClose={closeDropdown}
               />
 
               {/* Emotion badge — click to open dropdown */}
               <EmotionBadge
-                seg={seg}
+                cue={cue}
                 emoColor={emoColor}
                 emotions={emotions}
-                isOpen={dropdownSegId === seg.id && dropdownType === 'emotion'}
-                onToggle={() => toggleDropdown(seg.id, 'emotion')}
-                onSelect={(emo) => { updateSegment(seg.id, { emotion: emo }); closeDropdown() }}
+                isOpen={dropdownCueId === cue.id && dropdownType === 'emotion'}
+                onToggle={() => toggleDropdown(cue.id, 'emotion')}
+                onSelect={(emo) => { updateCue(cue.id, { emotion: emo }); closeDropdown() }}
                 onClose={closeDropdown}
               />
 
               {/* Type toggle: speech / singing */}
-              {seg.type === 'singing' && (
+              {cue.kind === 'singing' && (
                 <button
-                  onClick={e => { e.stopPropagation(); updateSegment(seg.id, { type: 'speech' }) }}
+                  onClick={e => { e.stopPropagation(); updateCue(cue.id, { kind: 'speech' }) }}
                   className="shrink-0 pt-1 text-xs px-1.5 py-0.5 rounded bg-pink-800 text-pink-200 hover:brightness-125"
                   title="Singing (click to switch to speech)"
                 >
@@ -406,44 +424,34 @@ export function TranscriptList() {
                     type="text"
                     value={editText}
                     onChange={e => setEditText(e.target.value)}
-                    onBlur={() => handleTextCommit(seg.id)}
-                    onKeyDown={e => handleTextKeyDown(e, seg.id)}
+                    onBlur={() => handleTextCommit(cue.id)}
+                    onKeyDown={e => handleTextKeyDown(e, cue.id)}
                     className="w-full bg-gray-800 text-gray-100 px-2 py-1 rounded text-sm outline-none ring-1 ring-blue-400"
                     placeholder="输入中文原文..."
                     autoFocus
                   />
                 ) : (
                   <div
-                    className={`text-sm truncate px-1 py-0.5 rounded cursor-text hover:bg-gray-700/50 ${seg.text ? (isPlayingNow ? 'text-green-100 font-medium' : '') : 'text-gray-600 italic'}`}
-                    onDoubleClick={e => { e.stopPropagation(); handleDoubleClick(seg, 'text') }}
+                    className={`text-sm truncate px-1 py-0.5 rounded cursor-text hover:bg-gray-700/50 ${cue.text ? (isPlayingNow ? 'text-green-100 font-medium' : '') : 'text-gray-600 italic'}`}
+                    onDoubleClick={e => { e.stopPropagation(); handleDoubleClick(cue, 'text') }}
                   >
-                    {seg.text || '(空)'}
+                    {cue.text || '(空)'}
                   </div>
                 )}
-                {isEditing && editingField === 'text_en' ? (
-                  <input
-                    type="text"
-                    value={editText}
-                    onChange={e => setEditText(e.target.value)}
-                    onBlur={() => handleTextCommit(seg.id)}
-                    onKeyDown={e => handleTextKeyDown(e, seg.id)}
-                    className="w-full bg-gray-800 text-gray-400 px-2 py-1 rounded text-xs outline-none ring-1 ring-blue-400 mt-0.5"
-                    placeholder="English translation..."
-                    autoFocus
-                  />
-                ) : (
-                  <div
-                    className="text-xs text-gray-500 truncate px-1 py-0.5 rounded cursor-text hover:bg-gray-700/50 mt-0.5 min-h-[20px] leading-[20px]"
-                    onDoubleClick={e => { e.stopPropagation(); handleDoubleClick(seg, 'text_en') }}
-                  >
-                    {seg.text_en || '\u00A0'}
-                  </div>
-                )}
+                <div
+                  className={`text-xs truncate px-1 py-0.5 rounded mt-0.5 min-h-[20px] leading-[20px] ${
+                    cue.text_en
+                      ? 'text-gray-500'
+                      : 'text-gray-600 italic'
+                  }`}
+                >
+                  {cue.text_en || 'No translation'}
+                </div>
               </div>
 
               {/* Duration */}
               <div className="text-xs text-gray-500 shrink-0 pt-1">
-                {((seg.end_ms - seg.start_ms) / 1000).toFixed(1)}s
+                {((cue.end_ms - cue.start_ms) / 1000).toFixed(1)}s
               </div>
             </div>
           )
@@ -455,7 +463,7 @@ export function TranscriptList() {
         <ContextMenu
           x={contextMenu.x}
           y={contextMenu.y}
-          items={buildContextMenuItems(contextMenu.segId)}
+          items={buildContextMenuItems(contextMenu.cueId)}
           onClose={closeContextMenu}
         />
       )}
@@ -463,30 +471,45 @@ export function TranscriptList() {
   )
 }
 
-/** Clickable speaker badge with role assignment dropdown + new role creation */
-function SpeakerBadge({ seg, badgeColor, roles, isOpen, onToggle, onClose }: {
-  seg: AsrSegment
+/** role_type sort priority: lead > supporting > extra > narrator */
+const ROLE_TYPE_PRIORITY: Record<string, number> = { lead: 0, supporting: 1, extra: 2, narrator: 3 }
+
+function roleTypePriority(rt: string): number {
+  return ROLE_TYPE_PRIORITY[rt] ?? 2
+}
+
+/** Sort roles by role_type priority, then name alphabetically */
+function sortRolesByType(roles: Role[]): Role[] {
+  return [...roles].sort((a, b) => {
+    const pa = roleTypePriority(a.role_type)
+    const pb = roleTypePriority(b.role_type)
+    if (pa !== pb) return pa - pb
+    return a.name.localeCompare(b.name, 'zh-Hans-CN')
+  })
+}
+
+/** Clickable speaker badge with role assignment dropdown (tab: Recent | All) */
+function SpeakerBadge({ cue, badgeColor, roles, isOpen, onToggle, onClose }: {
+  cue: Cue
   badgeColor: string
-  roles: ReturnType<typeof useModelStore.getState>['roles']
+  roles: Role[]
   isOpen: boolean
   onToggle: () => void
   onClose: () => void
 }) {
   const anchorRef = useRef<HTMLDivElement>(null)
-  const updateSegment = useModelStore(s => s.updateSegment)
-  const saveRoles = useModelStore(s => s.saveRoles)
-  const roleIds = roles ? Object.keys(roles.roles).sort((a, b) => a.localeCompare(b, 'zh-Hans-CN')) : []
+  const updateCue = useModelStore(s => s.updateCue)
+  const cues = useModelStore(s => s.cues)
 
   const [filter, setFilter] = useState('')
   const [highlightIdx, setHighlightIdx] = useState(-1)
+  const [tab, setTab] = useState<'recent' | 'all'>('recent')
 
-  const ensureRoles = (): NonNullable<typeof roles> => {
-    if (roles) return roles
-    return { roles: {}, default_roles: {} }
-  }
+  /** Display name for the current speaker */
+  const speakerName = roles.find(r => r.id === cue.speaker)?.name ?? String(cue.speaker)
 
-  const handleRoleSelect = (roleId: string) => {
-    updateSegment(seg.id, { speaker: roleId || seg.speaker })
+  const handleRoleSelect = (roleId: number) => {
+    updateCue(cue.id, { speaker: roleId })
     onClose()
     setFilter('')
     setHighlightIdx(-1)
@@ -495,41 +518,77 @@ function SpeakerBadge({ seg, badgeColor, roles, isOpen, onToggle, onClose }: {
   const handleAddRole = (name: string) => {
     const trimmed = name.trim()
     if (!trimmed) return
-    const rs = ensureRoles()
-    const updated = {
-      ...rs,
-      roles: { ...rs.roles, [trimmed]: '' },
-    }
-    useModelStore.setState({ roles: updated })
-    updateSegment(seg.id, { speaker: trimmed })
+    const tempId = -Date.now()
+    const newRole: Role = { id: tempId, name: trimmed, voice_type: '', role_type: 'extra' }
+    const currentRoles = useModelStore.getState().roles
+    useModelStore.setState({ roles: [...currentRoles, newRole] })
     setFilter('')
     setHighlightIdx(-1)
     onClose()
-    setTimeout(() => saveRoles(), 0)
+    const doSave = async () => {
+      await useModelStore.getState().saveRoles()
+      const savedRoles = useModelStore.getState().roles
+      const saved = savedRoles.find(r => r.name === trimmed)
+      if (saved) {
+        useModelStore.getState().updateCue(cue.id, { speaker: saved.id })
+      }
+    }
+    doSave()
   }
 
-  const filtered = filter
-    ? roleIds.filter(rid => rid.toLowerCase().startsWith(filter.toLowerCase()))
-    : roleIds
-  const exactMatch = roleIds.some(rid => rid.toLowerCase() === filter.toLowerCase())
-  // Total selectable items: filtered roles + optional "Create" item
-  const hasCreate = filter.trim() !== '' && !exactMatch
-  const totalItems = filtered.length + (hasCreate ? 1 : 0)
-  const createIdx = hasCreate ? filtered.length : -1
+  // Recent speakers: unique speaker IDs by cue position (reverse order)
+  const recentRoles = useMemo(() => {
+    const seen = new Set<number>()
+    const result: Role[] = []
+    for (let i = cues.length - 1; i >= 0; i--) {
+      const spk = cues[i].speaker
+      if (spk && !seen.has(spk)) {
+        seen.add(spk)
+        const role = roles.find(r => r.id === spk)
+        if (role) result.push(role)
+      }
+    }
+    return result
+  }, [cues, roles])
+
+  const allRolesSorted = useMemo(() => sortRolesByType(roles), [roles])
+
+  const isFiltering = filter.trim() !== ''
+
+  // The visible list for the current state (filter overrides tabs, supports pinyin initials)
+  const visibleRoles = useMemo(() => {
+    if (isFiltering) {
+      return sortRolesByType(roles.filter(r => matchPinyin(r.name, filter.trim())))
+    }
+    return tab === 'recent' ? recentRoles : allRolesSorted
+  }, [isFiltering, filter, roles, tab, recentRoles, allRolesSorted])
+
+  const exactMatch = roles.some(r => r.name.toLowerCase() === filter.toLowerCase())
+  const hasCreate = isFiltering && !exactMatch
+  const totalItems = visibleRoles.length + (hasCreate ? 1 : 0)
+  const createIdx = hasCreate ? visibleRoles.length : -1
+
+  const selectByIndex = (idx: number) => {
+    if (idx >= 0 && idx < visibleRoles.length) {
+      handleRoleSelect(visibleRoles[idx].id)
+    } else if (idx === createIdx) {
+      handleAddRole(filter)
+    }
+  }
 
   return (
     <div ref={anchorRef} className="shrink-0 pt-1 relative">
       <button
-        onClick={e => { e.stopPropagation(); onToggle(); setFilter(''); setHighlightIdx(-1) }}
+        onClick={e => { e.stopPropagation(); onToggle(); setFilter(''); setHighlightIdx(-1); setTab('recent') }}
         className={`text-xs px-1.5 py-0.5 rounded ${badgeColor} text-white min-w-[24px] text-center hover:brightness-125 flex items-center gap-1`}
         title="Assign role"
       >
-        {seg.speaker}
+        {speakerName}
         <span className="text-[10px] opacity-60">▾</span>
       </button>
       {isOpen && (
         <InlineDropdown anchorRef={anchorRef} onClose={() => { onClose(); setFilter(''); setHighlightIdx(-1) }}>
-          {/* Search / filter input */}
+          {/* Search input */}
           <div className="px-2 py-1">
             <input
               type="text"
@@ -544,12 +603,10 @@ function SpeakerBadge({ seg, badgeColor, roles, isOpen, onToggle, onClose }: {
                   e.preventDefault()
                   setHighlightIdx(prev => (prev - 1 + totalItems) % totalItems)
                 } else if (e.key === 'Enter') {
-                  if (highlightIdx >= 0 && highlightIdx < filtered.length) {
-                    handleRoleSelect(filtered[highlightIdx])
-                  } else if (highlightIdx === createIdx) {
-                    handleAddRole(filter)
-                  } else if (filtered.length === 1) {
-                    handleRoleSelect(filtered[0])
+                  if (highlightIdx >= 0) {
+                    selectByIndex(highlightIdx)
+                  } else if (visibleRoles.length === 1) {
+                    handleRoleSelect(visibleRoles[0].id)
                   } else if (hasCreate) {
                     handleAddRole(filter)
                   }
@@ -563,18 +620,44 @@ function SpeakerBadge({ seg, badgeColor, roles, isOpen, onToggle, onClose }: {
               autoFocus
             />
           </div>
-          {filtered.map((rid, i) => (
+          {/* Tabs (hidden when filtering) */}
+          {!isFiltering && (
+            <div className="flex border-b border-gray-700 mx-1">
+              <button
+                onClick={e => { e.stopPropagation(); setTab('recent'); setHighlightIdx(-1) }}
+                className={`flex-1 text-[10px] py-1 text-center ${
+                  tab === 'recent' ? 'text-blue-400 border-b border-blue-400' : 'text-gray-500 hover:text-gray-300'
+                }`}
+              >常用</button>
+              <button
+                onClick={e => { e.stopPropagation(); setTab('all'); setHighlightIdx(-1) }}
+                className={`flex-1 text-[10px] py-1 text-center ${
+                  tab === 'all' ? 'text-blue-400 border-b border-blue-400' : 'text-gray-500 hover:text-gray-300'
+                }`}
+              >全部</button>
+            </div>
+          )}
+          {/* Role list */}
+          {visibleRoles.map((role, i) => (
             <button
-              key={rid}
-              onClick={e => { e.stopPropagation(); handleRoleSelect(rid) }}
+              key={role.id}
+              onClick={e => { e.stopPropagation(); handleRoleSelect(role.id) }}
               onMouseEnter={() => setHighlightIdx(i)}
-              className={`block w-full text-left px-2 py-1 ${
+              className={`block w-full text-left px-2 py-1 text-xs ${
                 i === highlightIdx ? 'bg-gray-600' : 'hover:bg-gray-700'
-              } ${seg.speaker === rid ? 'text-blue-400' : 'text-gray-300'}`}
+              } ${cue.speaker === role.id ? 'text-blue-400' : 'text-gray-300'}`}
             >
-              {rid}
+              {role.name}
+              {(isFiltering || tab === 'all') && (
+                <span className="text-[10px] text-gray-500 ml-1">({role.role_type})</span>
+              )}
             </button>
           ))}
+          {!isFiltering && visibleRoles.length === 0 && (
+            <div className="px-2 py-2 text-[10px] text-gray-600 italic text-center">
+              {tab === 'recent' ? 'No recent roles' : 'No roles'}
+            </div>
+          )}
           {hasCreate && (
             <div className="border-t border-gray-600 mt-1 pt-1">
               <button
@@ -595,8 +678,8 @@ function SpeakerBadge({ seg, badgeColor, roles, isOpen, onToggle, onClose }: {
 }
 
 /** Clickable emotion badge with inline dropdown + arrow key navigation */
-function EmotionBadge({ seg, emoColor, emotions, isOpen, onToggle, onSelect, onClose }: {
-  seg: AsrSegment
+function EmotionBadge({ cue, emoColor, emotions, isOpen, onToggle, onSelect, onClose }: {
+  cue: Cue
   emoColor: { bg: string; text: string }
   emotions: { key: string; name: string; lang: string[]; disabled?: boolean }[]
   isOpen: boolean
@@ -625,7 +708,7 @@ function EmotionBadge({ seg, emoColor, emotions, isOpen, onToggle, onSelect, onC
         className="text-xs px-1.5 py-0.5 rounded hover:brightness-125 flex items-center gap-0.5"
         title="Change emotion"
       >
-        {emotions.find(e => e.key === seg.emotion)?.name ?? seg.emotion}
+        {emotions.find(e => e.key === cue.emotion)?.name ?? cue.emotion}
         <span className="text-[10px] opacity-60">▾</span>
       </button>
       {isOpen && (
@@ -661,7 +744,7 @@ function EmotionBadge({ seg, emoColor, emotions, isOpen, onToggle, onSelect, onC
                   onMouseEnter={() => setHighlightIdx(i)}
                   className={`block w-full text-left px-2 py-1 ${
                     i === highlightIdx ? 'bg-gray-600' : 'hover:bg-gray-700'
-                  } ${seg.emotion === emo.key ? 'font-medium' : ''}`}
+                  } ${cue.emotion === emo.key ? 'font-medium' : ''}`}
                   style={{ color: ec.text }}
                 >
                   <span

@@ -10,12 +10,12 @@ export interface Command {
 
 interface EditorState {
   // selection
-  selectedSegmentId: string | null
-  selectSegment: (id: string | null) => void
+  selectedCueId: number | null
+  selectCue: (id: number | null) => void
 
   // playback tracking (separate from user selection)
-  playingSegmentId: string | null
-  setPlayingSegment: (id: string | null) => void
+  playingCueId: number | null
+  setPlayingCue: (id: number | null) => void
 
   // playback
   currentTime: number      // current playback time in ms
@@ -47,18 +47,28 @@ interface EditorState {
 }
 
 export const useEditorStore = create<EditorState>((set, get) => ({
-  selectedSegmentId: null,
-  selectSegment: (id) => set({ selectedSegmentId: id }),
+  selectedCueId: null,
+  selectCue: (id) => {
+    if (id !== get().selectedCueId) set({ selectedCueId: id })
+  },
 
-  playingSegmentId: null,
-  setPlayingSegment: (id) => set({ playingSegmentId: id }),
+  playingCueId: null,
+  setPlayingCue: (id) => {
+    if (id !== get().playingCueId) set({ playingCueId: id })
+  },
 
   currentTime: 0,
   duration: 0,
   isPlaying: false,
-  setCurrentTime: (ms) => set({ currentTime: ms }),
-  setDuration: (ms) => set({ duration: ms }),
-  setPlaying: (playing) => set({ isPlaying: playing }),
+  setCurrentTime: (ms) => {
+    if (ms !== get().currentTime) set({ currentTime: ms })
+  },
+  setDuration: (ms) => {
+    if (ms !== get().duration) set({ duration: ms })
+  },
+  setPlaying: (playing) => {
+    if (playing !== get().isPlaying) set({ isPlaying: playing })
+  },
 
   undoStack: [],
   redoStack: [],
@@ -100,11 +110,14 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   setZoom: (zoom) => set({ zoom: Math.max(10, Math.min(200, zoom)) }),
 
   scrollOffset: 0,
-  setScrollOffset: (offset) => set({ scrollOffset: Math.max(0, offset) }),
+  setScrollOffset: (offset) => {
+    const clamped = Math.max(0, offset)
+    if (clamped !== get().scrollOffset) set({ scrollOffset: clamped })
+  },
 
   reset: () => set({
-    selectedSegmentId: null,
-    playingSegmentId: null,
+    selectedCueId: null,
+    playingCueId: null,
     currentTime: 0,
     duration: 0,
     isPlaying: false,

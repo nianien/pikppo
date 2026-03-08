@@ -2,9 +2,9 @@
 Mix Phase: 混音 (Timeline-First Architecture)
 
 输入:
-  - dub.dub_manifest: Timeline SSOT (source/tts.manifest.json)
+  - extract.audio: 原始音频（用于 probe duration）
   - tts.segments_dir: Per-segment WAV files
-  - tts.report: TTS synthesis report
+  - enriched utterances from DB
 
 输出:
   - mix.audio: Final mixed audio (exact duration matching original)
@@ -18,27 +18,39 @@ from typing import Dict, Optional
 from dubora.pipeline.core.phase import Phase
 from dubora.pipeline.core.types import Artifact, ErrorInfo, PhaseResult, RunContext, ResolvedOutputs
 from dubora.pipeline.processors.mix import run_timeline as mix_run_timeline
-from dubora.schema.asr_model import AsrModel
-from dubora.schema.dub_manifest import dub_manifest_from_asr_model
-from dubora.schema.tts_report import tts_report_from_dict
+from dubora.schema.dub_manifest import dub_manifest_from_utterances
 from dubora.utils.logger import info, warning
-import json
+
+
+def _probe_duration_ms(audio_path: str) -> int:
+    """Probe audio duration using ffprobe."""
+    result = subprocess.run(
+        ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+         "-of", "default=noprint_wrappers=1:nokey=1", audio_path],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"ffprobe failed: {result.stderr}")
+    duration_str = result.stdout.strip()
+    if duration_str == "N/A" or not duration_str:
+        raise RuntimeError(f"ffprobe returned invalid duration for {audio_path}")
+    return int(float(duration_str) * 1000)
 
 
 class MixPhase(Phase):
     """混音 Phase (Timeline-First Architecture)。"""
 
     name = "mix"
-    version = "2.1.0"
+    version = "3.0.0"
 
     def requires(self) -> list[str]:
-        """需要 dub_manifest, segments_dir, report, 和可选的 sep outputs。"""
-        return ["dub.dub_manifest", "tts.segments_dir", "tts.report"]
+        """需要 extract.audio (duration probe), segments_dir。TTS 结果从 DB 读取。"""
+        return ["extract.audio", "tts.segments_dir"]
 
     def provides(self) -> list[str]:
         """生成 mix.audio。"""
         return ["mix.audio"]
-    
+
     def run(
         self,
         ctx: RunContext,
@@ -49,26 +61,36 @@ class MixPhase(Phase):
         执行 Mix Phase (Timeline-First Architecture)。
 
         流程：
-        1. 读取 tts.manifest.json (timeline SSOT)
-        2. 读取 tts_report.json (per-segment info)
-        3. 使用 adelay 进行 timeline placement
-        4. 混合 BGM + TTS
-        5. 使用 apad + atrim 强制精确时长
-        6. 校验输出时长
+        1. 从 DB 构建 DubManifest（enriched utterances）
+        2. 使用 adelay 进行 timeline placement
+        3. 混合 BGM + TTS
+        4. 使用 apad + atrim 强制精确时长
+        5. 校验输出时长
         """
         workspace_path = Path(ctx.workspace)
+        store = ctx.store
+        episode_id = ctx.episode_id
 
-        # 获取 dub_manifest
-        dub_manifest_artifact = inputs["dub.dub_manifest"]
-        dub_manifest_path = workspace_path / dub_manifest_artifact.relpath
-        if not dub_manifest_path.exists():
+        if not store or not episode_id:
             return PhaseResult(
                 status="failed",
                 error=ErrorInfo(
-                    type="FileNotFoundError",
-                    message=f"Dub manifest not found: {dub_manifest_path}",
+                    type="ValueError",
+                    message="Mix requires DB store and episode_id. Ensure pipeline is running in DB mode.",
                 ),
             )
+
+        # Probe audio duration from extract.audio
+        audio_artifact = inputs.get("extract.audio")
+        audio_duration_ms = 0
+        if audio_artifact:
+            audio_path = workspace_path / audio_artifact.relpath
+            if audio_path.exists():
+                try:
+                    audio_duration_ms = _probe_duration_ms(str(audio_path))
+                    info(f"Probed audio duration: {audio_duration_ms}ms")
+                except RuntimeError as e:
+                    warning(f"Could not probe audio duration: {e}")
 
         # 获取 segments_dir
         segments_dir_artifact = inputs["tts.segments_dir"]
@@ -82,55 +104,37 @@ class MixPhase(Phase):
                 ),
             )
 
-        # 获取 tts_report
-        tts_report_artifact = inputs["tts.report"]
-        tts_report_path = workspace_path / tts_report_artifact.relpath
-        if not tts_report_path.exists():
-            return PhaseResult(
-                status="failed",
-                error=ErrorInfo(
-                    type="FileNotFoundError",
-                    message=f"TTS report not found: {tts_report_path}",
-                ),
-            )
+        # Build DubManifest from succeeded enriched utterances
+        all_utts = store.get_utterances(episode_id)
+        succeeded_utts = [u for u in all_utts if not u.get("tts_error")]
+        dub_manifest = dub_manifest_from_utterances(succeeded_utts, audio_duration_ms)
 
-        # Load dub.json (AsrModel) and convert via adapter
-        with open(dub_manifest_path, "r", encoding="utf-8") as f:
-            asr_model = AsrModel.from_dict(json.load(f))
-        dub_manifest = dub_manifest_from_asr_model(asr_model)
-
-        # Extract singing segments (keep original vocals for these time windows)
+        # Extract singing segments from SRC cues (keep original vocals for these time windows)
+        src_cues = store.get_cues(episode_id)
         singing_segments = [
-            (seg.start_ms, seg.end_ms)
-            for seg in asr_model.segments
-            if seg.type == "singing"
+            (c["start_ms"], c["end_ms"])
+            for c in src_cues
+            if c.get("kind") == "singing"
         ]
 
-        with open(tts_report_path, "r", encoding="utf-8") as f:
-            tts_report = tts_report_from_dict(json.load(f))
+        info(f"Loaded {len(all_utts)} utterances from DB, {len(succeeded_utts)} succeeded, {len(dub_manifest.utterances)} with translations")
+        if singing_segments:
+            info(f"Found {len(singing_segments)} singing segments to preserve")
 
-        info(f"Loaded dub manifest: {len(dub_manifest.utterances)} utterances, audio_duration_ms={dub_manifest.audio_duration_ms}")
-        info(f"Loaded TTS report: {tts_report.success_count}/{tts_report.total_segments} succeeded")
-
-        # 获取 accompaniment（可选，从 manifest 手动查找）
+        # 获取 accompaniment / vocals（可选，从 DB artifacts 表查询）
         accompaniment_path = None
         vocals_path = None
-        try:
-            from dubora.pipeline.core.manifest import Manifest
-            manifest_path = workspace_path / "manifest.json"
-            manifest = Manifest(manifest_path)
-            accompaniment_artifact = manifest.get_artifact("extract.accompaniment", required_by=None)
-            accompaniment_path = workspace_path / accompaniment_artifact.relpath
-            if not accompaniment_path.exists():
-                accompaniment_path = None
+        acc_art = store.get_artifact(episode_id, "extract.accompaniment")
+        if acc_art:
+            p = workspace_path / acc_art["relpath"]
+            if p.exists():
+                accompaniment_path = p
 
-            vocals_artifact = manifest.get_artifact("extract.vocals", required_by=None)
-            vocals_path = workspace_path / vocals_artifact.relpath
-            if not vocals_path.exists():
-                vocals_path = None
-        except (ValueError, FileNotFoundError):
-            accompaniment_path = None
-            vocals_path = None
+        voc_art = store.get_artifact(episode_id, "extract.vocals")
+        if voc_art:
+            p = workspace_path / voc_art["relpath"]
+            if p.exists():
+                vocals_path = p
 
         # 获取 video_path（从 config）
         video_path = ctx.config.get("video_path")
@@ -165,7 +169,7 @@ class MixPhase(Phase):
         try:
             result = mix_run_timeline(
                 dub_manifest=dub_manifest,
-                tts_report=tts_report,
+                tts_report=None,
                 segments_dir=str(segments_dir),
                 video_path=video_path,
                 accompaniment_path=str(accompaniment_path) if accompaniment_path else None,

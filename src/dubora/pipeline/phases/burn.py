@@ -1,5 +1,5 @@
 """
-Burn Phase: 烧录字幕到视频（只编排与IO，调用 ffmpeg）
+Burn Phase: 生成 SRT 字幕 + 烧录字幕到视频
 """
 import os
 import subprocess
@@ -9,22 +9,23 @@ from typing import Dict
 from dubora.pipeline.core.phase import Phase
 from dubora.pipeline.core.types import Artifact, ErrorInfo, PhaseResult, RunContext, ResolvedOutputs
 from dubora.utils.logger import info
+from dubora.utils.timecode import write_srt_from_segments
 
 
 class BurnPhase(Phase):
-    """烧录字幕 Phase。"""
-    
+    """生成 SRT + 烧录字幕 Phase。"""
+
     name = "burn"
-    version = "1.0.0"
-    
+    version = "2.0.0"
+
     def requires(self) -> list[str]:
-        """需要 mix.audio 和 subs.en_srt（或 subs.zh_srt）。"""
-        return ["mix.audio", "subs.en_srt"]
-    
+        """需要 mix.audio。SRT 从 DB cues 生成。"""
+        return ["mix.audio"]
+
     def provides(self) -> list[str]:
         """生成 burn.video。"""
         return ["burn.video"]
-    
+
     def run(
         self,
         ctx: RunContext,
@@ -33,18 +34,28 @@ class BurnPhase(Phase):
     ) -> PhaseResult:
         """
         执行 Burn Phase。
-        
+
         流程：
-        1. 读取混音音频和字幕
+        1. 从 DB cues 生成 en.srt
         2. 使用 ffmpeg 将字幕烧录到视频
         """
-        # 获取输入
+        store = ctx.store
+        episode_id = ctx.episode_id
+        workspace_path = Path(ctx.workspace)
+
+        if not store or not episode_id:
+            return PhaseResult(
+                status="failed",
+                error=ErrorInfo(
+                    type="ValueError",
+                    message="Burn requires DB store and episode_id.",
+                ),
+            )
+
+        # 获取混音音频
         mix_audio_artifact = inputs["mix.audio"]
-        mix_path = Path(ctx.workspace) / mix_audio_artifact.relpath
-        
-        en_srt_artifact = inputs["subs.en_srt"]
-        srt_path = Path(ctx.workspace) / en_srt_artifact.relpath
-        
+        mix_path = workspace_path / mix_audio_artifact.relpath
+
         if not mix_path.exists():
             return PhaseResult(
                 status="failed",
@@ -53,13 +64,32 @@ class BurnPhase(Phase):
                     message=f"Mix audio not found: {mix_path}",
                 ),
             )
-        
-        if not srt_path.exists():
+
+        # 从 DB cues 生成 en.srt
+        all_cues = store.get_cues(episode_id)
+        srt_segments = []
+        for cue in all_cues:
+            text_en = (cue.get("text_en") or "").strip()
+            if not text_en:
+                continue
+            srt_segments.append({
+                "start": cue["start_ms"] / 1000.0,
+                "end": cue["end_ms"] / 1000.0,
+                "en_text": text_en,
+            })
+        srt_segments.sort(key=lambda x: x["start"])
+
+        srt_path = workspace_path / "output" / "en.srt"
+        srt_path.parent.mkdir(parents=True, exist_ok=True)
+        write_srt_from_segments(srt_segments, str(srt_path), text_key="en_text")
+        info(f"Generated en.srt: {len(srt_segments)} segments")
+
+        if not srt_segments:
             return PhaseResult(
                 status="failed",
                 error=ErrorInfo(
-                    type="FileNotFoundError",
-                    message=f"Subtitle file not found: {srt_path}",
+                    type="ValueError",
+                    message="No translated cues found. Run translate phase first.",
                 ),
             )
         

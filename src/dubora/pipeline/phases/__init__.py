@@ -54,7 +54,7 @@ class _LazyPhase:
 
 GATES = [
     {"key": "source_review",      "after": "parse", "label": "校准"},
-    {"key": "translation_review", "after": "align", "label": "审阅"},
+    {"key": "translation_review", "after": "translate", "label": "审阅"},
 ]
 
 # after_phase -> gate 的快速查找表
@@ -68,7 +68,7 @@ GATE_AFTER = {g["after"]: g for g in GATES}
 STAGES = [
     {"key": "extract",     "label": "提取", "phases": ["extract"]},
     {"key": "recognize",   "label": "识别", "phases": ["asr", "parse"]},
-    {"key": "translate",   "label": "翻译", "phases": ["mt", "align"]},
+    {"key": "translate",   "label": "翻译", "phases": ["translate"]},
     {"key": "dub",         "label": "配音", "phases": ["tts", "mix"]},
     {"key": "compose",     "label": "合成", "phases": ["burn"]},
 ]
@@ -100,42 +100,36 @@ def build_phases(config=None) -> list:
         _LazyPhase(
             "dubora.pipeline.phases.parse", "ParsePhase",
             name="parse", version="2.0.0",
-            requires=["asr.asr_result"], provides=["dub.dub_manifest"],
+            requires=["asr.asr_result"], provides=[],
             label="生成字幕",
         ),
         # ← Gate: source_review (校准)
         _LazyPhase(
-            "dubora.pipeline.phases.mt", "MTPhase",
-            name="mt", version="1.1.0",
-            requires=["dub.dub_manifest"], provides=["mt.mt_input", "mt.mt_output"],
+            "dubora.pipeline.phases.translate", "TranslatePhase",
+            name="translate", version="3.0.0",
+            requires=["extract.audio"],
+            provides=[],
             label="翻译",
-        ),
-        _LazyPhase(
-            "dubora.pipeline.phases.align", "AlignPhase",
-            name="align", version="1.1.0",
-            requires=["mt.mt_output", "extract.audio"],
-            provides=["subs.en_srt", "dub.dub_manifest"],
-            label="对齐",
         ),
         # ← Gate: translation_review (审阅)
         _LazyPhase(
             "dubora.pipeline.phases.tts", "TTSPhase",
-            name="tts", version="1.1.0",
-            requires=["dub.dub_manifest"],
-            provides=["tts.segments_dir", "tts.segments_index", "tts.report", "tts.voice_assignment"],
+            name="tts", version="2.0.0",
+            requires=["extract.audio"],
+            provides=["tts.segments_dir"],
             label="语音合成",
         ),
         _LazyPhase(
             "dubora.pipeline.phases.mix", "MixPhase",
-            name="mix", version="2.1.0",
-            requires=["dub.dub_manifest", "tts.segments_dir", "tts.report"],
+            name="mix", version="3.0.0",
+            requires=["extract.audio", "tts.segments_dir"],
             provides=["mix.audio"],
             label="混音",
         ),
         _LazyPhase(
             "dubora.pipeline.phases.burn", "BurnPhase",
             name="burn", version="1.0.0",
-            requires=["mix.audio", "subs.en_srt"],
+            requires=["mix.audio"],
             provides=["burn.video"],
             label="烧字幕",
         ),

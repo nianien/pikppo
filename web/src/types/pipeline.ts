@@ -34,7 +34,7 @@ export interface PipelineStatusResponse {
 
 export const PHASE_NAMES = [
   'extract', 'asr', 'parse',
-  'mt', 'align',
+  'translate',
   'tts', 'mix', 'burn',
 ] as const
 

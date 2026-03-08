@@ -3,12 +3,8 @@ TTS Processor: 语音合成（唯一对外入口）
 
 职责：
 - 接收 Phase 层的输入（dub_manifest）
-- 通过 roles.json 解析声线分配
+- 通过 DB roles_map 解析声线分配
 - 合成语音并返回 ProcessorResult（不负责文件 IO）
-
-声线解析链路（单文件 roles.json）：
-  roles:    "PingAn" → voice_type
-  未标注 → default_roles[gender] → voice_type
 
 公共 API：
 - run_per_segment(): Timeline-First，输出 per-segment WAVs
@@ -17,7 +13,6 @@ from typing import Any, Dict, List, Optional
 
 from .._types import ProcessorResult
 from .volcengine import synthesize_tts_per_segment as synthesize_tts_per_segment_volcengine
-from dubora.pipeline.processors.voiceprint.speaker_to_role import resolve_voice_assignments
 from dubora.schema.dub_manifest import DubManifest
 from dubora.schema.tts_report import TTSReport
 
@@ -26,7 +21,7 @@ def run_per_segment(
     dub_manifest: DubManifest,
     segments_dir: str,
     *,
-    roles_path: Optional[str] = None,
+    roles_map: Dict[str, str],
     # VolcEngine parameters
     volcengine_app_id: Optional[str] = None,
     volcengine_access_key: Optional[str] = None,
@@ -44,35 +39,21 @@ def run_per_segment(
     Args:
         dub_manifest: DubManifest 对象
         segments_dir: 输出目录（per-segment WAVs）
-        roles_path: roles.json 路径
+        roles_map: {speaker_name: voice_type} from DB
     """
     from pathlib import Path
 
     temp_path = Path(temp_dir)
     temp_path.mkdir(parents=True, exist_ok=True)
 
-    # 1. 解析声线分配
-    if not roles_path or not Path(roles_path).exists():
-        raise FileNotFoundError(
-            f"roles.json not found: {roles_path}. "
-            "Configure roles/default_roles in roles.json."
-        )
-
-    speaker_genders: Dict[str, str] = {}
-    for utt in dub_manifest.utterances:
-        spk = utt.speaker
-        if spk and spk not in speaker_genders:
-            speaker_genders[spk] = utt.gender or "unknown"
-
-    role_map = resolve_voice_assignments(
-        roles_path,
-        speaker_genders=speaker_genders,
-    )
-    voice_assignment = {"speakers": {}}
-    for spk, info_dict in role_map.items():
-        voice_assignment["speakers"][spk] = {
-            "voice_type": info_dict["voice_type"],
-            "role_id": info_dict.get("role_id", ""),
+    # 1. Build voice assignment from roles_map (str-keyed for DubManifest.speaker matching)
+    voice_assignment: Dict[str, Any] = {"speakers": {}}
+    for role_id_str, voice_type in roles_map.items():
+        if not voice_type:
+            continue
+        voice_assignment["speakers"][role_id_str] = {
+            "voice_type": voice_type,
+            "role_id": role_id_str,
         }
 
     # 2. Per-segment TTS synthesis

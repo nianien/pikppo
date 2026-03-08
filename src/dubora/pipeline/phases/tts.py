@@ -1,41 +1,59 @@
 """
-TTS Phase: 语音合成（Timeline-First Architecture）
+TTS Phase: 语音合成（Timeline-First Architecture + 增量合成）
 
-输入: tts.manifest.json (from Align phase)
+支持增量模式：只合成 voice_hash 不匹配的 utterances。
+
+输入: extract.audio (for duration probing), enriched utterances from DB
 输出:
   - tts.segments_dir: Per-segment WAV files
   - tts.report: TTS synthesis report (JSON)
   - tts.voice_assignment: Speaker -> voice mapping
 
-声线分配通过 roles.json 解析（roles/default_roles 统一管理）。
+声线分配通过 DB roles 表解析。
 """
 import json
 import os
+import subprocess
 from pathlib import Path
 from typing import Dict
 
 from dubora.pipeline.core.phase import Phase
+from dubora.pipeline.core.store import _compute_voice_hash
 from dubora.pipeline.core.types import Artifact, ErrorInfo, PhaseResult, RunContext, ResolvedOutputs
 from dubora.pipeline.processors.tts import run_per_segment as tts_run_per_segment
-from dubora.schema.asr_model import AsrModel
-from dubora.schema.dub_manifest import dub_manifest_from_asr_model
+from dubora.schema.dub_manifest import dub_manifest_from_utterances, DubManifest, DubUtterance, TTSPolicy
 from dubora.schema.tts_report import tts_report_to_dict
 from dubora.utils.logger import info, warning
 
 
+def _probe_duration_ms(audio_path: str) -> int:
+    """Probe audio duration using ffprobe."""
+    result = subprocess.run(
+        ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+         "-of", "default=noprint_wrappers=1:nokey=1", audio_path],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"ffprobe failed: {result.stderr}")
+    duration_str = result.stdout.strip()
+    if duration_str == "N/A" or not duration_str:
+        raise RuntimeError(f"ffprobe returned invalid duration for {audio_path}")
+    return int(float(duration_str) * 1000)
+
+
 class TTSPhase(Phase):
-    """语音合成 Phase。"""
+    """语音合成 Phase（支持增量合成）。"""
 
     name = "tts"
-    version = "1.1.0"
+    version = "2.0.0"
 
     def requires(self) -> list[str]:
-        """需要 dub.dub_manifest（SSOT for dubbing）。"""
-        return ["dub.dub_manifest"]
+        """需要 extract.audio（用于 probe duration）。数据从 DB 读取。"""
+        return ["extract.audio"]
 
     def provides(self) -> list[str]:
-        """生成 per-segment WAVs, tts_report, voice_assignment。"""
-        return ["tts.segments_dir", "tts.segments_index", "tts.report", "tts.voice_assignment"]
+        """生成 per-segment WAVs。"""
+        return ["tts.segments_dir"]
 
     def run(
         self,
@@ -43,42 +61,36 @@ class TTSPhase(Phase):
         inputs: Dict[str, Artifact],
         outputs: ResolvedOutputs,
     ) -> PhaseResult:
-        """
-        执行 TTS Phase (Timeline-First Architecture)。
+        """执行 TTS Phase。增量模式下只合成 voice_hash 不匹配的 utterances。"""
+        workspace_path = Path(ctx.workspace)
+        store = ctx.store
+        episode_id = ctx.episode_id
 
-        流程：
-        1. 读取 tts.manifest.json (SSOT for dubbing)
-        2. 通过 roles.json 解析声线分配
-        3. TTS per-segment 合成 (VolcEngine)
-        4. 生成 tts_report.json
-        """
-        # 获取输入 (tts.manifest.json)
-        dub_manifest_artifact = inputs.get("dub.dub_manifest")
-        if not dub_manifest_artifact:
+        if not store or not episode_id:
             return PhaseResult(
                 status="failed",
                 error=ErrorInfo(
                     type="ValueError",
-                    message="dub.dub_manifest artifact not found. Make sure align phase completed successfully.",
+                    message="TTS requires DB store and episode_id. Ensure pipeline is running in DB mode.",
                 ),
             )
 
-        dub_manifest_path = Path(ctx.workspace) / dub_manifest_artifact.relpath
-        if not dub_manifest_path.exists():
-            return PhaseResult(
-                status="failed",
-                error=ErrorInfo(
-                    type="FileNotFoundError",
-                    message=f"Dub manifest file not found: {dub_manifest_path}",
-                ),
-            )
-
-        workspace_path = Path(ctx.workspace)
+        # Probe audio duration from extract.audio
+        audio_artifact = inputs.get("extract.audio")
+        audio_duration_ms = 0
+        if audio_artifact:
+            audio_path = workspace_path / audio_artifact.relpath
+            if audio_path.exists():
+                try:
+                    audio_duration_ms = _probe_duration_ms(str(audio_path))
+                    info(f"Probed audio duration: {audio_duration_ms}ms")
+                except RuntimeError as e:
+                    warning(f"Could not probe audio duration: {e}")
 
         # 获取配置
         phase_config = ctx.config.get("phases", {}).get("tts", {})
 
-        # VolcEngine 配置（支持从环境变量读取）
+        # VolcEngine 配置
         volcengine_app_id = (
             phase_config.get("volcengine_app_id") or
             ctx.config.get("volcengine_app_id") or
@@ -94,12 +106,9 @@ class TTSPhase(Phase):
         volcengine_resource_id = phase_config.get("volcengine_resource_id", ctx.config.get("volcengine_resource_id", "seed-tts-1.0"))
         volcengine_format = phase_config.get("volcengine_format", ctx.config.get("volcengine_format", "pcm"))
         volcengine_sample_rate = phase_config.get("volcengine_sample_rate", ctx.config.get("volcengine_sample_rate", 24000))
-
-        # 通用配置
         max_workers = phase_config.get("max_workers", ctx.config.get("tts_max_workers", 4))
         language = phase_config.get("language", ctx.config.get("azure_tts_language", "en-US"))
 
-        # 验证 VolcEngine 配置
         if not volcengine_app_id or not volcengine_access_key:
             return PhaseResult(
                 status="failed",
@@ -112,53 +121,64 @@ class TTSPhase(Phase):
             )
 
         try:
-            # 读取 dub.json (AsrModel) 并通过适配器转换为 DubManifest
-            with open(dub_manifest_path, "r", encoding="utf-8") as f:
-                asr_model = AsrModel.from_dict(json.load(f))
+            # Read all utterances from DB
+            all_utts = store.get_utterances(episode_id)
+            full_manifest = dub_manifest_from_utterances(all_utts, audio_duration_ms)
+            info(f"Loaded {len(all_utts)} utterances from DB, {len(full_manifest.utterances)} with translations, audio_duration_ms={full_manifest.audio_duration_ms}")
 
-            dub_manifest = dub_manifest_from_asr_model(asr_model)
-            info(f"Loaded dub manifest: {len(dub_manifest.utterances)} utterances, audio_duration_ms={dub_manifest.audio_duration_ms}")
+            # Find dirty utterances (voice_hash mismatch)
+            dirty_utts = store.get_dirty_utterances_for_tts(episode_id)
+            info(f"Incremental TTS: {len(dirty_utts)} dirty utterances (voice_hash mismatch)")
+
+            if not dirty_utts:
+                info("No dirty utterances, TTS is a no-op")
+                self._write_noop_outputs(outputs, workspace_path)
+                return PhaseResult(
+                    status="succeeded",
+                    outputs=["tts.segments_dir"],
+                    metrics={"total_segments": 0, "success_count": 0, "failed_count": 0, "incremental": True},
+                )
+
+            # Build DubManifest from dirty utterances only
+            dub_manifest = dub_manifest_from_utterances(dirty_utts, full_manifest.audio_duration_ms)
+            info(f"Built manifest from {len(dub_manifest.utterances)} dirty utterances for TTS")
 
             if not dub_manifest.utterances:
                 return PhaseResult(
                     status="failed",
-                    error=ErrorInfo(
-                        type="ValueError",
-                        message="No utterances found in tts.manifest.json.",
-                    ),
+                    error=ErrorInfo(type="ValueError", message="No utterances to synthesize."),
                 )
 
-            # 声线映射文件路径
-            dict_dir = workspace_path.parent / "dict"
-            roles_path = str(dict_dir / "roles.json")
+            # Voice assignment check (DB-backed, id-keyed)
+            ep = store.get_episode(episode_id)
+            drama_id = ep["drama_id"] if ep else 0
+            roles_map = store.get_roles_by_id(drama_id)       # {role_id_int: voice_type}
+            role_names = store.get_role_name_map(drama_id)     # {role_id_int: name}
 
-            # ── 前置检查：所有 speaker 必须有角色音色分配 ──
-            unassigned = self._check_voice_assignment(
-                asr_model, roles_path,
-            )
+            unassigned = self._check_voice_assignment(all_utts, roles_map, role_names)
             if unassigned:
                 names = ", ".join(sorted(unassigned))
                 return PhaseResult(
                     status="failed",
                     error=ErrorInfo(
                         type="VoiceAssignmentError",
-                        message=f"以下角色未分配音色，请在 Voice Casting 中完成分配后重试: {names}",
+                        message=f"\u4ee5\u4e0b\u89d2\u8272\u672a\u5206\u914d\u97f3\u8272\uff0c\u8bf7\u5728 Voice Casting \u4e2d\u5b8c\u6210\u5206\u914d\u540e\u91cd\u8bd5: {names}",
                     ),
                 )
 
-            # 输出路径
+            # TTS synthesis
             segments_dir = outputs.get("tts.segments_dir")
             segments_dir.mkdir(parents=True, exist_ok=True)
 
-            # 调用 Processor 层 (per-segment synthesis)
             temp_dir = str(workspace_path / ".cache" / "tts")
             Path(temp_dir).mkdir(parents=True, exist_ok=True)
 
-            episode_id = workspace_path.name
+            # Convert int-keyed roles_map to str-keyed for processor compatibility
+            str_roles_map = {str(k): v for k, v in roles_map.items()}
             result = tts_run_per_segment(
                 dub_manifest=dub_manifest,
                 segments_dir=str(segments_dir),
-                roles_path=roles_path,
+                roles_map=str_roles_map,
                 volcengine_app_id=volcengine_app_id,
                 volcengine_access_key=volcengine_access_key,
                 volcengine_resource_id=volcengine_resource_id,
@@ -169,30 +189,29 @@ class TTSPhase(Phase):
                 temp_dir=temp_dir,
             )
 
-            # 从 ProcessorResult 提取数据
             voice_assignment = result.data["voice_assignment"]
             tts_report = result.data["tts_report"]
 
-            # Check for failures
             if not tts_report.all_succeeded:
                 failed_segments = [s for s in tts_report.segments if s.error]
                 error_msgs = [f"{s.utt_id}: {s.error}" for s in failed_segments[:5]]
                 warning(f"TTS had {tts_report.failed_count} failures: {error_msgs}")
 
-            # Phase 层负责文件 IO：保存 voice_assignment.json
-            voice_assignment_path = outputs.get("tts.voice_assignment")
-            voice_assignment_path.parent.mkdir(parents=True, exist_ok=True)
-            with open(voice_assignment_path, "w", encoding="utf-8") as f:
+            # Save debug files
+            debug_dir = workspace_path / "derived"
+            debug_dir.mkdir(parents=True, exist_ok=True)
+
+            va_path = debug_dir / "voice-assignment.json"
+            with open(va_path, "w", encoding="utf-8") as f:
                 json.dump(voice_assignment, f, indent=2, ensure_ascii=False)
 
-            # 保存 tts_report.json
-            report_path = outputs.get("tts.report")
+            report_path = debug_dir / "tts" / "report.json"
             report_path.parent.mkdir(parents=True, exist_ok=True)
             with open(report_path, "w", encoding="utf-8") as f:
                 json.dump(tts_report_to_dict(tts_report), f, indent=2, ensure_ascii=False)
-            info(f"Saved TTS report: {tts_report.total_segments} segments, {tts_report.success_count} succeeded")
+            info(f"Debug: saved TTS report + voice assignment")
 
-            # 生成 segments.json 索引（下游 Mix 消费的干净合约）
+            # Generate segments.json index
             from dubora.pipeline.core.fingerprints import hash_file
             segments_index = {}
             for seg in tts_report.segments:
@@ -211,13 +230,45 @@ class TTSPhase(Phase):
                     "rate": seg.rate,
                     "hash": hash_file(seg_file) if seg_file.exists() else "",
                 }
-            segments_index_path = outputs.get("tts.segments_index")
+            segments_index_path = debug_dir / "tts" / "segments.json"
             segments_index_path.parent.mkdir(parents=True, exist_ok=True)
             with open(segments_index_path, "w", encoding="utf-8") as f:
                 json.dump(segments_index, f, indent=2, ensure_ascii=False)
-            info(f"Saved segments index: {len(segments_index)} entries")
+            info(f"Debug: saved segments index ({len(segments_index)} entries)")
 
-            # 清理临时目录
+            # Update DB: write TTS results + voice_hash
+            utt_by_utt_id = {}
+            for db_utt in dirty_utts:
+                uid = f"utt_{db_utt['id']:08x}" if isinstance(db_utt.get("id"), int) else str(db_utt["id"])
+                utt_by_utt_id[uid] = db_utt
+
+            for seg in tts_report.segments:
+                db_utt = utt_by_utt_id.get(seg.utt_id)
+                if not db_utt:
+                    continue
+                if seg.error:
+                    store.update_utterance(
+                        db_utt["id"],
+                        tts_error=seg.error,
+                        tts_duration_ms=0,
+                        tts_rate=0.0,
+                    )
+                else:
+                    store.update_utterance(
+                        db_utt["id"],
+                        audio_path=str(Path(seg.output_path)),
+                        tts_duration_ms=seg.final_ms,
+                        tts_rate=seg.rate,
+                        tts_error=None,
+                        voice_hash=_compute_voice_hash(
+                            db_utt.get("text_en", ""),
+                            db_utt.get("speaker", ""),
+                            db_utt.get("emotion", ""),
+                        ),
+                    )
+            info(f"Updated TTS results for {len(tts_report.segments)} utterances in DB")
+
+            # Clean temp dir
             temp_path = Path(temp_dir)
             if temp_path.exists():
                 for item in temp_path.iterdir():
@@ -226,15 +277,29 @@ class TTSPhase(Phase):
 
             info(f"TTS synthesis completed: {tts_report.success_count}/{tts_report.total_segments} segments")
 
-            # 返回 PhaseResult
+            # Drift score check
+            drift_warnings = []
+            for utt in all_utts:
+                physical_ms = utt["end_ms"] - utt["start_ms"]
+                tts_ms = utt.get("tts_duration_ms") or 0
+                if physical_ms > 0 and tts_ms > 0:
+                    drift = tts_ms / physical_ms
+                    if drift > 1.1:
+                        spk = role_names.get(int(utt.get("speaker", 0)), str(utt.get("speaker", "")))
+                        drift_warnings.append(f"utt {utt['id']} ({spk}): drift={drift:.2f}")
+            if drift_warnings:
+                for w in drift_warnings:
+                    warning(f"Drift: {w}")
+
             return PhaseResult(
                 status="succeeded",
-                outputs=["tts.segments_dir", "tts.segments_index", "tts.report", "tts.voice_assignment"],
+                outputs=["tts.segments_dir"],
                 metrics={
                     "total_segments": tts_report.total_segments,
                     "success_count": tts_report.success_count,
                     "failed_count": tts_report.failed_count,
-                    "audio_duration_ms": dub_manifest.audio_duration_ms,
+                    "audio_duration_ms": full_manifest.audio_duration_ms,
+                    "drift_warnings": len(drift_warnings),
                 },
             )
 
@@ -249,24 +314,25 @@ class TTSPhase(Phase):
                 ),
             )
 
+    def _write_noop_outputs(self, outputs, workspace_path):
+        """Write minimal output files for no-op case."""
+        segments_dir = outputs.get("tts.segments_dir")
+        segments_dir.mkdir(parents=True, exist_ok=True)
+
     def _check_voice_assignment(
-        self, asr_model: AsrModel, roles_path: str,
+        self, utts: list[dict], roles_map: dict[int, str], role_names: dict[int, str],
     ) -> set[str]:
-        """检查所有 speaker 是否已在 roles.json 中分配音色，返回未分配的 speaker 集合。"""
-        # 收集所有 speaker
-        speakers = {seg.speaker for seg in asr_model.segments if seg.speaker}
-
-        # 加载 roles.json
-        roles_file = Path(roles_path)
-        if not roles_file.exists():
-            return speakers  # 文件不存在，全部未分配
-
-        with open(roles_file, "r", encoding="utf-8") as f:
-            data = json.load(f)
-
-        roles = data.get("roles", {})
-        if isinstance(roles, list):
-            roles = {e["role_id"]: e["voice_type"] for e in roles if e.get("role_id")}
-
-        # speaker 不在 roles 中，或 voice_type 为空 → 未分配
-        return {spk for spk in speakers if not roles.get(spk)}
+        """检查所有 speaker(role_id) 是否已在 DB roles 中分配音色。返回未分配角色的名字。"""
+        speakers = set()
+        for u in utts:
+            spk = u.get("speaker")
+            if spk:
+                try:
+                    speakers.add(int(spk))
+                except (ValueError, TypeError):
+                    pass
+        unassigned = set()
+        for spk_id in speakers:
+            if not roles_map.get(spk_id):
+                unassigned.add(role_names.get(spk_id, str(spk_id)))
+        return unassigned

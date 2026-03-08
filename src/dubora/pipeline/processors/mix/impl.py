@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Optional, List
 
 from dubora.schema.dub_manifest import DubManifest
-from dubora.schema.tts_report import TTSReport, TTSSegmentStatus
+from dubora.schema.tts_report import TTSReport, TTSSegmentStatus  # TTSReport now optional
 from dubora.utils.logger import info
 
 
@@ -189,7 +189,7 @@ def mix_audio(
 
 def mix_timeline(
     dub_manifest: DubManifest,
-    tts_report: TTSReport,
+    tts_report: Optional[TTSReport],
     segments_dir: str,
     video_path: str,
     *,
@@ -264,14 +264,15 @@ def mix_timeline(
             info(f"Segment not found: {seg_path}, skipping")
             continue
 
-        # Check if segment was successfully synthesized
-        seg_report = next(
-            (s for s in tts_report.segments if s.utt_id == utt_id),
-            None
-        )
-        if seg_report and seg_report.status == TTSSegmentStatus.FAILED:
-            info(f"Segment {utt_id} failed synthesis, skipping")
-            continue
+        # Check if segment was successfully synthesized (if report available)
+        if tts_report:
+            seg_report = next(
+                (s for s in tts_report.segments if s.utt_id == utt_id),
+                None
+            )
+            if seg_report and seg_report.status == TTSSegmentStatus.FAILED:
+                info(f"Segment {utt_id} failed synthesis, skipping")
+                continue
 
         segment_info.append((str(seg_path), start_ms, utt_id))
 

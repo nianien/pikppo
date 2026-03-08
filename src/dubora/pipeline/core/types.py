@@ -21,7 +21,7 @@ class Artifact:
     - 绝对路径只在运行时由 runner 使用 (workspace / relpath)
     """
 
-    key: str  # e.g. "subs.subtitle_model"
+    key: str  # e.g. "extract.audio"
     relpath: str  # workspace-relative path, e.g. "subs/zh.srt"
     kind: Literal["json", "srt", "wav", "mp4", "txt", "bin", "dir"]
     fingerprint: str  # e.g. "sha256:..."
@@ -58,6 +58,8 @@ class RunContext:
     job_id: str
     workspace: str
     config: Dict[str, Any]   # global + phases config
+    store: Any = None        # PipelineStore (optional, for utterance CRUD)
+    episode_id: Optional[int] = None  # DB episode id
 
 
 @dataclass(frozen=True)

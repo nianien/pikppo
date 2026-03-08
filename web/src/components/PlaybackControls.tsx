@@ -4,7 +4,10 @@ import { useEditorStore } from '../stores/editor-store'
 import { msToDisplay } from '../utils/time'
 
 export function PlaybackControls() {
-  const { currentTime, duration, isPlaying, setCurrentTime } = useEditorStore()
+  const currentTime = useEditorStore(s => s.currentTime)
+  const duration = useEditorStore(s => s.duration)
+  const isPlaying = useEditorStore(s => s.isPlaying)
+  const setCurrentTime = useEditorStore(s => s.setCurrentTime)
   const seekBarRef = useRef<HTMLDivElement>(null)
 
   const togglePlay = useCallback(() => {

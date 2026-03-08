@@ -232,7 +232,7 @@ def resolve_artifact_path(key: str, workspace: Path) -> Path:
     Shared by Manifest and DbManifest.
 
     Args:
-        key: artifact key（如 "subs.subtitle_model"）
+        key: artifact key（如 "extract.audio"）
         workspace: workspace 根目录
 
     Returns:
@@ -259,32 +259,12 @@ def resolve_artifact_path(key: str, workspace: Path) -> Path:
         },
         "asr": {
             "asr_result": "input/asr-result.json",
-            "asr_model": "state/dub.json",
         },
         "subs": {
-            "subtitle_model": "state/subtitle.model.json",
-            "subtitle_align": "derived/subtitle.align.json",
-            "zh_srt": "output/zh.srt",
             "en_srt": "output/en.srt",
         },
-        "mt": {
-            "mt_input": "derived/mt/input.jsonl",
-            "mt_output": "derived/mt/output.jsonl",
-        },
         "tts": {
-            "audio": "derived/{episode_stem}-tts.wav",
-            "voice_assignment": "derived/voice-assignment.json",
-            "sentence": "derived/tts/sentence.json",
             "segments_dir": "derived/tts/segments",
-            "segments_index": "derived/tts/segments.json",
-            "report": "derived/tts/report.json",
-        },
-        "voiceprint": {
-            "speaker_map": "derived/voiceprint/speaker_map.json",
-            "reference_clips": "derived/voiceprint/refs",
-        },
-        "dub": {
-            "dub_manifest": "state/dub.json",
         },
         "mix": {
             "audio": "derived/{episode_stem}-mix.wav",

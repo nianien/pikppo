@@ -4,14 +4,22 @@ import { useModelStore } from '../stores/model-store'
 import { useEditorStore } from '../stores/editor-store'
 import { deriveSpeakers } from '../utils/derive-speakers'
 import { useUndoableOps } from './useUndoRedo'
-import type { AsrSegment } from '../types/asr-model'
+import type { Cue } from '../types/asr-model'
+
+/** Negative temp IDs for new cues — DB assigns real IDs on save */
+let _nextTempId = -1
 
 export function useKeyboard() {
-  const model = useModelStore(s => s.model)
-  const updateSegment = useModelStore(s => s.updateSegment)
-  const saveModel = useModelStore(s => s.saveModel)
-  const { selectedSegmentId, selectSegment, setCurrentTime, currentTime, undo, redo } = useEditorStore()
-  const { splitSegment, mergeWithNext, insertSegment, deleteSegment } = useUndoableOps()
+  const cues = useModelStore(s => s.cues)
+  const updateCue = useModelStore(s => s.updateCue)
+  const saveCues = useModelStore(s => s.saveCues)
+  const selectedCueId = useEditorStore(s => s.selectedCueId)
+  const selectCue = useEditorStore(s => s.selectCue)
+  const setCurrentTime = useEditorStore(s => s.setCurrentTime)
+  const currentTime = useEditorStore(s => s.currentTime)
+  const undo = useEditorStore(s => s.undo)
+  const redo = useEditorStore(s => s.redo)
+  const { splitCue, mergeWithNext, insertCue, deleteCue } = useUndoableOps()
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
@@ -21,7 +29,7 @@ export function useKeyboard() {
       // Ctrl+S: save (always active)
       if ((e.ctrlKey || e.metaKey) && e.key === 's') {
         e.preventDefault()
-        saveModel()
+        saveCues()
         return
       }
 
@@ -42,9 +50,8 @@ export function useKeyboard() {
       // Skip single-key shortcuts when editing text
       if (isInput) return
 
-      const segments = model?.segments ?? []
-      const speakerList = deriveSpeakers(segments)
-      const selectedIdx = segments.findIndex(s => s.id === selectedSegmentId)
+      const speakerList = deriveSpeakers(cues)
+      const selectedIdx = cues.findIndex(c => c.id === selectedCueId)
 
       // Space: play/pause
       if (e.key === ' ') {
@@ -57,13 +64,13 @@ export function useKeyboard() {
         return
       }
 
-      // Enter: jump to next segment + play
+      // Enter: jump to next cue + play
       if (e.key === 'Enter') {
         e.preventDefault()
         const nextIdx = selectedIdx + 1
-        if (nextIdx < segments.length) {
-          const next = segments[nextIdx]
-          selectSegment(next.id)
+        if (nextIdx < cues.length) {
+          const next = cues[nextIdx]
+          selectCue(next.id)
           setCurrentTime(Math.max(0, next.start_ms - 500))
           const video = document.querySelector('video')
           if (video) {
@@ -74,115 +81,115 @@ export function useKeyboard() {
         return
       }
 
-      // Shift+Alt+Arrow: snap segment edge to cursor position
+      // Shift+Alt+Arrow: snap cue edge to cursor position
       if (e.shiftKey && e.altKey && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
         e.preventDefault()
         const video = document.querySelector('video')
         if (video && !video.paused) video.pause()
-        if (!selectedSegmentId || selectedIdx < 0) return
-        const seg = segments[selectedIdx]
-        const midMs = (seg.start_ms + seg.end_ms) / 2
+        if (selectedCueId == null || selectedIdx < 0) return
+        const cue = cues[selectedIdx]
+        const midMs = (cue.start_ms + cue.end_ms) / 2
         const editStart = currentTime <= midMs
         if (editStart) {
-          updateSegment(seg.id, {
-            start_ms: Math.max(0, Math.min(currentTime, seg.end_ms - 30)),
+          updateCue(cue.id, {
+            start_ms: Math.max(0, Math.min(currentTime, cue.end_ms - 30)),
           })
         } else {
-          updateSegment(seg.id, {
-            end_ms: Math.max(seg.start_ms + 30, currentTime),
+          updateCue(cue.id, {
+            end_ms: Math.max(cue.start_ms + 30, currentTime),
           })
         }
         return
       }
 
-      // Alt+Arrow: fine-tune segment edge ±30ms (cursor position decides start or end)
+      // Alt+Arrow: fine-tune cue edge ±30ms (cursor position decides start or end)
       if (e.altKey && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
         e.preventDefault()
         const video = document.querySelector('video')
         if (video && !video.paused) video.pause()
-        if (!selectedSegmentId || selectedIdx < 0) return
-        const seg = segments[selectedIdx]
-        const midMs = (seg.start_ms + seg.end_ms) / 2
+        if (selectedCueId == null || selectedIdx < 0) return
+        const cue = cues[selectedIdx]
+        const midMs = (cue.start_ms + cue.end_ms) / 2
         const editStart = currentTime <= midMs
         const direction = e.key === 'ArrowLeft' ? -1 : 1
         if (editStart) {
-          updateSegment(seg.id, {
-            start_ms: Math.max(0, Math.min(seg.start_ms + direction * 30, seg.end_ms - 30)),
+          updateCue(cue.id, {
+            start_ms: Math.max(0, Math.min(cue.start_ms + direction * 30, cue.end_ms - 30)),
           })
         } else {
-          updateSegment(seg.id, {
-            end_ms: Math.max(seg.start_ms + 30, seg.end_ms + direction * 30),
+          updateCue(cue.id, {
+            end_ms: Math.max(cue.start_ms + 30, cue.end_ms + direction * 30),
           })
         }
         return
       }
 
-      // Ctrl+B: split segment at current playback time (undoable)
+      // Ctrl+B: split cue at current playback time (undoable)
       if ((e.ctrlKey || e.metaKey) && e.key === 'b') {
         e.preventDefault()
-        if (!selectedSegmentId || selectedIdx < 0) return
-        splitSegment(selectedSegmentId, currentTime)
+        if (selectedCueId == null || selectedIdx < 0) return
+        splitCue(selectedCueId, currentTime)
         return
       }
 
-      // Ctrl+M: merge with next segment (undoable)
+      // Ctrl+M: merge with next cue (undoable)
       if ((e.ctrlKey || e.metaKey) && e.key === 'm') {
         e.preventDefault()
-        if (selectedIdx < 0 || selectedIdx >= segments.length - 1) return
-        mergeWithNext(selectedSegmentId!)
+        if (selectedIdx < 0 || selectedIdx >= cues.length - 1) return
+        mergeWithNext(selectedCueId!)
         return
       }
 
-      // Ctrl+I: insert empty segment at current playback position (undoable)
+      // Ctrl+I: insert empty cue at current playback position (undoable)
       if ((e.ctrlKey || e.metaKey) && e.key === 'i') {
         e.preventDefault()
         const insertMs = currentTime
-        let insertIdx = segments.length
-        for (let i = 0; i < segments.length; i++) {
-          if (segments[i].start_ms > insertMs) { insertIdx = i; break }
+        let insertIdx = cues.length
+        for (let i = 0; i < cues.length; i++) {
+          if (cues[i].start_ms > insertMs) { insertIdx = i; break }
         }
-        const prev = insertIdx > 0 ? segments[insertIdx - 1] : null
-        const next = insertIdx < segments.length ? segments[insertIdx] : null
+        const prev = insertIdx > 0 ? cues[insertIdx - 1] : null
+        const next = insertIdx < cues.length ? cues[insertIdx] : null
         const newStart = prev ? Math.max(insertMs, prev.end_ms) : insertMs
         const newEnd = next ? Math.min(newStart + 1000, next.start_ms) : newStart + 1000
-        const refSeg = prev || next
+        const refCue = prev || next
 
-        const newSeg: AsrSegment = {
-          id: `seg_${Math.random().toString(16).slice(2, 10)}`,
+        const newCue: Cue = {
+          id: _nextTempId--,
+          episode_id: 0,
+          text: '',
           start_ms: newStart,
           end_ms: Math.max(newEnd, newStart + 100),
-          text: '',
-          text_en: '',
-          speaker: refSeg?.speaker ?? '0',
+          speaker: refCue?.speaker ?? 0,
           emotion: 'neutral',
-          type: 'speech',
-          flags: { overlap: false, needs_review: false },
+          kind: 'speech',
+          cv: 1,
         }
 
-        insertSegment(insertIdx, newSeg)
-        selectSegment(newSeg.id)
+        insertCue(insertIdx, newCue)
+        selectCue(newCue.id)
         return
       }
 
-      // Delete/Backspace: delete selected segment (undoable)
+      // Delete/Backspace: delete selected cue (undoable)
       if (e.key === 'Delete' || e.key === 'Backspace') {
         e.preventDefault()
         if (selectedIdx < 0) return
-        deleteSegment(selectedSegmentId!)
-        // Select adjacent segment
-        const remaining = segments.filter(s => s.id !== selectedSegmentId)
+        deleteCue(selectedCueId!)
+        // Select adjacent cue
+        const remaining = cues.filter(c => c.id !== selectedCueId)
         if (remaining.length > 0) {
           const newIdx = Math.min(selectedIdx, remaining.length - 1)
-          selectSegment(remaining[newIdx].id)
+          selectCue(remaining[newIdx].id)
         }
         return
       }
 
       // 1-9: quick speaker switch
-      if (/^[1-9]$/.test(e.key) && selectedSegmentId) {
+      if (/^[1-9]$/.test(e.key) && selectedCueId != null) {
         const spkIdx = parseInt(e.key) - 1
         if (spkIdx < speakerList.length) {
-          updateSegment(selectedSegmentId, { speaker: speakerList[spkIdx] })
+          updateCue(selectedCueId, { speaker: speakerList[spkIdx] })
         }
         return
       }
@@ -191,8 +198,8 @@ export function useKeyboard() {
       const emotionMap: Record<string, string> = {
         n: 'neutral', a: 'angry', s: 'sad', e: 'surprised', i: 'happy', f: 'fearful',
       }
-      if (e.key.toLowerCase() in emotionMap && selectedSegmentId) {
-        updateSegment(selectedSegmentId, { emotion: emotionMap[e.key.toLowerCase()] })
+      if (e.key.toLowerCase() in emotionMap && selectedCueId != null) {
+        updateCue(selectedCueId, { emotion: emotionMap[e.key.toLowerCase()] })
         return
       }
 
@@ -210,18 +217,18 @@ export function useKeyboard() {
         return
       }
 
-      // Arrow Up/Down: navigate segments
+      // Arrow Up/Down: navigate cues
       if (e.key === 'ArrowUp' && selectedIdx > 0) {
         e.preventDefault()
-        const prev = segments[selectedIdx - 1]
-        selectSegment(prev.id)
+        const prev = cues[selectedIdx - 1]
+        selectCue(prev.id)
         setCurrentTime(Math.max(0, prev.start_ms - 500))
         return
       }
-      if (e.key === 'ArrowDown' && selectedIdx < segments.length - 1) {
+      if (e.key === 'ArrowDown' && selectedIdx < cues.length - 1) {
         e.preventDefault()
-        const next = segments[selectedIdx + 1]
-        selectSegment(next.id)
+        const next = cues[selectedIdx + 1]
+        selectCue(next.id)
         setCurrentTime(Math.max(0, next.start_ms - 500))
         return
       }
@@ -229,5 +236,5 @@ export function useKeyboard() {
 
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
-  }, [model, selectedSegmentId, currentTime, selectSegment, setCurrentTime, updateSegment, saveModel, undo, redo, splitSegment, mergeWithNext, insertSegment, deleteSegment])
+  }, [cues, selectedCueId, currentTime, selectCue, setCurrentTime, updateCue, saveCues, undo, redo, splitCue, mergeWithNext, insertCue, deleteCue])
 }

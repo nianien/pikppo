@@ -24,12 +24,16 @@ function episodeLabel(ep: Episode): string {
 }
 
 export default function App() {
-  const {
-    episodes, currentDrama, currentEpisode,
-    loading, error, dirty,
-    loadEpisodes, selectEpisode, saveModel,
-    loadEmotions,
-  } = useModelStore()
+  const episodes = useModelStore(s => s.episodes)
+  const currentDrama = useModelStore(s => s.currentDrama)
+  const currentEpisode = useModelStore(s => s.currentEpisode)
+  const loading = useModelStore(s => s.loading)
+  const error = useModelStore(s => s.error)
+  const dirty = useModelStore(s => s.dirty)
+  const loadEpisodes = useModelStore(s => s.loadEpisodes)
+  const selectEpisode = useModelStore(s => s.selectEpisode)
+  const saveCues = useModelStore(s => s.saveCues)
+  const loadEmotions = useModelStore(s => s.loadEmotions)
 
   const [view, setView] = useState<'ide' | 'voice-preview'>('ide')
 
@@ -134,7 +138,7 @@ export default function App() {
             </button>
 
             <button
-              onClick={saveModel}
+              onClick={saveCues}
               disabled={!dirty || loading}
               className="px-3 py-1 text-xs rounded bg-blue-600 hover:bg-blue-500 disabled:opacity-40 disabled:cursor-not-allowed"
             >

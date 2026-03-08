@@ -3,6 +3,7 @@ import { create } from 'zustand'
 import type { PhaseStatus, GateStatus, StageInfo, PipelineStatusResponse } from '../types/pipeline'
 import { PHASE_NAMES } from '../types/pipeline'
 import { fetchJson } from '../utils/api'
+import { useModelStore } from './model-store'
 
 // ---- Action derivation ----
 
@@ -56,6 +57,7 @@ interface PipelineState {
   runPipeline: (drama: string, ep: string, fromPhase?: string) => Promise<void>
   passGate: (drama: string, ep: string, gateKey: string) => Promise<void>
   executeAction: (drama: string, ep: string) => Promise<void>
+  resetGate: (drama: string, ep: string, gateKey: string) => Promise<void>
   _connectStream: (drama: string, ep: string) => Promise<void>
   cancelRun: () => void
   clearLogs: () => void
@@ -74,11 +76,11 @@ const defaultPhases: PhaseStatus[] = PHASE_NAMES.map(name => ({
 
 const defaultGates: GateStatus[] = []
 const defaultStages: StageInfo[] = [
-  { key: 'extract',   label: '提取', phases: ['extract'],        status: 'pending' },
-  { key: 'recognize', label: '识别', phases: ['asr', 'parse'], status: 'pending' },
-  { key: 'translate', label: '翻译', phases: ['mt', 'align'],    status: 'pending' },
-  { key: 'dub',       label: '配音', phases: ['tts', 'mix'],     status: 'pending' },
-  { key: 'compose',   label: '合成', phases: ['burn'],           status: 'pending' },
+  { key: 'extract',   label: '提取', phases: ['extract'],              status: 'pending' },
+  { key: 'recognize', label: '识别', phases: ['asr', 'parse'],       status: 'pending' },
+  { key: 'translate', label: '翻译', phases: ['translate'],            status: 'pending' },
+  { key: 'dub',       label: '配音', phases: ['tts', 'mix'],           status: 'pending' },
+  { key: 'compose',   label: '合成', phases: ['burn'],                status: 'pending' },
 ]
 
 // AbortController for current SSE connection
@@ -88,6 +90,14 @@ let _currentDrama = ''
 let _currentEp = ''
 // Polling timer for auto-refresh
 let _pollTimer: ReturnType<typeof setInterval> | null = null
+
+/** Reload all model data after pipeline events */
+function _reloadModelData(drama: string, ep: string) {
+  const ms = useModelStore.getState()
+  if (ms.currentDrama === drama && ms.currentEpisode === ep) {
+    ms.loadCues(drama, ep)
+  }
+}
 
 export const usePipelineStore = create<PipelineState>((set, get) => ({
   phases: defaultPhases,
@@ -234,6 +244,22 @@ export const usePipelineStore = create<PipelineState>((set, get) => ({
     }
   },
 
+  resetGate: async (drama, ep, gateKey) => {
+    try {
+      const res = await fetch(
+        `/api/episodes/${encodeURIComponent(drama)}/${encodeURIComponent(ep)}/pipeline/gate/${encodeURIComponent(gateKey)}/reset`,
+        { method: 'POST' },
+      )
+      if (!res.ok) {
+        const text = await res.text()
+        set({ runError: `API ${res.status}: ${text}` })
+      }
+    } catch (err) {
+      set({ runError: (err as Error).message })
+    }
+    await get()._fetchStatus(drama, ep)
+  },
+
   _connectStream: async (drama, ep) => {
     _abortController = new AbortController()
     const { signal } = _abortController
@@ -284,6 +310,7 @@ export const usePipelineStore = create<PipelineState>((set, get) => ({
 
               if (currentEvent === 'gate_awaiting') {
                 await get().loadStatus(drama, ep)
+                _reloadModelData(drama, ep)
                 set({ isRunning: false })
                 return
               }
@@ -295,6 +322,7 @@ export const usePipelineStore = create<PipelineState>((set, get) => ({
                 }
                 set({ isRunning: false })
                 await get().loadStatus(drama, ep)
+                _reloadModelData(drama, ep)
                 return
               }
 

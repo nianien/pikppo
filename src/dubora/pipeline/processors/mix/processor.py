@@ -91,7 +91,7 @@ def run(
 
 def run_timeline(
     dub_manifest: DubManifest,
-    tts_report: TTSReport,
+    tts_report: Optional[TTSReport],
     segments_dir: str,
     video_path: str,
     *,
@@ -171,6 +171,6 @@ def run_timeline(
         metrics={
             "target_lufs": target_lufs,
             "true_peak": true_peak,
-            "segments_count": len(tts_report.segments),
+            "segments_count": len(tts_report.segments) if tts_report else len(dub_manifest.utterances),
         },
     )

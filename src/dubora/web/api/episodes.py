@@ -11,15 +11,15 @@ from dubora.pipeline.core.store import PipelineStore
 router = APIRouter()
 
 
-def _get_store(videos_dir: Path) -> PipelineStore:
-    return PipelineStore(videos_dir / "pipeline.db")
+def _get_store(db_path: Path) -> PipelineStore:
+    return PipelineStore(db_path)
 
 
 @router.get("/dramas")
 async def list_dramas(request: Request) -> List[dict]:
     """Return all dramas from DB."""
     videos_dir: Path = request.app.state.videos_dir
-    store = _get_store(videos_dir)
+    store = _get_store(request.app.state.db_path)
     rows = store._conn.execute(
         "SELECT id, name, synopsis FROM dramas ORDER BY id",
     ).fetchall()
@@ -42,13 +42,12 @@ async def list_episodes(request: Request) -> List[dict]:
         "status": "not_started",
         "has_asr_result": true,
         "has_asr_model": false,
-        "has_subtitle_model": false,
         "video_file": "家里家外/5.mp4"
       }
     ]
     """
     videos_dir: Path = request.app.state.videos_dir
-    store = _get_store(videos_dir)
+    store = _get_store(request.app.state.db_path)
 
     rows = store._conn.execute(
         """SELECT e.id, e.name, e.path, e.status, e.drama_id,
@@ -61,12 +60,18 @@ async def list_episodes(request: Request) -> List[dict]:
     # Batch-query output artifacts (dubbed video + subtitles)
     artifact_rows = store._conn.execute(
         """SELECT episode_id, key, relpath FROM artifacts
-           WHERE key IN ('burn.video', 'subs.en_srt', 'subs.zh_srt')""",
+           WHERE key IN ('burn.video')""",
     ).fetchall()
     # episode_id → {key: relpath}
     artifact_map: dict[int, dict[str, str]] = {}
     for ar in artifact_rows:
         artifact_map.setdefault(ar["episode_id"], {})[ar["key"]] = ar["relpath"]
+
+    # Batch-query which episodes have SRC cues in DB
+    cue_rows = store._conn.execute(
+        "SELECT DISTINCT episode_id FROM cues",
+    ).fetchall()
+    episodes_with_cues: set[int] = {r["episode_id"] for r in cue_rows}
 
     episodes = []
     for r in rows:
@@ -77,17 +82,14 @@ async def list_episodes(request: Request) -> List[dict]:
 
         has_asr_result = False
         has_asr_model = False
-        has_subtitle_model = False
         video_file = ""
         dubbed_video = ""
         subtitle_file = ""
 
         if workdir:
             input_dir = workdir / "input"
-            state_dir = workdir / "state"
             has_asr_result = input_dir.is_dir() and (input_dir / "asr-result.json").is_file()
-            has_asr_model = state_dir.is_dir() and (state_dir / "dub.json").is_file()
-            has_subtitle_model = state_dir.is_dir() and (state_dir / "subtitle.model.json").is_file()
+            has_asr_model = ep_id in episodes_with_cues
 
             # Check dubbed output artifacts from DB
             ep_artifacts = artifact_map.get(ep_id, {})
@@ -95,10 +97,9 @@ async def list_episodes(request: Request) -> List[dict]:
                 dubbed_path = workdir / ep_artifacts["burn.video"]
                 if dubbed_path.is_file():
                     dubbed_video = str(dubbed_path)
-            if "subs.en_srt" in ep_artifacts:
-                srt_path = workdir / ep_artifacts["subs.en_srt"]
-                if srt_path.is_file():
-                    subtitle_file = str(srt_path)
+            srt_path = workdir / "output" / "en.srt"
+            if srt_path.is_file():
+                subtitle_file = str(srt_path)
 
         if video_path and video_path.is_file():
             video_file = f"{r['drama_name']}/{video_path.name}"
@@ -113,7 +114,6 @@ async def list_episodes(request: Request) -> List[dict]:
             "video_file": video_file,
             "has_asr_result": has_asr_result,
             "has_asr_model": has_asr_model,
-            "has_subtitle_model": has_subtitle_model,
             "dubbed_video": dubbed_video,
             "subtitle_file": subtitle_file,
         })

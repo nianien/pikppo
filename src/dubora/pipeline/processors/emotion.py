@@ -66,7 +66,7 @@ def run(
     """执行情绪修正。
 
     Args:
-        segments: 当前 dub.json 中的 segments
+        segments: AsrSegment 列表
         translate_fn: LLM 调用函数（prompt -> response_text）
 
     Returns:

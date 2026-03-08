@@ -6,7 +6,7 @@ import { useEditorStore } from '../stores/editor-store'
  * Hook to get a seekTo function that syncs video + store.
  */
 export function usePlayback() {
-  const { setCurrentTime } = useEditorStore()
+  const setCurrentTime = useEditorStore(s => s.setCurrentTime)
 
   const seekTo = useCallback((ms: number) => {
     const video = document.querySelector('video')

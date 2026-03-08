@@ -20,7 +20,7 @@ class Phase(ABC):
         返回该 Phase 需要的 artifact keys（从 manifest.artifacts 获取）。
         
         Returns:
-            artifact keys 列表，例如 ["subs.subtitle_model"]
+            artifact keys 列表，例如 ["extract.audio"]
         """
         pass
 
@@ -28,9 +28,9 @@ class Phase(ABC):
     def provides(self) -> List[str]:
         """
         返回该 Phase 将生成的 artifact keys。
-        
+
         Returns:
-            artifact keys 列表，例如 ["translate.context", "subs.subtitle_model"]
+            artifact keys 列表，例如 ["tts.segments_dir", "mix.audio"]
         """
         pass
 

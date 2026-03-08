@@ -11,10 +11,10 @@ export function PlayerEngine() {
   const videoFile = useModelStore(s => s.videoFile)
   const currentDrama = useModelStore(s => s.currentDrama)
   const currentEpisode = useModelStore(s => s.currentEpisode)
-  const model = useModelStore(s => s.model)
+  const cues = useModelStore(s => s.cues)
+  const loaded = useModelStore(s => s.loaded)
   const currentTime = useEditorStore(s => s.currentTime)
   const stages = usePipelineStore(s => s.stages)
-  const segments = model?.segments ?? []
 
   // Dubbed video toggle
   const [showDubbed, setShowDubbed] = useState(false)
@@ -35,10 +35,10 @@ export function PlayerEngine() {
 
   const videoSrc = (showDubbed && dubbedSrc) ? dubbedSrc : originalSrc
 
-  // Find the segment that covers the current playback time
-  const currentSub = useMemo(() => {
-    return segments.find(s => s.start_ms <= currentTime && currentTime < s.end_ms) ?? null
-  }, [segments, currentTime])
+  // Find the SRC cue that covers the current playback time (Chinese + English)
+  const currentCue = useMemo(() => {
+    return cues.find(c => c.start_ms <= currentTime && currentTime < c.end_ms) ?? null
+  }, [cues, currentTime])
 
   // Preserve playback position when toggling
   const handleToggle = useCallback(() => {
@@ -122,7 +122,7 @@ export function PlayerEngine() {
   if (!originalSrc) {
     return (
       <div className="flex items-center justify-center h-full bg-gray-900 text-gray-500">
-        {model ? 'Video file not found' : 'No video loaded'}
+        {loaded ? 'Video file not found' : 'No video loaded'}
       </div>
     )
   }
@@ -140,16 +140,16 @@ export function PlayerEngine() {
         preload="auto"
       />
 
-      {/* Subtitle overlay (only for original video) */}
-      {!showDubbed && currentSub && (
+      {/* Subtitle overlay: SRC cue text + text_en (only for original video) */}
+      {!showDubbed && currentCue && (
         <div className="absolute bottom-4 left-0 right-0 flex justify-center pointer-events-none px-4">
           <span
             className="text-white px-3 py-1 rounded max-w-[90%] text-center"
             style={{ background: 'rgba(0,0,0,0.7)' }}
           >
-            <div className="text-lg leading-snug">{currentSub.text}</div>
-            {currentSub.text_en && (
-              <div className="text-sm text-gray-300 leading-snug">{currentSub.text_en}</div>
+            <div className="text-lg leading-snug">{currentCue.text}</div>
+            {currentCue.text_en && (
+              <div className="text-sm text-gray-300 leading-snug">{currentCue.text_en}</div>
             )}
           </span>
         </div>

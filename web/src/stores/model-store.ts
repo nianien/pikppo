@@ -1,19 +1,20 @@
-/** Model Store: data layer (segments CRUD, dirty, save) */
+/** Model Store: data layer (cues CRUD, dirty, save) */
 import { create } from 'zustand'
-import type { AsrModel, AsrSegment, Episode, Roles } from '../types/asr-model'
-import { fetchJson, putJson, postJson } from '../utils/api'
-import type { ExportResult } from '../types/asr-model'
+import type { Episode, Role, Cue, Utterance } from '../types/asr-model'
+import { fetchJson, putJson } from '../utils/api'
 import { usePipelineStore } from './pipeline-store'
 import { useEditorStore } from './editor-store'
 
-// Auto-save: debounce 2s after last mutation
+// Auto-save: debounce 2s after last mutation — saves cues to DB
 let _autoSaveTimer: ReturnType<typeof setTimeout> | null = null
 function scheduleAutoSave() {
   if (_autoSaveTimer) clearTimeout(_autoSaveTimer)
   _autoSaveTimer = setTimeout(() => {
     _autoSaveTimer = null
-    const { dirty, saveModel } = useModelStore.getState()
-    if (dirty) saveModel()
+    const { dirty, saveCues, cues } = useModelStore.getState()
+    if (dirty && cues.length > 0) {
+      saveCues()
+    }
   }, 2000)
 }
 
@@ -24,14 +25,20 @@ interface ModelState {
   currentEpisode: string
   videoFile: string    // relative path to video e.g. "东北雀神风云/2.mp4"
 
-  // model data
-  model: AsrModel | null
+  // data state
+  loaded: boolean
   loading: boolean
   error: string | null
   dirty: boolean
 
-  // roles (voice mapping)
-  roles: Roles | null
+  // cues (DB-backed SRC cues with text_en from MT, cv versioning)
+  cues: Cue[]
+
+  // utterances (from DB, for pipeline display only)
+  utterances: Utterance[]
+
+  // roles (voice mapping, array of Role objects)
+  roles: Role[]
 
   // emotions config: [{key, name, lang, disabled?}, ...]
   emotions: { key: string; name: string; lang: string[]; disabled?: boolean }[]
@@ -39,16 +46,19 @@ interface ModelState {
   // actions
   loadEpisodes: () => Promise<void>
   selectEpisode: (drama: string, episode: string) => Promise<void>
-  loadModel: (drama: string, episode: string) => Promise<void>
-  saveModel: () => Promise<void>
-  exportModel: () => Promise<ExportResult>
+  loadCues: (drama: string, episode: string) => Promise<void>
+  saveCues: () => Promise<void>
+  loadUtterances: (drama: string, episode: string) => Promise<void>
   loadRoles: (drama: string) => Promise<void>
   saveRoles: () => Promise<void>
   loadEmotions: () => Promise<void>
 
-  // segment mutations
-  updateSegment: (id: string, patch: Partial<AsrSegment>) => void
-  updateSegments: (segments: AsrSegment[]) => void
+  // role mutations
+  updateRoles: (roles: Role[]) => Promise<void>
+
+  // cue mutations
+  updateCue: (id: number, patch: Partial<Cue>) => void
+  updateCues: (cues: Cue[]) => void
   setDirty: (dirty: boolean) => void
 }
 
@@ -57,11 +67,13 @@ export const useModelStore = create<ModelState>((set, get) => ({
   currentDrama: '',
   currentEpisode: '',
   videoFile: '',
-  model: null,
+  loaded: false,
   loading: false,
   error: null,
   dirty: false,
-  roles: null,
+  cues: [],
+  utterances: [],
+  roles: [],
   emotions: [],
 
   loadEpisodes: async () => {
@@ -80,72 +92,88 @@ export const useModelStore = create<ModelState>((set, get) => ({
       currentDrama: drama,
       currentEpisode: episode,
       videoFile: ep?.video_file ?? '',
-      model: null,
+      loaded: false,
+      cues: [],
+      utterances: [],
       dirty: false,
       error: null,
     })
     // Reset editor state (timeline scroll, selection, undo stack, etc.)
     useEditorStore.getState().reset()
+
+    // Load all data
     await Promise.all([
-      get().loadModel(drama, episode),
+      get().loadCues(drama, episode),
+      get().loadUtterances(drama, episode),
       get().loadRoles(drama),
       usePipelineStore.getState().loadStatus(drama, episode),
     ])
   },
 
-  loadModel: async (drama, episode) => {
-    set({ loading: true, error: null })
+  loadCues: async (drama, episode) => {
     try {
-      const model = await fetchJson<AsrModel>(`/episodes/${encodeURIComponent(drama)}/${encodeURIComponent(episode)}/asr-model`)
-      set({ model, loading: false, dirty: false })
-    } catch (e) {
-      set({ model: null, error: (e as Error).message, loading: false, dirty: false })
-    }
-  },
-
-  saveModel: async () => {
-    const { model, currentDrama, currentEpisode } = get()
-    if (!model) return
-    set({ loading: true, error: null })
-    try {
-      const updated = await putJson<AsrModel>(
-        `/episodes/${encodeURIComponent(currentDrama)}/${encodeURIComponent(currentEpisode)}/asr-model`,
-        model,
+      const data = await fetchJson<{ cues: Cue[] }>(
+        `/episodes/${encodeURIComponent(drama)}/${encodeURIComponent(episode)}/cues`,
       )
-      set({ model: updated, loading: false, dirty: false })
-    } catch (e) {
-      set({ error: (e as Error).message, loading: false })
+      set({ cues: data.cues ?? [], loaded: true })
+    } catch {
+      set({ cues: [], loaded: true })
     }
   },
 
-  exportModel: async () => {
-    const { currentDrama, currentEpisode } = get()
-    return postJson<ExportResult>(
-      `/episodes/${encodeURIComponent(currentDrama)}/${encodeURIComponent(currentEpisode)}/export`,
-    )
+  saveCues: async () => {
+    const { cues, currentDrama, currentEpisode } = get()
+    if (!cues.length) return
+    try {
+      const data = await putJson<{ cues: Cue[] }>(
+        `/episodes/${encodeURIComponent(currentDrama)}/${encodeURIComponent(currentEpisode)}/cues`,
+        { cues },
+      )
+      set({ cues: data.cues ?? cues, dirty: false })
+      // Refresh pipeline status (diff_and_save may have reset a gate)
+      usePipelineStore.getState()._fetchStatus(currentDrama, currentEpisode)
+    } catch (e) {
+      set({ error: (e as Error).message })
+    }
+  },
+
+  loadUtterances: async (drama, episode) => {
+    try {
+      const data = await fetchJson<{ utterances: Utterance[] }>(
+        `/episodes/${encodeURIComponent(drama)}/${encodeURIComponent(episode)}/utterances`,
+      )
+      set({ utterances: data.utterances ?? [] })
+    } catch {
+      set({ utterances: [] })
+    }
   },
 
   loadRoles: async (drama) => {
     try {
-      const data = await fetchJson<Roles>(`/episodes/${encodeURIComponent(drama)}/roles`)
-      set({ roles: data })
+      const data = await fetchJson<{ roles: Role[] }>(`/episodes/${encodeURIComponent(drama)}/roles`)
+      set({ roles: data.roles ?? [] })
     } catch {
-      set({ roles: null })
+      set({ roles: [] })
     }
   },
 
   saveRoles: async () => {
     const { roles, currentDrama } = get()
-    if (!roles || !currentDrama) return
+    if (!currentDrama) return
     try {
-      const updated = await putJson<Roles>(
+      const updated = await putJson<{ roles: Role[] }>(
         `/episodes/${encodeURIComponent(currentDrama)}/roles`,
-        roles,
+        { roles },
       )
-      set({ roles: updated })
+      set({ roles: updated.roles ?? roles })
     } catch (e) {
       set({ error: (e as Error).message })
     }
+  },
+
+  updateRoles: async (roles) => {
+    set({ roles })
+    await get().saveRoles()
   },
 
   loadEmotions: async () => {
@@ -160,20 +188,14 @@ export const useModelStore = create<ModelState>((set, get) => ({
     }
   },
 
-  updateSegment: (id, patch) => {
-    const { model } = get()
-    if (!model) return
-    const segments = model.segments.map(seg =>
-      seg.id === id ? { ...seg, ...patch } : seg
-    )
-    set({ model: { ...model, segments }, dirty: true })
+  updateCue: (id, patch) => {
+    const cues = get().cues.map(c => c.id === id ? { ...c, ...patch } : c)
+    set({ cues, dirty: true })
     scheduleAutoSave()
   },
 
-  updateSegments: (segments) => {
-    const { model } = get()
-    if (!model) return
-    set({ model: { ...model, segments }, dirty: true })
+  updateCues: (cues) => {
+    set({ cues, dirty: true })
     scheduleAutoSave()
   },
 

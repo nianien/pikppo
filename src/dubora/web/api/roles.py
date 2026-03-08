@@ -1,46 +1,52 @@
 """
-Roles API: 读写 roles.json（per-drama 角色映射）
+Roles API: DB-backed per-drama 角色映射（array format with id）
 """
-from pathlib import Path
-
-from fastapi import APIRouter, HTTPException, Request
+from typing import List, Optional
+from fastapi import APIRouter, Request
 from pydantic import BaseModel
 
-from dubora.pipeline.processors.voiceprint.speaker_to_role import (
-    _load_roles,
-    _save_roles,
-)
+from dubora.pipeline.core.store import PipelineStore
 
 router = APIRouter()
 
 
-def _roles_path(videos_dir: Path, drama: str) -> Path:
-    """roles.json 路径: {videos_dir}/{drama}/dub/dict/roles.json"""
-    return videos_dir / drama / "dub" / "dict" / "roles.json"
+def _get_store(db_path) -> PipelineStore:
+    return PipelineStore(db_path)
 
 
 @router.get("/episodes/{drama}/roles")
 async def get_roles(drama: str, request: Request) -> dict:
-    """读取 roles.json"""
-    videos_dir: Path = request.app.state.videos_dir
-    path = _roles_path(videos_dir, drama)
-    data = _load_roles(str(path))
-    return data
+    """读取角色映射（从 DB），返回 {roles: [{id, name, voice_type}]}"""
+    store = _get_store(request.app.state.db_path)
+    try:
+        drama_row = store.get_drama_by_name(drama)
+        if not drama_row:
+            return {"roles": []}
+        roles = store.get_roles(drama_row["id"])
+        return {"roles": [{"id": r["id"], "name": r["name"], "voice_type": r["voice_type"], "role_type": r.get("role_type", "extra")} for r in roles]}
+    finally:
+        store.close()
+
+
+class RoleItem(BaseModel):
+    id: Optional[int] = None
+    name: str
+    voice_type: str = ""
+    role_type: str = "extra"
 
 
 class RolesBody(BaseModel):
-    roles: dict = {}
-    default_roles: dict = {}
+    roles: List[RoleItem] = []
 
 
 @router.put("/episodes/{drama}/roles")
 async def put_roles(drama: str, body: RolesBody, request: Request) -> dict:
-    """保存 roles.json"""
-    videos_dir: Path = request.app.state.videos_dir
-    path = _roles_path(videos_dir, drama)
-    data = {
-        "roles": body.roles,
-        "default_roles": body.default_roles,
-    }
-    _save_roles(data, str(path))
-    return data
+    """保存角色映射（到 DB），有 id 更新，无 id 新建"""
+    store = _get_store(request.app.state.db_path)
+    try:
+        drama_id = store.ensure_drama(name=drama)
+        role_dicts = [r.model_dump() for r in body.roles]
+        updated = store.set_roles_by_list(drama_id, role_dicts)
+        return {"roles": [{"id": r["id"], "name": r["name"], "voice_type": r["voice_type"], "role_type": r.get("role_type", "extra")} for r in updated]}
+    finally:
+        store.close()
