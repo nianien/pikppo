@@ -185,8 +185,8 @@ export function DramaListPage() {
   const stats = useMemo(() => {
     const totalEps = episodes.length
     const done = episodes.filter(e => e.status === 'succeeded' || e.dubbed_video).length
-    const running = episodes.filter(e => e.status === 'running').length
-    return { totalEps, done, running }
+    const inProgress = episodes.filter(e => e.status !== 'ready' && e.status !== 'succeeded').length
+    return { totalEps, done, inProgress }
   }, [episodes])
 
   // Episode map for drama cards
@@ -232,7 +232,7 @@ export function DramaListPage() {
               <div className="flex items-center gap-3 text-xs text-gray-500 ml-2">
                 <span>{stats.totalEps} 集</span>
                 {stats.done > 0 && <span className="text-green-400">{stats.done} 已完成</span>}
-                {stats.running > 0 && <span className="text-blue-400">{stats.running} 进行中</span>}
+                {stats.inProgress > 0 && <span className="text-blue-400">{stats.inProgress} 进行中</span>}
               </div>
             )}
           </div>
@@ -501,7 +501,7 @@ export function DramaListPage() {
               dramas.map(d => {
                 const dramaEps = episodesByDrama[d.id] ?? []
                 const doneCount = dramaEps.filter(e => e.status === 'succeeded' || e.dubbed_video).length
-                const runningCount = dramaEps.filter(e => e.status === 'running').length
+                const inProgressCount = dramaEps.filter(e => e.status !== 'ready' && e.status !== 'succeeded').length
                 const progress = d.total_episodes > 0 ? (doneCount / d.total_episodes) * 100 : 0
 
                 return (
@@ -537,9 +537,9 @@ export function DramaListPage() {
                       </p>
                       <div className="flex items-center justify-between">
                         <div className="flex items-center gap-2">
-                          {runningCount > 0 && (
+                          {inProgressCount > 0 && (
                             <span className="text-[11px] font-medium px-2 py-0.5 rounded-full bg-blue-500/15 text-blue-400">
-                              {runningCount} 进行中
+                              {inProgressCount} 进行中
                             </span>
                           )}
                         </div>

@@ -44,8 +44,7 @@ async def list_dramas(
                COUNT(e.id) AS episode_count,
                MAX(COALESCE(e.updated_at, d.updated_at)) AS updated_at,
                SUM(CASE WHEN e.status = 'succeeded' THEN 1 ELSE 0 END) AS succeeded_count,
-               SUM(CASE WHEN e.status = 'running' THEN 1 ELSE 0 END) AS running_count,
-               SUM(CASE WHEN e.status = 'ready' THEN 1 ELSE 0 END) AS ready_count
+               SUM(CASE WHEN e.status NOT IN ('ready') AND e.status IS NOT NULL THEN 1 ELSE 0 END) AS started_count
         FROM dramas d
         LEFT JOIN episodes e ON e.drama_id = d.id
     """
@@ -63,11 +62,12 @@ async def list_dramas(
 
     # Status filtering via HAVING on aggregated counts
     if status == "running":
-        base += " HAVING running_count > 0"
+        # 进行中：有集已开始但未全部完成
+        base += " HAVING started_count > 0 AND succeeded_count < episode_count"
     elif status == "completed":
         base += " HAVING episode_count > 0 AND succeeded_count = episode_count"
     elif status == "not_started":
-        base += " HAVING (episode_count = 0) OR (succeeded_count = 0 AND running_count = 0)"
+        base += " HAVING started_count = 0"
 
     # Count total before pagination
     count_sql = f"SELECT COUNT(*) AS cnt FROM ({base})"
@@ -100,8 +100,7 @@ async def list_dramas(
         d["cover_image"] = _file_store(request).get_url(d["cover_image"])
         # Remove internal aggregation columns
         d.pop("succeeded_count", None)
-        d.pop("running_count", None)
-        d.pop("ready_count", None)
+        d.pop("started_count", None)
         items.append(d)
 
     return {"items": items, "total": total, "page": page, "page_size": page_size}
