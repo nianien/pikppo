@@ -1,14 +1,13 @@
 """
-Export API: 从 DB artifacts 表提供最终产物下载（本地优先，GCS 签名 URL 兜底）。
+Export API: 从 DB artifacts 表提供最终产物下载（本地优先，GCS 代理下载兜底）。
 """
 import logging
-from datetime import timedelta
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import FileResponse, RedirectResponse
+from fastapi.responses import FileResponse, StreamingResponse
 
-from dubora_core.config.settings import get_workdir
+from dubora_core.config.settings import get_workdir, get_gcs_cache_dir
 from dubora_core.manifest import resolve_artifact_path
 from dubora_core.store import DbStore
 
@@ -39,10 +38,23 @@ def _get_store(db_path: Path) -> DbStore:
     return DbStore(db_path)
 
 
-def _signed_url(gcs_path: str) -> str:
-    from dubora_core.utils.file_store import _gcs_bucket
-    blob = _gcs_bucket().blob(gcs_path)
-    return blob.generate_signed_url(expiration=timedelta(hours=1))
+def _download_from_gcs(gcs_path: str) -> Path | None:
+    """Download from GCS to local cache, return local path."""
+    try:
+        from dubora_core.utils.file_store import _gcs_bucket
+        local = get_gcs_cache_dir() / gcs_path
+        if local.is_file():
+            return local
+        blob = _gcs_bucket().blob(gcs_path)
+        if not blob.exists():
+            return None
+        local.parent.mkdir(parents=True, exist_ok=True)
+        blob.download_to_filename(str(local))
+        logger.info("Downloaded from GCS: %s", gcs_path)
+        return local
+    except Exception as e:
+        logger.error("GCS download failed for %s: %s", gcs_path, e)
+        return None
 
 
 @router.get("/export/{episode_id}/{filename}")
@@ -81,13 +93,15 @@ async def export_file(request: Request, episode_id: int, filename: str):
                 },
             )
 
-    # 2) GCS signed URL redirect
+    # 2) GCS download fallback (proxy, not redirect — video elements can't follow cross-origin redirects)
     if art["gcs_path"]:
-        try:
-            url = _signed_url(art["gcs_path"])
-            return RedirectResponse(url)
-        except Exception as e:
-            logger.error("GCS signed URL failed for %s: %s", art["gcs_path"], e)
+        gcs_local = _download_from_gcs(art["gcs_path"])
+        if gcs_local and gcs_local.is_file():
+            return FileResponse(
+                gcs_local,
+                media_type=_KIND_MEDIA_TYPE.get(kind, "application/octet-stream"),
+                headers={"Accept-Ranges": "bytes"},
+            )
 
     raise HTTPException(
         status_code=404,

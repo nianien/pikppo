@@ -33,6 +33,40 @@ def main():
         _cmd_serve(args)
 
 
+def _auto_build_frontend(web_dir: Path, dist_dir: Path):
+    """Auto build frontend if dist/ is missing or outdated (source newer than dist)."""
+    import subprocess
+
+    needs_build = False
+    if not dist_dir.is_dir():
+        needs_build = True
+    else:
+        # Check if any source file is newer than dist/index.html
+        index_html = dist_dir / "index.html"
+        if not index_html.is_file():
+            needs_build = True
+        else:
+            dist_mtime = index_html.stat().st_mtime
+            src_dir = web_dir / "src"
+            if src_dir.is_dir():
+                for f in src_dir.rglob("*"):
+                    if f.is_file() and f.stat().st_mtime > dist_mtime:
+                        needs_build = True
+                        break
+
+    if not needs_build:
+        return
+
+    # Check node_modules
+    if not (web_dir / "node_modules").is_dir():
+        info("Installing frontend dependencies...")
+        subprocess.run(["npm", "install"], cwd=str(web_dir), check=True)
+
+    info("Building frontend...")
+    subprocess.run(["npm", "run", "build"], cwd=str(web_dir), check=True)
+    info("Frontend build complete.")
+
+
 def _cmd_serve(args):
     try:
         import uvicorn
@@ -44,7 +78,10 @@ def _cmd_serve(args):
     static_dir = args.static_dir
     if not args.dev and static_dir is None:
         # Try to find web/dist relative to cwd
-        candidate = Path("web") / "dist"
+        web_dir = Path("web")
+        candidate = web_dir / "dist"
+        if web_dir.is_dir() and (web_dir / "package.json").is_file():
+            _auto_build_frontend(web_dir, candidate)
         if candidate.is_dir():
             static_dir = str(candidate.resolve())
 

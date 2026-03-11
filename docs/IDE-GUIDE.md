@@ -42,14 +42,14 @@ cd ..
 ### 2.3 启动
 
 ```bash
-# 启动 IDE（默认端口 8765）
-vsd ide
+# 启动 Web 服务器（默认端口 8765）
+vsd-web serve
 
-# 指定端口和视频目录
-vsd ide --port 9000 --videos /data/videos
+# 指定端口
+vsd-web serve --port 9000
 
-# 开发模式（前后端分离调试）
-vsd ide --dev
+# 另开终端启动 worker（执行 pipeline 任务）
+vsd-pipeline worker
 ```
 
 启动后浏览器访问 **http://localhost:8765**。
@@ -356,10 +356,10 @@ vsd ide --dev
 
 ```bash
 # 1. 先跑到 parse（含 ASR + 后处理）
-vsd run 剧名 集号 --to parse
+vsd-pipeline run 剧名 集号 --to parse
 
 # 2. 启动 IDE
-vsd ide
+vsd-web serve
 
 # 3. 浏览器打开 http://localhost:8765
 #    选择剧集 → 自动从 DB 加载 cues
@@ -379,14 +379,14 @@ vsd ide
 
 ```bash
 # 1. 批量跑到 parse
-vsd run 剧名 1-20 --to parse
+vsd-pipeline run 剧名 1-20 --to parse
 
 # 2. 启动 IDE，逐集校准
-vsd ide
+vsd-web serve
 
 # 3. 每集校准完保存后，可在 PipelinePanel 直接运行下游
 #    或命令行批量跑：
-vsd run 剧名 1-20 --from translate --to burn
+vsd-pipeline run 剧名 1-20 --from translate --to burn
 ```
 
 ### 9.3 返工修正
@@ -396,7 +396,7 @@ vsd run 剧名 1-20 --from translate --to burn
 1. 回到 IDE 修改
 2. Cmd/Ctrl+S 保存
 3. PipelinePanel 右键对应阶段 → 从该阶段重跑
-4. 或命令行：`vsd run 剧名 集号 --from translate --to burn`
+4. 或命令行：`vsd-pipeline run 剧名 集号 --from translate --to burn`
 
 ---
 
@@ -483,7 +483,7 @@ Voice Casting 是独立于 ASR 校准的全屏视图，用于管理 DB roles 表
 | `en.srt` | `output/` | burn 阶段从 DB cues.text_en 生成 |
 
 **注意**：
-- DB (`data/dubora.db`) 是所有元数据的 SSOT
+- DB (`data/db/dubora.db`) 是所有元数据的 SSOT
 - 编辑 cue 后自动保存到 DB，cv (content version) 自动递增
 - 原始 `asr-result.json` 永远不会被修改
 
@@ -508,7 +508,7 @@ videos/
 
 该集尚未运行 ASR + parse 阶段，先执行：
 ```bash
-vsd run 剧名 集号 --to parse
+vsd-pipeline run 剧名 集号 --to parse
 ```
 
 ### Q: 视频播放不了？
@@ -527,7 +527,7 @@ vsd run 剧名 集号 --to parse
 
 两种方式：
 1. **IDE 内**：PipelinePanel 点击运行按钮（自动保存后运行）
-2. **命令行**：`vsd run 剧名 集号 --from translate --to burn`
+2. **命令行**：`vsd-pipeline run 剧名 集号 --from translate --to burn`
 
 ### Q: 如何回退到 ASR 原始结果？
 

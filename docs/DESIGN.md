@@ -59,13 +59,30 @@ burn    → output/en.srt (从 DB cues 生成) + output/dubbed.mp4 (成片)
 
 ### 2.2 Task 执行架构
 
+支持两种部署模式：
+
+**本地模式**（单机，web + worker 共享 SQLite）：
 ```
 submit_pipeline()  → 写第一个 task 到 DB，退出
 PipelineReactor    → 监听 task_succeeded 事件，创建下一个 task
 PipelineWorker     → 全局 worker，轮询 DB 取 pending task，执行
 ```
 
-分离原则：提交方 (CLI/Web) 只写 DB；Worker (独立线程) 只读+执行。
+**远程模式**（双机，task 通过 HTTP API 访问 DB）：
+```
+task（GPU 机器）                       web（常驻机器）
+┌──────────────────┐                 ┌──────────────────────┐
+│ PipelineWorker   │  ── HTTP ──→    │ Worker API (FastAPI)  │
+│   PhaseRunner    │                 │   PipelineReactor     │
+│   RemoteStore ───┤                 │   DbStore ────────────┤→ SQLite
+└──────────────────┘                 └───────────────────────┘
+```
+
+远程模式下：
+- Worker 通过 `RemoteStore`（HTTP 代理）访问数据，接口与 `DbStore` 相同
+- Reactor 调度逻辑集中在 web 侧（`/complete` 和 `/fail` 端点内部运行）
+- Worker 只做：领任务 → 执行 → 报告结果
+- Phase 代码无需感知本地/远程差异
 
 Worker.tick() 流程：
 1. `claim_any_pending_task()` — 原子地把 pending → running
@@ -91,30 +108,33 @@ GATES = [
 
 Gate 作为 task 存储在 tasks 表 (type=gate key)。
 
-### 2.4 整体分层
+### 2.4 Monorepo 分包
 
 ```
-+-------------------------------------------------------------+
-|  CLI (cli.py)                                               |
-|  run / worker / phases / ide                                |
-+-----------------------------+-------------------------------+
-                              |
-+-----------------------------v-------------------------------+
-|  Pipeline Framework (pipeline/core/)                        |
-|  PipelineWorker, PipelineReactor, PipelineStore, Manifest   |
-+-----------------------------+-------------------------------+
-                              |
-+-----------------------------v-------------------------------+
-|  Phases (pipeline/phases/)       | Processors (stateless)   |
-|  extract->asr->parse->          | 纯计算、可单测            |
-|  translate->tts->mix->burn      |                           |
-+-----------------------------+-------------------------------+
-                              |
-+-----------------------------v-------------------------------+
-|  Schema (schema/)  | Config (config/)  | Models / Infra    |
-|  数据模型           | PipelineConfig    | Doubao, OpenAI    |
-+-------------------------------------------------------------+
+dubora/
+├── packages/
+│   ├── core/        → dubora-core     (数据访问层)
+│   ├── pipeline/    → dubora-pipeline (执行层)
+│   └── web/         → dubora-web      (API 层)
+├── web/             → React 前端
+├── deploy/          → Dockerfile + docker-compose + deploy 脚本
+├── sql/             → schema.sql, seed.sql（参考）
+├── docs/            → 文档
+└── test/
 ```
+
+**包职责**：
+
+| 包 | 职责 | 重型依赖 |
+|---|------|---------|
+| **dubora_core** | Config, DbStore, EventEmitter, PipelineReactor, submit_pipeline, phase_registry, resources, utils (logger, file_store), infra (tts_client) | 无 |
+| **dubora_pipeline** | 7 Phase 实现, Processors, Models (LLM clients), PhaseRunner, PipelineWorker, RemoteStore, Schema, 类型定义 | PyTorch, Demucs, etc. |
+| **dubora_web** | FastAPI app factory, 10 REST routers (含 Worker API) | 无 |
+
+**设计原则**：
+- **core 是纯数据访问层**：只做 DB CRUD、配置、事件，不含任何执行逻辑
+- **pipeline 是执行层**：Phase/Processor/Schema/Types 全部在此，web 不依赖 pipeline
+- **web 是 API 层**：只依赖 core，通过 Worker API 为远程 worker 提供数据访问
 
 - **Phase**：编排层，实现 `Phase` 抽象（`requires` / `provides` / `run`），负责 DB 读写、调用 Processor、返回 `PhaseResult`。
 - **Processor**：无状态业务逻辑，只做计算，不直接依赖 DB 或 workspace 路径约定，便于单测与替换。
@@ -124,42 +144,50 @@ Phase 通过 `_LazyPhase` 延迟加载，避免在不需要的阶段导入重型
 
 ### 2.5 CLI 用法
 
+Pipeline CLI（`vsd-pipeline`）和 Web CLI（`vsd-web`）分离：
+
 ```bash
-vsd run 家里家外 5 --to burn               # 提交 pipeline tasks 到 DB
-vsd run 家里家外 5 --from translate --to tts  # 从指定阶段强制重跑
-vsd run 家里家外 4-70 --to burn            # 批量提交
-vsd worker                                 # 启动独立 worker 进程
-vsd ide                                    # Web IDE (含内嵌 worker 线程)
-vsd ide --port 9000 --dev                  # 开发模式
-vsd phases                                 # 列出所有阶段
+# Pipeline 命令
+vsd-pipeline run 家里家外 5 --to burn               # 提交 pipeline tasks 到 DB（本地模式）
+vsd-pipeline run 家里家外 5 --from translate --to tts  # 从指定阶段强制重跑
+vsd-pipeline run 家里家外 4-70 --to burn             # 批量提交
+vsd-pipeline run 家里家外 5 --to burn --api-url http://web:8765  # 远程模式：通过 Worker API 提交
+vsd-pipeline worker                                  # 启动独立 worker 进程（本地模式）
+vsd-pipeline worker --api-url http://web:8765        # 启动远程 worker（通过 HTTP API 访问 DB）
+vsd-pipeline phases                                  # 列出所有阶段
+
+# Web 命令
+vsd-web serve --port 8765                            # 启动 Web 服务器
 ```
 
 ### 2.6 文件布局
 
 ```
-videos/{剧名}/                  # 剧级目录
-+-- 1.mp4                      # 原视频
-+-- story_background.txt       # 故事背景（可选，翻译 prompt 注入）
-+-- dub/
-    +-- {集号}/                        # 集级 workspace
-        +-- input/                     # 不可变输入（提取后不再修改）
-        |   +-- asr-result.json        #   ASR 原始输出
-        |   +-- audio.wav              #   提取的音频
-        |   +-- vocals.wav             #   人声
-        |   +-- accompaniment.wav      #   伴奏
-        +-- derived/                   # 可重算的派生产物
-        |   +-- tts/                   #   合成产物
-        |   |   +-- segments/          #     逐句 TTS 音频
-        |   |   +-- segments.json      #     段索引
-        |   |   +-- report.json        #     TTS 报告
-        |   +-- voice-assignment.json  #   声线分配快照
-        |   +-- mix.wav                #   最终混音
-        +-- output/                    # 最终交付物
-        |   +-- en.srt                 #   英文字幕 (burn 阶段生成)
-        |   +-- dubbed.mp4             #   成片
-        +-- .cache/                    # 内部优化缓存
-data/
-+-- dubora.db                  # SQLite DB (所有元数据 SSOT)
+data/                                   # 数据根目录（Docker 中为 /data）
++-- db/
+|   +-- dubora.db                       # SQLite DB (所有元数据 SSOT)
++-- dub/{剧名}/{集号}/                   # 集级 workspace
+|   +-- input/                          # 不可变输入（提取后不再修改）
+|   |   +-- asr-result.json             #   ASR 原始输出
+|   |   +-- audio.wav                   #   提取的音频
+|   |   +-- vocals.wav                  #   人声
+|   |   +-- accompaniment.wav           #   伴奏
+|   +-- derived/                        # 可重算的派生产物
+|   |   +-- tts/segments/               #   逐句 TTS 音频
+|   |   +-- tts/report.json             #   TTS 报告
+|   |   +-- voice-assignment.json       #   声线分配快照
+|   |   +-- mix.wav                     #   最终混音
+|   +-- output/                         # 最终交付物
+|   |   +-- en.srt                      #   英文字幕 (burn 阶段生成)
+|   |   +-- dubbed.mp4                  #   成片
+|   +-- .cache/                         # 内部优化缓存
++-- uploads/                            # Web 上传缓存
++-- gcs/                                # GCS 下载缓存
++-- .faststart/                         # MP4 faststart remux 缓存
+
+{视频目录}/{剧名}/                       # 视频源文件（可配置）
++-- 1.mp4                              # 原视频
++-- story_background.txt               # 故事背景（可选，翻译 prompt 注入）
 ```
 
 目录按语义角色分层：`input/` 是提取的不可变输入，`derived/` 是可重算的中间产物，`output/` 是最终交付。
@@ -587,8 +615,7 @@ IDE 用于在 `source_review` 门控处人工校准 ASR 结果。详细操作手
 
 **启动**：
 ```bash
-vsd ide                       # 默认端口 8765，含内嵌 worker 线程
-vsd ide --port 9000 --dev     # 开发模式
+vsd-web serve --port 8765     # 启动 Web 服务器
 ```
 
 ---
@@ -596,12 +623,16 @@ vsd ide --port 9000 --dev     # 开发模式
 ## 9. 典型工作流
 
 ```bash
-# 1. 首次全流程
-vsd run 家里家外 5 --to burn
+# 1. 首次全流程（本地模式）
+vsd-pipeline run 家里家外 5 --to burn
 #    pipeline 自动在 source_review 门控暂停
 
-# 2. 人工校准（在 IDE 中完成）
-vsd ide
+# 2. 启动 Web 服务器 + Worker
+vsd-web serve --port 8765          # 终端 1
+vsd-pipeline worker                # 终端 2（或远程 worker）
+
+# 3. 人工校准（在浏览器中完成）
+#    - 打开 http://localhost:8765
 #    - 选择剧集 → 校准 speaker、文本、时间轴
 #    - Cmd+S 保存 (自动保存到 DB)
 #    - PipelinePanel 点击「继续」通过 source_review 门控
@@ -609,11 +640,15 @@ vsd ide
 #    - translation_review 门控暂停，审阅翻译
 #    - 点击「继续」→ 流水线跑完 tts → mix → burn
 
-# 3. 如果只改了翻译相关，从 translate 重跑
-vsd run 家里家外 5 --from translate --to burn
+# 4. 如果只改了翻译相关，从 translate 重跑
+vsd-pipeline run 家里家外 5 --from translate --to burn
 
-# 4. 批量处理
-vsd run 家里家外 1-79 --to burn
+# 5. 批量处理
+vsd-pipeline run 家里家外 1-79 --to burn
+
+# 6. 远程模式（双机部署）
+vsd-pipeline run 家里家外 5 --to burn --api-url http://web:8765
+vsd-pipeline worker --api-url http://web:8765
 ```
 
 ---
@@ -624,33 +659,30 @@ vsd run 家里家外 1-79 --to burn
 
 - `cues.speaker` 和 `utterances.speaker` 列类型为 TEXT，存储整数字符串
 - 应用层通过 `_cast_speaker()` 转 int，但 SQL 查询时仍为字符串比较
-- 理想方案：ALTER TABLE 改列类型（SQLite 不支持，需 recreate table）
 - 当前方案可工作，`_cast_speaker()` 保证了应用层一致性
 
-### 10.2 store.py 中的遗留方法
-
-以下方法已被新的 id-keyed 方法替代，但尚未删除：
-- `get_roles_map()` — 被 `get_roles_by_id()` 替代 (TTS 用)
-- `upsert_role()` — 被 `ensure_role()` 和 `set_roles_by_list()` 替代
-- `delete_role()` — 被 `set_roles_by_list()` 的删除逻辑替代
-- `set_roles()` — 被 `set_roles_by_list()` 替代
-
-### 10.3 DubManifest.speaker 类型
+### 10.2 DubManifest.speaker 类型
 
 - `DubUtterance.speaker` 声明为 `str`
 - `dub_manifest_from_utterances()` 中显式 `speaker=str(u.get("speaker", ""))` 转换
 - 因为 DB 读出的 speaker 经 `_cast_speaker()` 已是 int，必须显式 str() 才能匹配 voice_assignment 的 str key
 
-### 10.4 _probe_duration_ms 重复定义
+### 10.3 _probe_duration_ms 重复定义
 
 - `translate.py`, `tts.py`, `mix.py` 各有一份相同的 `_probe_duration_ms()` 函数
 - 应提取为公共 util
 
-### 10.5 utterances.start_ms / end_ms 不存储
+### 10.4 utterances.start_ms / end_ms 不存储
 
 - `get_utterances()` 每次从 junction + cues 实时计算 start_ms/end_ms
-- utterances 表无 start_ms/end_ms 列（新 schema 设计如此）
+- utterances 表无 start_ms/end_ms 列
 - 如果查询频繁可考虑冗余存储，但当前性能可接受
+
+### 10.5 RemoteStore 写入批量化
+
+- translate phase 通过 RemoteStore 约 910 次 HTTP 调用（300 cues 的翻译场景）
+- 可缓冲 `update_cue`/`update_utterance`，定期批量 flush 降到 ~10 次
+- 当前单次 HTTP 开销（~50ms）相比 LLM 延迟（2-5s/次）可接受（~5%）
 
 ---
 

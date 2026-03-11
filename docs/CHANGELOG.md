@@ -1,5 +1,37 @@
 # Changelog
 
+## 2026-03-12
+
+### Monorepo 拆包
+
+- 项目从单包重构为 3 包 monorepo：`dubora-core`（数据访问层）、`dubora-pipeline`（执行层）、`dubora-web`（API 层）
+- CLI 拆分为 `vsd-pipeline`（pipeline 命令）和 `vsd-web`（Web 服务器）
+- Schema、Types、Phase 基类从 core 移到 pipeline，core 瘦身为纯数据访问层
+- `PipelineStore` 重命名为 `DbStore`
+
+### Worker API + 远程模式
+
+- 新增 Worker API（21 个端点），支持 task worker 通过 HTTP 访问数据库
+- 新增 `RemoteStore`，实现与 `DbStore` 相同接口的 HTTP 代理
+- `vsd-pipeline worker --api-url` 支持远程模式，worker 和 web 可部署在不同机器
+- Reactor 调度逻辑集中在 web 侧（`/complete` 和 `/fail` 端点内部运行）
+
+### GCP 部署
+
+- 新增 `deploy/deploy-web.sh` 和 `deploy/deploy-task.sh` 部署脚本
+- 新增 `deploy/docker-compose.yml`，web + worker 双容器编排
+- Dockerfile.web：轻量 Python 镜像（无 PyTorch），含前端构建
+- Dockerfile.task：完整 pipeline 镜像（PyTorch + FFmpeg），默认远程模式
+- 新增 Cloud Build 配置（`cloudbuild-web.yaml`、`cloudbuild-task.yaml`）
+
+### 修复
+
+- Media API 添加 GCS 下载 fallback，容器内可访问 GCS 视频文件
+- Dubbed 视频播放改用 `/api/export/{episodeId}/dubbed.mp4`，支持 GCS signed URL fallback
+- `pyproject.toml` 添加 `package-data` 声明，确保 JSON/YAML 资源文件打包
+- Pipeline 状态推导兼容无 task 记录的已完成 episode（legacy 数据）
+- Deploy 脚本添加 GCS 凭证路径映射
+
 ## 2026-03-02
 
 ### Pipeline

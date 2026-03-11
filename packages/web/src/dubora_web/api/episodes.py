@@ -324,7 +324,13 @@ async def list_episodes(request: Request) -> List[dict]:
         has_asr_result = input_dir.is_dir() and (input_dir / "asr-result.json").is_file()
         has_asr_model = ep_id in episodes_with_cues
 
-        video_file = r["path"] or ""
+        # video_file should point to original video, not dubbed output
+        raw_path = r["path"] or ""
+        if raw_path and "/dub/" not in raw_path and "/output/" not in raw_path:
+            video_file = raw_path
+        else:
+            # Legacy data may have dubbed path; derive original from drama/episode
+            video_file = f"{r['drama_name']}/{r['number']}.mp4"
 
         ep_arts = art_set.get(ep_id, set())
 

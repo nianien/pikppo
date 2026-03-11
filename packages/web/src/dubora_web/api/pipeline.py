@@ -28,11 +28,15 @@ def _get_store(db_path: Path) -> DbStore:
     return DbStore(db_path)
 
 
-def _derive_phase_status(store: DbStore, episode_id: int) -> list[dict]:
+def _derive_phase_status(store: DbStore, episode_id: int, episode_status: str = "") -> list[dict]:
     tasks = store.get_tasks(episode_id)
     task_map: dict[str, dict] = {}
     for t in tasks:
         task_map[t["type"]] = t
+
+    # If episode completed but has no task records (legacy data), mark all phases succeeded
+    no_phase_tasks = not any(t["type"] in {m["name"] for m in PHASES_META} for t in tasks)
+    fallback_status = "succeeded" if (episode_status == "succeeded" and no_phase_tasks) else "pending"
 
     result = []
     for meta in PHASES_META:
@@ -50,7 +54,7 @@ def _derive_phase_status(store: DbStore, episode_id: int) -> list[dict]:
             result.append({
                 "name": meta["name"],
                 "label": meta["label"],
-                "status": "pending",
+                "status": fallback_status,
                 "started_at": None,
                 "finished_at": None,
                 "error": None,
@@ -58,23 +62,30 @@ def _derive_phase_status(store: DbStore, episode_id: int) -> list[dict]:
     return result
 
 
-def _derive_gate_status(store: DbStore, episode_id: int) -> list[dict]:
+def _derive_gate_status(store: DbStore, episode_id: int, episode_status: str = "") -> list[dict]:
     tasks = store.get_tasks(episode_id)
     task_map: dict[str, dict] = {}
     for t in tasks:
         task_map[t["type"]] = t
 
+    # Legacy episodes with no task records: all gates passed
+    no_phase_tasks = not any(t["type"] in {m["name"] for m in PHASES_META} for t in tasks)
+    legacy_succeeded = episode_status == "succeeded" and no_phase_tasks
+
     result = []
     for gate_def in GATES:
-        gate_task = task_map.get(gate_def["key"])
-        before_phase = task_map.get(gate_def["after"])
-
-        if gate_task and gate_task["status"] == "succeeded":
+        if legacy_succeeded:
             status = "passed"
-        elif before_phase and before_phase["status"] == "succeeded":
-            status = "awaiting"
         else:
-            status = "pending"
+            gate_task = task_map.get(gate_def["key"])
+            before_phase = task_map.get(gate_def["after"])
+
+            if gate_task and gate_task["status"] == "succeeded":
+                status = "passed"
+            elif before_phase and before_phase["status"] == "succeeded":
+                status = "awaiting"
+            else:
+                status = "pending"
 
         result.append({
             "key": gate_def["key"],
@@ -131,12 +142,12 @@ async def pipeline_status(request: Request, drama: str, ep: str) -> dict:
         }
 
     episode_id = episode["id"]
-    phases = _derive_phase_status(store, episode_id)
+    phases = _derive_phase_status(store, episode_id, episode["status"])
     return {
         "has_manifest": True,
         "episode_status": episode["status"],
         "phases": phases,
-        "gates": _derive_gate_status(store, episode_id),
+        "gates": _derive_gate_status(store, episode_id, episode["status"]),
         "stages": _derive_stages(phases),
     }
 
