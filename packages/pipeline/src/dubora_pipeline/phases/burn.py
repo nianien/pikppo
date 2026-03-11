@@ -91,6 +91,10 @@ class BurnPhase(Phase):
                 ),
             )
 
+        # 获取 episode 信息（用于文件命名）
+        ep_row = store.get_episode(episode_id)
+        ep_number = ep_row["number"] if ep_row else 0
+
         # 从 DB cues 生成 en.srt + zh.srt
         all_cues = store.get_cues(episode_id)
 
@@ -112,13 +116,13 @@ class BurnPhase(Phase):
         output_dir = workspace_path / "output"
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        en_srt_path = output_dir / "en.srt"
+        en_srt_path = output_dir / f"{ep_number}-en.srt"
         write_srt_from_segments(en_segments, str(en_srt_path), text_key="en_text")
-        info(f"Generated en.srt: {len(en_segments)} segments")
+        info(f"Generated {en_srt_path.name}: {len(en_segments)} segments")
 
-        zh_srt_path = output_dir / "zh.srt"
+        zh_srt_path = output_dir / f"{ep_number}-zh.srt"
         write_srt_from_segments(zh_segments, str(zh_srt_path), text_key="zh_text")
-        info(f"Generated zh.srt: {len(zh_segments)} segments")
+        info(f"Generated {zh_srt_path.name}: {len(zh_segments)} segments")
 
         if not en_segments:
             return PhaseResult(
@@ -181,9 +185,7 @@ class BurnPhase(Phase):
             info(f"Burn completed: {output_video_path.name} (size: {output_video_path.stat().st_size / 1024 / 1024:.2f} MB)")
 
             # ── 写 artifacts 表 + GCS 上传 ──
-            ep_row = store.get_episode(episode_id)
             drama_name = ep_row["drama_name"] if ep_row else "unknown"
-            ep_number = ep_row["number"] if ep_row else 0
             gcs_prefix = f"videos/{drama_name}/{ep_number}"
 
             deliverables = [

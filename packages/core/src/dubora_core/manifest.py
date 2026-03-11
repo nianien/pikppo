@@ -32,8 +32,8 @@ def resolve_artifact_path(key: str, workspace: Path) -> Path:
             "asr_result": "input/asr-result.json",
         },
         "subs": {
-            "zh_srt": "output/zh.srt",
-            "en_srt": "output/en.srt",
+            "zh_srt": "output/{episode_stem}-zh.srt",
+            "en_srt": "output/{episode_stem}-en.srt",
         },
         "tts": {
             "segments_dir": "derived/tts/segments",
