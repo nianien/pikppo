@@ -70,6 +70,7 @@ deploy_to_vm() {
             -v ${DATA_DIR}:/data \
             --env-file ~/.env.dubora \
             -e API_URL=${API_URL} \
+            -e GOOGLE_APPLICATION_CREDENTIALS=/data/.gcp/pikppo-dubora.json \
             ${IMAGE_URL}
         docker ps --filter name=${CONTAINER_NAME}
     "
