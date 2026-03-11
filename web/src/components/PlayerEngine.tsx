@@ -11,6 +11,7 @@ export function PlayerEngine() {
   const videoFile = useModelStore(s => s.videoFile)
   const currentDrama = useModelStore(s => s.currentDrama)
   const currentEpisode = useModelStore(s => s.currentEpisode)
+  const currentEpisodeId = useModelStore(s => s.currentEpisodeId)
   const cues = useModelStore(s => s.cues)
   const loaded = useModelStore(s => s.loaded)
   const currentTime = useEditorStore(s => s.currentTime)
@@ -29,8 +30,8 @@ export function PlayerEngine() {
 
   // Derive video sources
   const originalSrc = videoFile ? `/api/media/${videoFile}` : null
-  const dubbedSrc = (currentDrama && currentEpisode)
-    ? `/api/media/${encodeURIComponent(currentDrama)}/dub/${encodeURIComponent(currentEpisode)}/output/${encodeURIComponent(currentEpisode)}-dubbed.mp4`
+  const dubbedSrc = currentEpisodeId
+    ? `/api/export/${currentEpisodeId}/dubbed.mp4`
     : null
 
   const videoSrc = (showDubbed && dubbedSrc) ? dubbedSrc : originalSrc

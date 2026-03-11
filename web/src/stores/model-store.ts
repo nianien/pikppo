@@ -23,6 +23,7 @@ interface ModelState {
   episodes: Episode[]
   currentDrama: string
   currentEpisode: number
+  currentEpisodeId: number
   videoFile: string    // relative path to video e.g. "东北雀神风云/2.mp4"
 
   // data state
@@ -66,6 +67,7 @@ export const useModelStore = create<ModelState>((set, get) => ({
   episodes: [],
   currentDrama: '',
   currentEpisode: 0,
+  currentEpisodeId: 0,
   videoFile: '',
   loaded: false,
   loading: false,
@@ -91,6 +93,7 @@ export const useModelStore = create<ModelState>((set, get) => ({
     set({
       currentDrama: drama,
       currentEpisode: episode,
+      currentEpisodeId: ep?.id ?? 0,
       videoFile: ep?.video_file ?? '',
       loaded: false,
       cues: [],
