@@ -11,7 +11,7 @@ from pathlib import Path
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse, StreamingResponse
 
-from dubora_core.config.settings import get_data_dir, get_faststart_cache_dir, get_gcs_cache_dir
+from dubora_core.config.settings import get_web_data_dir, get_pipeline_data_dir, get_faststart_cache_dir, get_gcs_cache_dir
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -110,14 +110,19 @@ async def serve_media(request: Request, path: str):
       2. uploads/{path}
       3. gcs/{path}
     """
-    data_dir: Path = request.app.state.data_dir
+    web_dir = get_web_data_dir()
+    pipeline_dir = get_pipeline_data_dir()
 
-    # Try multiple roots
+    # Try multiple roots: dub under pipeline, uploads/gcs under web
     file_path = None
-    for sub in ("dub", "uploads", "gcs"):
-        candidate = (data_dir / sub / path).resolve()
-        # Security: resolved must be under data_dir
-        if not str(candidate).startswith(str(data_dir.resolve())):
+    roots = [
+        (pipeline_dir, "dub"),
+        (web_dir, "uploads"),
+        (web_dir, "gcs"),
+    ]
+    for root, sub in roots:
+        candidate = (root / sub / path).resolve()
+        if not str(candidate).startswith(str(root.resolve())):
             continue
         if candidate.is_file():
             file_path = candidate

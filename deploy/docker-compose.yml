@@ -8,11 +8,13 @@ services:
     ports:
       - "8765:8765"
     volumes:
-      - data:/data
+      - db-data:/data/db
+      - web-data:/data/web
     env_file:
       - ../.env
     environment:
-      - APP_DATA_DIR=/data
+      - DB_DIR=/data/db
+      - WEB_DATA_DIR=/data/web
     restart: unless-stopped
 
   worker:
@@ -20,11 +22,11 @@ services:
       context: ..
       dockerfile: deploy/Dockerfile.task
     volumes:
-      - data:/data
+      - pipeline-data:/data
     env_file:
       - ../.env
     environment:
-      - APP_DATA_DIR=/data
+      - PIPELINE_DATA_DIR=/data
       - API_URL=http://web:8765
     command: ["vsd-pipeline", "worker", "--api-url", "http://web:8765"]
     restart: unless-stopped
@@ -33,4 +35,6 @@ services:
         condition: service_healthy
 
 volumes:
-  data:
+  db-data:
+  web-data:
+  pipeline-data:

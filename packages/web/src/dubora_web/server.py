@@ -11,7 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from dubora_core.config.settings import get_data_dir, get_db_path, get_upload_cache_dir, get_gcs_cache_dir
+from dubora_core.config.settings import get_web_data_dir, get_pipeline_data_dir, get_db_path, get_upload_cache_dir, get_gcs_cache_dir
 from dubora_web.api.emotions import router as emotions_router
 from dubora_web.api.episodes import router as episodes_router
 from dubora_web.api.export import router as export_router
@@ -34,7 +34,7 @@ def create_app(
     Args:
         static_dir: 前端静态文件目录（None 则不挂载）
     """
-    data_dir = get_data_dir()
+    get_web_data_dir()  # ensure subdirs created
     app = FastAPI(
         title="ASR Calibration IDE",
         version="1.0.0",
@@ -50,11 +50,10 @@ def create_app(
     )
 
     app.state.db_path = get_db_path()
-    app.state.data_dir = data_dir
 
     # File access layer: local-first, GCS fallback
     file_store = FileStore()
-    file_store.add_local(data_dir / "dub", "/api/media/dub")
+    file_store.add_local(get_pipeline_data_dir() / "dub", "/api/media/dub")
     file_store.add_local(get_upload_cache_dir(), "/api/media")
     file_store.set_gcs_cache_dir(get_gcs_cache_dir())
     app.state.file_store = file_store

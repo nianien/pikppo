@@ -17,7 +17,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Optional
 
-from dubora_core.config.settings import PipelineConfig, get_workdir as _settings_get_workdir, get_upload_cache_dir, get_gcs_cache_dir
+from dubora_core.config.settings import PipelineConfig, get_workdir as _settings_get_workdir, get_pipeline_gcs_cache_dir
 from dubora_core.events import EventEmitter, LogListener, PipelineEvent
 from dubora_pipeline.manifest import DbManifest
 from dubora_pipeline.runner import PhaseRunner
@@ -34,25 +34,19 @@ def _get_workdir(drama_name: str, episode_number: int) -> Path:
 
 def _resolve_video_path(episode: dict) -> Path | None:
     """Resolve source video path by priority:
-    1. uploads/{blob_path} — freshly uploaded
-    2. gcs/{blob_path} — GCS download cache
-    3. Download from GCS → gcs/{blob_path}
+    1. gcs/{blob_path} — GCS download cache (on pipeline machine)
+    2. Download from GCS → gcs/{blob_path}
     """
     blob_path = episode.get("path")
     if not blob_path:
         return None
 
-    # 1) Upload cache
-    upload = get_upload_cache_dir() / blob_path
-    if upload.is_file():
-        return upload
-
-    # 2) GCS download cache
-    gcs_local = get_gcs_cache_dir() / blob_path
+    # 1) GCS download cache
+    gcs_local = get_pipeline_gcs_cache_dir() / blob_path
     if gcs_local.is_file():
         return gcs_local
 
-    # 3) Download from GCS
+    # 2) Download from GCS
     try:
         from dubora_core.utils.file_store import _gcs_bucket
         blob = _gcs_bucket().blob(blob_path)

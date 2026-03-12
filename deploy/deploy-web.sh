@@ -48,6 +48,13 @@ init_data() {
         fail "Local DB not found: $LOCAL_DB"
     fi
 
+    log "Mounting data disk and setting permissions..."
+    vm_ssh "
+        sudo mount /dev/sdb ${DATA_DIR} 2>/dev/null || true
+        sudo chmod -R a+rw ${DATA_DIR}
+        sudo mkdir -p ${DATA_DIR}/{db,web,pipeline,.gcp}
+    "
+
     log "Stopping container before data sync..."
     vm_ssh "docker rm -f ${CONTAINER_NAME} 2>/dev/null || true"
 
@@ -77,8 +84,12 @@ deploy_to_vm() {
             --name ${CONTAINER_NAME} \
             --restart unless-stopped \
             -p 80:${PORT} \
-            -v ${DATA_DIR}:/data \
+            -v ${DATA_DIR}/db:/data/db \
+            -v ${DATA_DIR}/web:/data/web \
+            -v ${DATA_DIR}/.gcp:/data/.gcp:ro \
             --env-file ~/.env.dubora \
+            -e DB_DIR=/data/db \
+            -e WEB_DATA_DIR=/data/web \
             -e GOOGLE_APPLICATION_CREDENTIALS=/data/.gcp/pikppo-dubora.json \
             ${IMAGE_URL}
         docker ps --filter name=${CONTAINER_NAME}
