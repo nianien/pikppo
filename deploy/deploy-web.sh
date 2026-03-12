@@ -14,8 +14,8 @@ REPO="dubora"
 IMAGE="dubora-web"
 IMAGE_URL="${REGION}-docker.pkg.dev/${PROJECT}/${REPO}/${IMAGE}:latest"
 
-VM_NAME="sg-dubora-web"
-VM_USER="nianien_gmail_com"
+VM_NAME="dubora-web-sg"
+VM_USER="nianien"
 CONTAINER_NAME="dubora-web"
 DATA_DIR="/mnt/disks/data"
 PORT="8765"
@@ -47,13 +47,6 @@ init_data() {
     if [ ! -f "$LOCAL_DB" ]; then
         fail "Local DB not found: $LOCAL_DB"
     fi
-
-    log "Mounting data disk and setting permissions..."
-    vm_ssh "
-        sudo mount /dev/sdb ${DATA_DIR} 2>/dev/null || true
-        sudo chmod -R a+rw ${DATA_DIR}
-        sudo mkdir -p ${DATA_DIR}/{db,web,pipeline,.gcp}
-    "
 
     log "Stopping container before data sync..."
     vm_ssh "docker rm -f ${CONTAINER_NAME} 2>/dev/null || true"

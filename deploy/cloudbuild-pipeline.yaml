@@ -1,5 +1,5 @@
 steps:
   - name: 'gcr.io/cloud-builders/docker'
-    args: ['build', '-t', '$_IMAGE_URL', '-f', 'deploy/Dockerfile.task', '.']
+    args: ['build', '-t', '$_IMAGE_URL', '-f', 'deploy/Dockerfile.pipeline', '.']
 images: ['$_IMAGE_URL']
 timeout: 1800s

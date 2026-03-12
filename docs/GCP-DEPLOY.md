@@ -7,7 +7,7 @@
                        │
                        ▼
 ┌─────────────────────────────────────┐
-│  sg-dubora-web (e2-small, 常驻)     │
+│  dubora-web-sg (e2-small, 常驻)     │
 │  ┌─────────────────────────────────┐│
 │  │ dubora-web 容器                 ││
 │  │  FastAPI + React 前端           ││
@@ -20,9 +20,9 @@
                │ Internal IP (HTTP)
                ▼
 ┌─────────────────────────────────────┐
-│  sg-dubora-task (GPU/高CPU, 按需)   │
+│  dubora-pipeline-sg (GPU/高CPU, 按需)│
 │  ┌─────────────────────────────────┐│
-│  │ dubora-task 容器                ││
+│  │ dubora-pipeline 容器            ││
 │  │  PipelineWorker (远程模式)      ││
 │  │  RemoteStore → Worker API       ││
 │  │  PyTorch + FFmpeg + Demucs      ││
@@ -32,7 +32,7 @@
 ```
 
 - **web** 跑在便宜机器，拥有 SQLite DB，暴露 Worker API
-- **task** 跑在贵机器（GPU/高 CPU），通过 HTTP API 读写数据库
+- **pipeline** 跑在贵机器（GPU/高 CPU），通过 HTTP API 读写数据库
 - 视频文件通过 GCS 存取，两台机器都挂载 GCS 凭证
 
 ## 2. 前置条件
@@ -66,12 +66,12 @@ GCS 服务账号 JSON 凭证需放在 VM 的 `/mnt/disks/data/.gcp/pikppo-dubora
 ```bash
 # 上传凭证到 web VM
 gcloud compute scp .gcp/pikppo-dubora.json \
-  nianien_gmail_com@sg-dubora-web:/mnt/disks/data/.gcp/pikppo-dubora.json \
+  nianien@dubora-web-sg:/mnt/disks/data/.gcp/pikppo-dubora.json \
   --zone=asia-southeast1-a
 
-# 上传凭证到 task VM（如果需要）
+# 上传凭证到 pipeline VM（如果需要）
 gcloud compute scp .gcp/pikppo-dubora.json \
-  nianien_gmail_com@sg-dubora-task:/mnt/disks/data/.gcp/pikppo-dubora.json \
+  nianien@dubora-pipeline-sg:/mnt/disks/data/.gcp/pikppo-dubora.json \
   --zone=asia-southeast1-a
 ```
 
@@ -80,7 +80,7 @@ gcloud compute scp .gcp/pikppo-dubora.json \
 ### 3.1 Web VM
 
 ```bash
-gcloud compute instances create sg-dubora-web \
+gcloud compute instances create dubora-web-sg \
   --zone=asia-southeast1-a \
   --machine-type=e2-small \
   --tags=http-server \
@@ -90,19 +90,19 @@ gcloud compute instances create sg-dubora-web \
 
 # 挂载数据盘（如需独立磁盘）
 # gcloud compute disks create dubora-data --size=50GB --zone=asia-southeast1-a
-# gcloud compute instances attach-disk sg-dubora-web --disk=dubora-data --zone=asia-southeast1-a
+# gcloud compute instances attach-disk dubora-web-sg --disk=dubora-data --zone=asia-southeast1-a
 ```
 
 确保防火墙规则允许 HTTP 流量：
 ```bash
 # 如果 VM 没有 http-server 标签
-gcloud compute instances add-tags sg-dubora-web --tags=http-server --zone=asia-southeast1-a
+gcloud compute instances add-tags dubora-web-sg --tags=http-server --zone=asia-southeast1-a
 ```
 
-### 3.2 Task VM
+### 3.2 Pipeline VM
 
 ```bash
-gcloud compute instances create sg-dubora-task \
+gcloud compute instances create dubora-pipeline-sg \
   --zone=asia-southeast1-a \
   --machine-type=n1-standard-4 \
   --image-family=cos-stable \
@@ -114,8 +114,8 @@ gcloud compute instances create sg-dubora-task \
 
 在每台 VM 上创建数据目录：
 ```bash
-gcloud compute ssh nianien_gmail_com@sg-dubora-web --zone=asia-southeast1-a --command="
-  sudo mkdir -p /mnt/disks/data/{db,dub,uploads,gcs,.gcp,.faststart}
+gcloud compute ssh nianien@dubora-web-sg --zone=asia-southeast1-a --command="
+  sudo mkdir -p /mnt/disks/data/{db,web,pipeline,.gcp}
   sudo chown -R \$(id -u):\$(id -g) /mnt/disks/data
 "
 ```
@@ -140,20 +140,20 @@ bash deploy/deploy-web.sh --help
 
 `--init` 会将本地 `data/db/dubora.db` 上传到 VM，适用于首次部署或 DB 重置。
 
-### 4.2 部署 Task
+### 4.2 部署 Pipeline
 
 ```bash
 # 仅部署（使用已有镜像）
-bash deploy/deploy-task.sh
+bash deploy/deploy-pipeline.sh
 
 # 构建镜像 + 部署
-bash deploy/deploy-task.sh --build
+bash deploy/deploy-pipeline.sh --build
 
 # 查看帮助
-bash deploy/deploy-task.sh --help
+bash deploy/deploy-pipeline.sh --help
 ```
 
-Task 部署脚本会自动解析 web VM 的内网 IP，设置 `API_URL` 环境变量。
+Pipeline 部署脚本会自动解析 web VM 的内网 IP，设置 `API_URL` 环境变量。
 
 ### 4.3 Docker Compose（本地测试）
 
@@ -162,7 +162,7 @@ cd deploy
 docker-compose up
 ```
 
-Web 在 `localhost:8765`，worker 自动连接 `http://web:8765`。
+Web 在 `localhost:8765`，pipeline 自动连接 `http://web:8765`。
 
 ## 5. 镜像说明
 
@@ -174,7 +174,7 @@ Web 在 `localhost:8765`，worker 自动连接 `http://web:8765`。
 - 无 PyTorch / FFmpeg / Demucs
 - 体积: ~300MB
 
-### 5.2 dubora-task
+### 5.2 dubora-pipeline
 
 - 基础镜像: `python:3.11-slim`
 - 安装: `dubora-core` + `dubora-pipeline`（含 PyTorch CPU + FFmpeg）
@@ -197,32 +197,32 @@ gcloud builds submit --config=deploy/cloudbuild-web.yaml \
 
 ```bash
 # Web 容器日志
-gcloud compute ssh nianien_gmail_com@sg-dubora-web --zone=asia-southeast1-a \
+gcloud compute ssh nianien@dubora-web-sg --zone=asia-southeast1-a \
   --command="docker logs -f dubora-web --tail 100"
 
-# Task 容器日志
-gcloud compute ssh nianien_gmail_com@sg-dubora-task --zone=asia-southeast1-a \
-  --command="docker logs -f dubora-task --tail 100"
+# Pipeline 容器日志
+gcloud compute ssh nianien@dubora-pipeline-sg --zone=asia-southeast1-a \
+  --command="docker logs -f dubora-pipeline --tail 100"
 ```
 
 ### 6.2 重启容器
 
 ```bash
-gcloud compute ssh nianien_gmail_com@sg-dubora-web --zone=asia-southeast1-a \
+gcloud compute ssh nianien@dubora-web-sg --zone=asia-southeast1-a \
   --command="docker restart dubora-web"
 ```
 
 ### 6.3 进入容器调试
 
 ```bash
-gcloud compute ssh nianien_gmail_com@sg-dubora-web --zone=asia-southeast1-a \
+gcloud compute ssh nianien@dubora-web-sg --zone=asia-southeast1-a \
   --command="docker exec -it dubora-web bash"
 ```
 
 ### 6.4 查看 DB
 
 ```bash
-gcloud compute ssh nianien_gmail_com@sg-dubora-web --zone=asia-southeast1-a \
+gcloud compute ssh nianien@dubora-web-sg --zone=asia-southeast1-a \
   --command="docker exec dubora-web python -c \"
 import sqlite3
 conn = sqlite3.connect('/data/db/dubora.db')
@@ -231,18 +231,18 @@ for r in conn.execute('SELECT id, drama_name, number, status FROM episodes'):
 \""
 ```
 
-### 6.5 停止 Task VM（省钱）
+### 6.5 停止 Pipeline VM（省钱）
 
-Task VM 按需启动，不用时可停止：
+Pipeline VM 按需启动，不用时可停止：
 
 ```bash
 # 停止
-gcloud compute instances stop sg-dubora-task --zone=asia-southeast1-a
+gcloud compute instances stop dubora-pipeline-sg --zone=asia-southeast1-a
 
 # 启动
-gcloud compute instances start sg-dubora-task --zone=asia-southeast1-a
+gcloud compute instances start dubora-pipeline-sg --zone=asia-southeast1-a
 # 启动后需要重新部署容器（COS VM 重启后 docker 状态可能丢失）
-bash deploy/deploy-task.sh
+bash deploy/deploy-pipeline.sh
 ```
 
 ## 7. 环境变量
@@ -251,16 +251,17 @@ bash deploy/deploy-task.sh
 
 | 变量 | 说明 |
 |------|------|
-| `APP_DATA_DIR` | 数据根目录，默认 `/data` |
+| `DB_DIR` | DB 目录，默认 `/data/db` |
+| `WEB_DATA_DIR` | Web 数据目录，默认 `/data/web` |
 | `GOOGLE_APPLICATION_CREDENTIALS` | GCS 凭证路径 |
 | `.env` 文件中的 API keys | 各外部服务凭证 |
 
-### Task 容器
+### Pipeline 容器
 
 | 变量 | 说明 |
 |------|------|
 | `API_URL` | Web API 地址，如 `http://10.148.0.2:8765` |
-| `APP_DATA_DIR` | 数据根目录，默认 `/data` |
+| `PIPELINE_DATA_DIR` | Pipeline 数据目录，默认 `/data` |
 | `GOOGLE_APPLICATION_CREDENTIALS` | GCS 凭证路径 |
 | `.env` 文件中的 API keys | 各外部服务凭证 |
 
@@ -278,11 +279,11 @@ bash deploy/deploy-task.sh
 2. 检查环境变量: `docker exec dubora-web env | grep GOOGLE`
 3. 查看 media API 日志中的 GCS 错误
 
-### Task Worker 无法连接 Web
+### Pipeline Worker 无法连接 Web
 
-1. 确认 web VM 内网 IP: `gcloud compute instances describe sg-dubora-web --zone=asia-southeast1-a --format="get(networkInterfaces[0].networkIP)"`
-2. 检查 `API_URL` 环境变量: `docker exec dubora-task env | grep API_URL`
-3. 从 task VM 测试连通性: `curl http://<web-ip>:8765/api/health`
+1. 确认 web VM 内网 IP: `gcloud compute instances describe dubora-web-sg --zone=asia-southeast1-a --format="get(networkInterfaces[0].networkIP)"`
+2. 检查 `API_URL` 环境变量: `docker exec dubora-pipeline env | grep API_URL`
+3. 从 pipeline VM 测试连通性: `curl http://<web-ip>:8765/api/health`
 
 ### Pipeline 状态全灰
 

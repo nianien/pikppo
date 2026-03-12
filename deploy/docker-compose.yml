@@ -17,10 +17,10 @@ services:
       - WEB_DATA_DIR=/data/web
     restart: unless-stopped
 
-  worker:
+  pipeline:
     build:
       context: ..
-      dockerfile: deploy/Dockerfile.task
+      dockerfile: deploy/Dockerfile.pipeline
     volumes:
       - pipeline-data:/data
     env_file:
