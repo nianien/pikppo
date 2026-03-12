@@ -15,7 +15,7 @@
 │  │  SQLite DB (/data/db/)          ││
 │  └─────────────────────────────────┘│
 │  Port 80 → 8765                     │
-│  Volume: /mnt/disks/data → /data    │
+│  Volume: /var/dubora/data → /data    │
 └──────────────┬──────────────────────┘
                │ Internal IP (HTTP)
                ▼
@@ -27,7 +27,7 @@
 │  │  RemoteStore → Worker API       ││
 │  │  PyTorch + FFmpeg + Demucs      ││
 │  └─────────────────────────────────┘│
-│  Volume: /mnt/disks/data → /data    │
+│  Volume: /var/dubora/data → /data    │
 └─────────────────────────────────────┘
 ```
 
@@ -61,17 +61,17 @@ cat .env
 
 ### 2.3 GCS 凭证
 
-GCS 服务账号 JSON 凭证需放在 VM 的 `/mnt/disks/data/.gcp/pikppo-dubora.json`。
+GCS 服务账号 JSON 凭证需放在 VM 的 `/var/dubora/data/.gcp/pikppo-dubora.json`。
 
 ```bash
 # 上传凭证到 web VM
 gcloud compute scp .gcp/pikppo-dubora.json \
-  nianien@dubora-web-sg:/mnt/disks/data/.gcp/pikppo-dubora.json \
+  nianien@dubora-web-sg:/var/dubora/data/.gcp/pikppo-dubora.json \
   --zone=asia-southeast1-a
 
 # 上传凭证到 pipeline VM（如果需要）
 gcloud compute scp .gcp/pikppo-dubora.json \
-  nianien@dubora-pipeline-sg:/mnt/disks/data/.gcp/pikppo-dubora.json \
+  nianien@dubora-pipeline-sg:/var/dubora/data/.gcp/pikppo-dubora.json \
   --zone=asia-southeast1-a
 ```
 
@@ -115,8 +115,8 @@ gcloud compute instances create dubora-pipeline-sg \
 在每台 VM 上创建数据目录：
 ```bash
 gcloud compute ssh nianien@dubora-web-sg --zone=asia-southeast1-a --command="
-  sudo mkdir -p /mnt/disks/data/{db,web,pipeline,.gcp}
-  sudo chown -R \$(id -u):\$(id -g) /mnt/disks/data
+  sudo mkdir -p /var/dubora/data/{db,web,pipeline,.gcp}
+  sudo chown -R \$(id -u):\$(id -g) /var/dubora/data
 "
 ```
 

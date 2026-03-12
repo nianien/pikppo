@@ -17,7 +17,7 @@ WEB_VM_NAME="dubora-web-sg"
 VM_NAME="dubora-pipeline-sg"
 VM_USER="nianien"
 CONTAINER_NAME="dubora-pipeline"
-DATA_DIR="/mnt/disks/data"
+DATA_DIR="/var/dubora/data"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
@@ -61,6 +61,11 @@ deploy_to_vm() {
     vm_scp "$PROJECT_DIR/.env" "~/.env.dubora"
 
     log "Deploying container..."
+    log "Authenticating Docker on VM..."
+    local token
+    token=$(gcloud auth print-access-token)
+    vm_ssh "echo '${token}' | docker login -u oauth2accesstoken --password-stdin https://${REGION}-docker.pkg.dev"
+
     vm_ssh "
         docker pull ${IMAGE_URL}
         docker rm -f ${CONTAINER_NAME} 2>/dev/null || true

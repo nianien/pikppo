@@ -17,7 +17,7 @@ IMAGE_URL="${REGION}-docker.pkg.dev/${PROJECT}/${REPO}/${IMAGE}:latest"
 VM_NAME="dubora-web-sg"
 VM_USER="nianien"
 CONTAINER_NAME="dubora-web"
-DATA_DIR="/mnt/disks/data"
+DATA_DIR="/var/dubora/data"
 PORT="8765"
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -48,13 +48,27 @@ init_data() {
         fail "Local DB not found: $LOCAL_DB"
     fi
 
+    log "Preparing data directories..."
+    vm_ssh "
+        sudo mkdir -p ${DATA_DIR}
+        sudo chown -R \$(id -u):\$(id -g) ${DATA_DIR%/*}
+        mkdir -p ${DATA_DIR}/{db,web,.gcp}
+    "
+
     log "Stopping container before data sync..."
     vm_ssh "docker rm -f ${CONTAINER_NAME} 2>/dev/null || true"
 
     log "Uploading dubora.db to VM..."
     vm_scp "$LOCAL_DB" "${DATA_DIR}/db/dubora.db"
 
-    log "DB synced."
+    # Sync GCS credentials if available
+    local GCP_CRED="$PROJECT_DIR/.gcp/pikppo-dubora.json"
+    if [ -f "$GCP_CRED" ]; then
+        log "Uploading GCS credentials..."
+        vm_scp "$GCP_CRED" "${DATA_DIR}/.gcp/pikppo-dubora.json"
+    fi
+
+    log "Data synced."
 }
 
 # ── 构建镜像 ─────────────────────────────────────────────
@@ -70,6 +84,11 @@ deploy_to_vm() {
     vm_scp "$PROJECT_DIR/.env" "~/.env.dubora"
 
     log "Deploying container..."
+    log "Authenticating Docker on VM..."
+    local token
+    token=$(gcloud auth print-access-token)
+    vm_ssh "echo '${token}' | docker login -u oauth2accesstoken --password-stdin https://${REGION}-docker.pkg.dev"
+
     vm_ssh "
         docker pull ${IMAGE_URL}
         docker rm -f ${CONTAINER_NAME} 2>/dev/null || true
