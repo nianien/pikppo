@@ -5,6 +5,10 @@ const BASE = '/api'
 export async function fetchJson<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${BASE}${path}`, init)
   if (!res.ok) {
+    if (res.status === 401) {
+      window.location.reload()
+      throw new Error('Unauthorized')
+    }
     const text = await res.text()
     throw new Error(`API ${res.status}: ${text}`)
   }

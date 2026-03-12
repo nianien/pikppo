@@ -1,4 +1,4 @@
-import React from 'react'
+import React, { useEffect } from 'react'
 import ReactDOM from 'react-dom/client'
 import { BrowserRouter, Routes, Route } from 'react-router-dom'
 import { AppShell } from './components/AppShell'
@@ -7,6 +7,8 @@ import { DramaDetailPage } from './pages/DramaDetailPage'
 import { IDEPage } from './pages/IDEPage'
 import { CastingPage } from './pages/CastingPage'
 import { GlossaryPage } from './pages/GlossaryPage'
+import { LandingPage } from './pages/LandingPage'
+import { useAuthStore } from './stores/auth-store'
 import './index.css'
 
 class ErrorBoundary extends React.Component<
@@ -43,20 +45,32 @@ class ErrorBoundary extends React.Component<
   }
 }
 
+function AuthGate({ children }: { children: React.ReactNode }) {
+  const { user, checkAuth } = useAuthStore()
+
+  useEffect(() => { checkAuth() }, [checkAuth])
+
+  if (!user) return <LandingPage />
+
+  return <>{children}</>
+}
+
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
     <ErrorBoundary>
       <BrowserRouter>
-        <Routes>
-          <Route element={<AppShell />}>
-            <Route path="/" element={<DramaListPage />} />
-            <Route path="/drama/:dramaId" element={<DramaDetailPage />} />
-            <Route path="/ide/:episodeId" element={<IDEPage />} />
-            <Route path="/voices" element={<CastingPage />} />
-            <Route path="/casting/:dramaId" element={<CastingPage />} />
-            <Route path="/glossary" element={<GlossaryPage />} />
-          </Route>
-        </Routes>
+        <AuthGate>
+          <Routes>
+            <Route element={<AppShell />}>
+              <Route path="/" element={<DramaListPage />} />
+              <Route path="/drama/:dramaId" element={<DramaDetailPage />} />
+              <Route path="/ide/:episodeId" element={<IDEPage />} />
+              <Route path="/voices" element={<CastingPage />} />
+              <Route path="/casting/:dramaId" element={<CastingPage />} />
+              <Route path="/glossary" element={<GlossaryPage />} />
+            </Route>
+          </Routes>
+        </AuthGate>
       </BrowserRouter>
     </ErrorBoundary>
   </React.StrictMode>
