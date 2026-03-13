@@ -59,6 +59,14 @@ def _get_session(request: Request) -> dict | None:
         return None
 
 
+def _callback_url(request: Request) -> str:
+    """Get Google callback URL, respecting X-Forwarded-Proto from reverse proxy."""
+    url = str(request.url_for("google_callback"))
+    if request.headers.get("x-forwarded-proto") == "https" and url.startswith("http://"):
+        url = "https://" + url[7:]
+    return url
+
+
 def _set_session(response: RedirectResponse, session_data: dict):
     token = _serializer().dumps(session_data)
     response.set_cookie(
@@ -94,7 +102,7 @@ async def google_login(request: Request):
         _set_session(response, session_data)
         return response
     client_id, _, _ = _get_config()
-    callback_url = str(request.url_for("google_callback"))
+    callback_url = _callback_url(request)
     params = {
         "client_id": client_id,
         "redirect_uri": callback_url,
@@ -112,7 +120,7 @@ async def google_callback(request: Request, code: str = ""):
         return JSONResponse({"error": "missing code"}, status_code=400)
 
     client_id, client_secret, allowed_patterns = _get_config()
-    callback_url = str(request.url_for("google_callback"))
+    callback_url = _callback_url(request)
 
     async with httpx.AsyncClient() as client:
         token_resp = await client.post(GOOGLE_TOKEN_URL, data={

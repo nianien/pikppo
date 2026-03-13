@@ -109,7 +109,7 @@ deploy_to_vm() {
 
     EXTERNAL_IP=$(gcloud compute instances describe "$VM_NAME" \
         --zone="$ZONE" --format="get(networkInterfaces[0].accessConfigs[0].natIP)")
-    log "Done!  http://${EXTERNAL_IP}"
+    log "Done!  http://${EXTERNAL_IP}  |  https://dub.pikppo.com"
 }
 
 # ── 用法 ────────────────────────────────────────────────
