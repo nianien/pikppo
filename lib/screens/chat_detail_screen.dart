@@ -2,12 +2,15 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../models/role.dart';
 import '../providers/app_state_provider.dart';
+import '../theme/design_tokens.dart';
 import '../widgets/message_bubble.dart';
 import 'settings_screen.dart';
 
+Color _parseColor(String hex) =>
+    Color(int.parse(hex.replaceFirst('#', '0xFF')));
+
 class ChatDetailScreen extends ConsumerStatefulWidget {
   final Role role;
-
   const ChatDetailScreen({super.key, required this.role});
 
   @override
@@ -33,7 +36,7 @@ class _ChatDetailScreenState extends ConsumerState<ChatDetailScreen> {
         _scrollController.animateTo(
           _scrollController.position.maxScrollExtent,
           duration: const Duration(milliseconds: 300),
-          curve: Curves.easeOut,
+          curve: Curves.easeOutCubic,
         );
       }
     });
@@ -64,25 +67,41 @@ class _ChatDetailScreenState extends ConsumerState<ChatDetailScreen> {
     final appState = ref.watch(appStateProvider);
     final messages = appState.currentRoleMessages;
     final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    final roleColor = _parseColor(widget.role.color);
     _scrollToBottom();
 
     return Scaffold(
       appBar: AppBar(
+        titleSpacing: 0,
         title: Row(
           children: [
-            Text(widget.role.icon, style: const TextStyle(fontSize: 22)),
-            const SizedBox(width: 8),
+            Container(
+              width: 36,
+              height: 36,
+              decoration: BoxDecoration(
+                color: roleColor.withValues(alpha: 0.16),
+                borderRadius: BorderRadius.circular(AppRadius.sm),
+              ),
+              alignment: Alignment.center,
+              child: Text(widget.role.icon,
+                  style: const TextStyle(fontSize: 18)),
+            ),
+            const SizedBox(width: AppSpacing.sm),
             Column(
               crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
               children: [
                 Text(widget.role.name,
                     style: theme.textTheme.titleMedium
-                        ?.copyWith(fontWeight: FontWeight.w600)),
+                        ?.copyWith(fontWeight: FontWeight.w700)),
                 if (appState.currentModel.isNotEmpty)
-                  Text(appState.currentModel,
-                      style: theme.textTheme.labelSmall?.copyWith(
-                          color: theme.colorScheme.onSurface
-                              .withValues(alpha: 0.4))),
+                  Text(
+                    appState.currentModel,
+                    style: theme.textTheme.labelSmall?.copyWith(
+                        color: scheme.onSurfaceVariant
+                            .withValues(alpha: 0.7)),
+                  ),
               ],
             ),
           ],
@@ -92,48 +111,26 @@ class _ChatDetailScreenState extends ConsumerState<ChatDetailScreen> {
             onPressed: () => _showChatInfo(context),
             icon: const Icon(Icons.more_horiz),
           ),
+          const SizedBox(width: AppSpacing.xs),
         ],
       ),
       body: Column(
         children: [
           if (appState.currentModel.isEmpty)
-            MaterialBanner(
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-              content: const Text('请先在设置中配置并选择模型'),
-              actions: [
-                TextButton(
-                  onPressed: () => Navigator.push(
-                    context,
-                    MaterialPageRoute(builder: (_) => const SettingsScreen()),
-                  ),
-                  child: const Text('去设置'),
-                ),
-              ],
+            _NoModelBanner(
+              onTap: () => Navigator.push(
+                context,
+                MaterialPageRoute(
+                    builder: (_) => const SettingsScreen()),
+              ),
             ),
           Expanded(
             child: messages.isEmpty
-                ? Center(
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Text(widget.role.icon,
-                            style: const TextStyle(fontSize: 48)),
-                        const SizedBox(height: 12),
-                        Text(widget.role.description,
-                            style: theme.textTheme.bodyMedium?.copyWith(
-                                color: theme.colorScheme.onSurface
-                                    .withValues(alpha: 0.4))),
-                        const SizedBox(height: 4),
-                        Text('发送消息开始对话',
-                            style: theme.textTheme.bodySmall?.copyWith(
-                                color: theme.colorScheme.onSurface
-                                    .withValues(alpha: 0.3))),
-                      ],
-                    ),
-                  )
+                ? _ChatEmptyState(role: widget.role)
                 : ListView.builder(
                     controller: _scrollController,
-                    padding: const EdgeInsets.only(top: 8, bottom: 8),
+                    padding: const EdgeInsets.symmetric(
+                        vertical: AppSpacing.sm),
                     itemCount:
                         messages.length + (appState.isLoading ? 1 : 0),
                     itemBuilder: (context, index) {
@@ -149,59 +146,11 @@ class _ChatDetailScreenState extends ConsumerState<ChatDetailScreen> {
                     },
                   ),
           ),
-          // Input bar
-          Container(
-            padding: EdgeInsets.only(
-              left: 12,
-              right: 8,
-              top: 8,
-              bottom: MediaQuery.of(context).padding.bottom + 8,
-            ),
-            decoration: BoxDecoration(
-              color: theme.colorScheme.surface,
-              border: Border(
-                top: BorderSide(
-                    color:
-                        theme.colorScheme.outlineVariant.withValues(alpha: 0.3)),
-              ),
-            ),
-            child: Row(
-              children: [
-                Expanded(
-                  child: TextField(
-                    controller: _controller,
-                    focusNode: _focusNode,
-                    onSubmitted: (_) => _sendMessage(),
-                    textInputAction: TextInputAction.send,
-                    decoration: InputDecoration(
-                      hintText: '输入消息...',
-                      border: OutlineInputBorder(
-                        borderRadius: BorderRadius.circular(24),
-                        borderSide: BorderSide.none,
-                      ),
-                      filled: true,
-                      fillColor: theme.colorScheme.surfaceContainerHighest,
-                      contentPadding: const EdgeInsets.symmetric(
-                          horizontal: 16, vertical: 10),
-                    ),
-                  ),
-                ),
-                const SizedBox(width: 8),
-                appState.isLoading
-                    ? const SizedBox(
-                        width: 40,
-                        height: 40,
-                        child: Padding(
-                          padding: EdgeInsets.all(8),
-                          child: CircularProgressIndicator(strokeWidth: 2),
-                        ),
-                      )
-                    : IconButton.filled(
-                        onPressed: _sendMessage,
-                        icon: const Icon(Icons.send_rounded),
-                      ),
-              ],
-            ),
+          _InputBar(
+            controller: _controller,
+            focusNode: _focusNode,
+            isLoading: appState.isLoading,
+            onSend: _sendMessage,
           ),
         ],
       ),
@@ -210,34 +159,55 @@ class _ChatDetailScreenState extends ConsumerState<ChatDetailScreen> {
 
   void _showChatInfo(BuildContext context) {
     final theme = Theme.of(context);
+    final roleColor = _parseColor(widget.role.color);
     showModalBottomSheet(
       context: context,
-      builder: (_) => Container(
-        padding: const EdgeInsets.all(24),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Text(widget.role.icon, style: const TextStyle(fontSize: 48)),
-            const SizedBox(height: 12),
-            Text(widget.role.name,
-                style: theme.textTheme.titleLarge
-                    ?.copyWith(fontWeight: FontWeight.bold)),
-            const SizedBox(height: 4),
-            Text(widget.role.description,
+      builder: (_) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(
+              AppSpacing.xl, 0, AppSpacing.xl, AppSpacing.xl),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Container(
+                width: 80,
+                height: 80,
+                decoration: BoxDecoration(
+                  color: roleColor.withValues(alpha: 0.18),
+                  borderRadius: BorderRadius.circular(AppRadius.lg),
+                ),
+                alignment: Alignment.center,
+                child: Text(widget.role.icon,
+                    style: const TextStyle(fontSize: 40)),
+              ),
+              const SizedBox(height: AppSpacing.md),
+              Text(widget.role.name, style: theme.textTheme.titleLarge),
+              const SizedBox(height: AppSpacing.xxs),
+              Text(
+                widget.role.description,
                 style: theme.textTheme.bodyMedium?.copyWith(
-                    color:
-                        theme.colorScheme.onSurface.withValues(alpha: 0.5))),
-            const SizedBox(height: 24),
-            ListTile(
-              leading: const Icon(Icons.delete_outline, color: Colors.red),
-              title: const Text('清空聊天记录',
-                  style: TextStyle(color: Colors.red)),
-              onTap: () {
-                Navigator.pop(context);
-                _confirmClearChat(context);
-              },
-            ),
-          ],
+                    color: theme.colorScheme.onSurfaceVariant),
+              ),
+              const SizedBox(height: AppSpacing.xl),
+              SizedBox(
+                width: double.infinity,
+                child: OutlinedButton.icon(
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: theme.colorScheme.error,
+                    side: BorderSide(
+                        color: theme.colorScheme.error
+                            .withValues(alpha: 0.4)),
+                  ),
+                  onPressed: () {
+                    Navigator.pop(context);
+                    _confirmClearChat(context);
+                  },
+                  icon: const Icon(Icons.delete_outline),
+                  label: const Text('清空聊天记录'),
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );
@@ -264,6 +234,200 @@ class _ChatDetailScreenState extends ConsumerState<ChatDetailScreen> {
             style: FilledButton.styleFrom(
                 backgroundColor: Theme.of(context).colorScheme.error),
             child: const Text('确认清空'),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _InputBar extends StatelessWidget {
+  final TextEditingController controller;
+  final FocusNode focusNode;
+  final bool isLoading;
+  final VoidCallback onSend;
+
+  const _InputBar({
+    required this.controller,
+    required this.focusNode,
+    required this.isLoading,
+    required this.onSend,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    return Container(
+      padding: EdgeInsets.fromLTRB(
+        AppSpacing.sm,
+        AppSpacing.xs,
+        AppSpacing.xs,
+        MediaQuery.of(context).padding.bottom + AppSpacing.xs,
+      ),
+      decoration: BoxDecoration(
+        color: scheme.surface,
+        border: Border(
+          top: BorderSide(
+            color: scheme.outlineVariant.withValues(alpha: 0.4),
+            width: 0.6,
+          ),
+        ),
+      ),
+      child: Row(
+        children: [
+          Expanded(
+            child: Container(
+              decoration: BoxDecoration(
+                color: scheme.surfaceContainerHighest,
+                borderRadius: BorderRadius.circular(AppRadius.xl),
+              ),
+              child: TextField(
+                controller: controller,
+                focusNode: focusNode,
+                onSubmitted: (_) => onSend(),
+                textInputAction: TextInputAction.send,
+                minLines: 1,
+                maxLines: 5,
+                style: theme.textTheme.bodyLarge,
+                decoration: const InputDecoration(
+                  hintText: '说点什么…',
+                  border: InputBorder.none,
+                  enabledBorder: InputBorder.none,
+                  focusedBorder: InputBorder.none,
+                  filled: false,
+                  contentPadding: EdgeInsets.symmetric(
+                      horizontal: AppSpacing.md,
+                      vertical: AppSpacing.sm + 2),
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(width: AppSpacing.xs),
+          AnimatedSwitcher(
+            duration: AppDurations.fast,
+            child: isLoading
+                ? Padding(
+                    key: const ValueKey('loading'),
+                    padding: const EdgeInsets.all(AppSpacing.xs),
+                    child: SizedBox(
+                      width: 24,
+                      height: 24,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2.4,
+                        color: scheme.primary,
+                      ),
+                    ),
+                  )
+                : Material(
+                    key: const ValueKey('send'),
+                    color: scheme.primary,
+                    borderRadius: BorderRadius.circular(AppRadius.lg),
+                    child: InkWell(
+                      onTap: onSend,
+                      borderRadius: BorderRadius.circular(AppRadius.lg),
+                      child: Padding(
+                        padding: const EdgeInsets.all(10),
+                        child: Icon(Icons.arrow_upward_rounded,
+                            color: scheme.onPrimary, size: 22),
+                      ),
+                    ),
+                  ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _NoModelBanner extends StatelessWidget {
+  final VoidCallback onTap;
+  const _NoModelBanner({required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    return Container(
+      margin: const EdgeInsets.fromLTRB(
+          AppSpacing.md, AppSpacing.xs, AppSpacing.md, 0),
+      padding: const EdgeInsets.symmetric(
+          horizontal: AppSpacing.md, vertical: AppSpacing.sm),
+      decoration: BoxDecoration(
+        color: scheme.tertiaryContainer.withValues(alpha: 0.6),
+        borderRadius: BorderRadius.circular(AppRadius.md),
+      ),
+      child: Row(
+        children: [
+          Icon(Icons.info_outline,
+              size: 18, color: scheme.onTertiaryContainer),
+          const SizedBox(width: AppSpacing.xs),
+          Expanded(
+            child: Text(
+              '请先在设置中配置并选择模型',
+              style: theme.textTheme.bodySmall
+                  ?.copyWith(color: scheme.onTertiaryContainer),
+            ),
+          ),
+          TextButton(
+            onPressed: onTap,
+            style: TextButton.styleFrom(
+              foregroundColor: scheme.onTertiaryContainer,
+              padding: const EdgeInsets.symmetric(horizontal: 12),
+              minimumSize: const Size(0, 32),
+            ),
+            child: const Text('去设置'),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _ChatEmptyState extends StatelessWidget {
+  final Role role;
+  const _ChatEmptyState({required this.role});
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    final color = _parseColor(role.color);
+    return Center(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Container(
+            width: 96,
+            height: 96,
+            decoration: BoxDecoration(
+              gradient: LinearGradient(
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
+                colors: [
+                  color.withValues(alpha: 0.22),
+                  color.withValues(alpha: 0.10),
+                ],
+              ),
+              borderRadius: BorderRadius.circular(AppRadius.xl),
+            ),
+            alignment: Alignment.center,
+            child: Text(role.icon, style: const TextStyle(fontSize: 48)),
+          ),
+          const SizedBox(height: AppSpacing.lg),
+          Text(role.name, style: theme.textTheme.titleLarge),
+          const SizedBox(height: AppSpacing.xxs),
+          Text(
+            role.description,
+            style: theme.textTheme.bodyMedium?.copyWith(
+              color: scheme.onSurfaceVariant,
+            ),
+          ),
+          const SizedBox(height: AppSpacing.lg),
+          Text(
+            '发送一条消息开始对话',
+            style: theme.textTheme.bodySmall?.copyWith(
+                color: scheme.onSurfaceVariant.withValues(alpha: 0.6)),
           ),
         ],
       ),

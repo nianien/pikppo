@@ -3,12 +3,12 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../providers/app_state_provider.dart';
 import '../models/role.dart';
 import '../models/group.dart';
+import '../theme/design_tokens.dart';
 import 'chat_detail_screen.dart';
 import 'group_chat_screen.dart';
 
-Color _parseColor(String hex) {
-  return Color(int.parse(hex.replaceFirst('#', '0xFF')));
-}
+Color _parseColor(String hex) =>
+    Color(int.parse(hex.replaceFirst('#', '0xFF')));
 
 String _formatTime(int? timestamp) {
   if (timestamp == null) return '';
@@ -29,9 +29,7 @@ class ChatListScreen extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final appState = ref.watch(appStateProvider);
     final notifier = ref.read(appStateProvider.notifier);
-    final theme = Theme.of(context);
 
-    // Group chats sorted by last message time
     final groupItems = <_GroupChatItem>[];
     for (final group in appState.groups) {
       final lastTime = notifier.getLastGroupMessageTime(group.id);
@@ -49,7 +47,6 @@ class ChatListScreen extends ConsumerWidget {
     }
     groupItems.sort((a, b) => b.lastTime.compareTo(a.lastTime));
 
-    // Private chats sorted by last message time
     final privateItems = <_PrivateChatItem>[];
     for (final role in appState.roles) {
       final msgs = notifier.getMessagesForRole(role.id);
@@ -64,13 +61,6 @@ class ChatListScreen extends ConsumerWidget {
     privateItems.sort((a, b) => b.lastTime.compareTo(a.lastTime));
 
     final isEmpty = groupItems.isEmpty && privateItems.isEmpty;
-    final hasGroups = groupItems.isNotEmpty;
-    final hasPrivate = privateItems.isNotEmpty;
-
-    // Flat index layout: [group header?, ...groups, private header?, ...privates]
-    int totalItems = 0;
-    if (hasGroups) totalItems += 1 + groupItems.length;
-    if (hasPrivate) totalItems += 1 + privateItems.length;
 
     return Scaffold(
       appBar: AppBar(
@@ -81,182 +71,71 @@ class ChatListScreen extends ConsumerWidget {
             icon: const Icon(Icons.add_comment_outlined),
             tooltip: '发起聊天',
           ),
+          const SizedBox(width: AppSpacing.xs),
         ],
       ),
       body: isEmpty
-          ? Center(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Icon(Icons.chat_bubble_outline,
-                      size: 64,
-                      color:
-                          theme.colorScheme.onSurface.withValues(alpha: 0.2)),
-                  const SizedBox(height: 16),
-                  Text('暂无聊天',
-                      style: theme.textTheme.bodyLarge?.copyWith(
-                          color: theme.colorScheme.onSurface
-                              .withValues(alpha: 0.4))),
-                  const SizedBox(height: 8),
-                  TextButton(
-                    onPressed: () => _showNewChatSheet(context, ref),
-                    child: const Text('开始新对话'),
-                  ),
-                ],
+          ? _EmptyState(onStart: () => _showNewChatSheet(context, ref))
+          : ListView(
+              padding: const EdgeInsets.fromLTRB(
+                AppSpacing.md,
+                AppSpacing.xs,
+                AppSpacing.md,
+                AppSpacing.xl,
               ),
-            )
-          : ListView.builder(
-              itemCount: totalItems,
-              itemBuilder: (context, index) {
-                int cursor = 0;
-
-                if (hasGroups) {
-                  if (index == cursor) return _buildSectionHeader('群聊', theme);
-                  cursor++;
-                  if (index < cursor + groupItems.length) {
-                    final item = groupItems[index - cursor];
-                    final isLastGroup = index == cursor + groupItems.length - 1;
-                    return Column(mainAxisSize: MainAxisSize.min, children: [
-                      _buildGroupTile(context, item, theme),
-                      if (!isLastGroup || hasPrivate)
-                        Divider(height: 1, indent: 76,
-                            color: theme.colorScheme.outlineVariant.withValues(alpha: 0.3)),
-                    ]);
-                  }
-                  cursor += groupItems.length;
-                }
-
-                if (hasPrivate) {
-                  if (index == cursor) return _buildSectionHeader('单聊', theme);
-                  cursor++;
-                  if (index < cursor + privateItems.length) {
-                    final item = privateItems[index - cursor];
-                    final isLastPrivate = index == cursor + privateItems.length - 1;
-                    return Column(mainAxisSize: MainAxisSize.min, children: [
-                      _buildPrivateTile(context, item, notifier, theme),
-                      if (!isLastPrivate)
-                        Divider(height: 1, indent: 76,
-                            color: theme.colorScheme.outlineVariant.withValues(alpha: 0.3)),
-                    ]);
-                  }
-                }
-
-                return const SizedBox.shrink();
-              },
-            ),
-    );
-  }
-
-  Widget _buildSectionHeader(String title, ThemeData theme) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-      color: theme.colorScheme.surfaceContainerHighest.withValues(alpha: 0.5),
-      child: Text(title,
-          style: theme.textTheme.labelMedium?.copyWith(
-              color: theme.colorScheme.onSurface.withValues(alpha: 0.5),
-              fontWeight: FontWeight.w600)),
-    );
-  }
-
-  Widget _buildPrivateTile(BuildContext context, _PrivateChatItem item,
-      notifier, ThemeData theme) {
-    final color = _parseColor(item.role.color);
-    return ListTile(
-      contentPadding:
-          const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
-      leading: CircleAvatar(
-        radius: 24,
-        backgroundColor: color.withValues(alpha: 0.15),
-        child: Text(item.role.icon, style: const TextStyle(fontSize: 26)),
-      ),
-      title: Row(
-        children: [
-          Expanded(
-            child: Text(item.role.name,
-                style: theme.textTheme.titleMedium
-                    ?.copyWith(fontWeight: FontWeight.w600)),
-          ),
-          Text(_formatTime(item.lastTime),
-              style: theme.textTheme.labelSmall?.copyWith(
-                  color: theme.colorScheme.onSurface.withValues(alpha: 0.4))),
-        ],
-      ),
-      subtitle: Padding(
-        padding: const EdgeInsets.only(top: 4),
-        child: Text(item.lastMessage,
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            style: theme.textTheme.bodySmall?.copyWith(
-                color: theme.colorScheme.onSurface.withValues(alpha: 0.5))),
-      ),
-      onTap: () {
-        notifier.switchRole(item.role.id);
-        Navigator.push(
-          context,
-          MaterialPageRoute(
-              builder: (_) => ChatDetailScreen(role: item.role)),
-        );
-      },
-    );
-  }
-
-  Widget _buildGroupTile(
-      BuildContext context, _GroupChatItem item, ThemeData theme) {
-    return ListTile(
-      contentPadding:
-          const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
-      leading: SizedBox(
-        width: 48,
-        height: 48,
-        child: _MiniGroupAvatar(roles: item.roles),
-      ),
-      title: Row(
-        children: [
-          Expanded(
-            child: Row(
               children: [
-                Flexible(
-                  child: Text(item.group.name,
-                      overflow: TextOverflow.ellipsis,
-                      maxLines: 1,
-                      style: theme.textTheme.titleMedium
-                          ?.copyWith(fontWeight: FontWeight.w600)),
-                ),
-                const SizedBox(width: 6),
-                Container(
-                  padding: const EdgeInsets.symmetric(
-                      horizontal: 5, vertical: 1),
-                  decoration: BoxDecoration(
-                    color: theme.colorScheme.secondaryContainer,
-                    borderRadius: BorderRadius.circular(8),
-                  ),
-                  child: Text('${item.roles.length}',
-                      style: theme.textTheme.labelSmall?.copyWith(
-                          color: theme.colorScheme.onSecondaryContainer)),
-                ),
+                if (groupItems.isNotEmpty) ...[
+                  _SectionLabel(label: '群聊', count: groupItems.length),
+                  const SizedBox(height: AppSpacing.xs),
+                  ...groupItems.map((item) => _ChatCard(
+                        leading: _MiniGroupAvatar(roles: item.roles),
+                        title: item.group.name,
+                        trailingChip: '${item.roles.length} 人',
+                        time: _formatTime(item.lastTime),
+                        subtitle: item.lastMessage,
+                        onTap: () => Navigator.push(
+                          context,
+                          MaterialPageRoute(
+                            builder: (_) =>
+                                GroupChatScreen(group: item.group),
+                          ),
+                        ),
+                      )),
+                  const SizedBox(height: AppSpacing.lg),
+                ],
+                if (privateItems.isNotEmpty) ...[
+                  _SectionLabel(label: '单聊', count: privateItems.length),
+                  const SizedBox(height: AppSpacing.xs),
+                  ...privateItems.map((item) {
+                    final color = _parseColor(item.role.color);
+                    return _ChatCard(
+                      leading: _RoleAvatar(
+                          color: color, icon: item.role.icon),
+                      title: item.role.name,
+                      time: _formatTime(item.lastTime),
+                      subtitle: item.lastMessage,
+                      accent: color,
+                      onTap: () {
+                        notifier.switchRole(item.role.id);
+                        Navigator.push(
+                          context,
+                          MaterialPageRoute(
+                            builder: (_) =>
+                                ChatDetailScreen(role: item.role),
+                          ),
+                        );
+                      },
+                    );
+                  }),
+                ],
               ],
             ),
-          ),
-          Text(_formatTime(item.lastTime),
-              style: theme.textTheme.labelSmall?.copyWith(
-                  color: theme.colorScheme.onSurface.withValues(alpha: 0.4))),
-        ],
-      ),
-      subtitle: Padding(
-        padding: const EdgeInsets.only(top: 4),
-        child: Text(item.lastMessage,
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-            style: theme.textTheme.bodySmall?.copyWith(
-                color: theme.colorScheme.onSurface.withValues(alpha: 0.5))),
-      ),
-      onTap: () {
-        Navigator.push(
-          context,
-          MaterialPageRoute(
-              builder: (_) => GroupChatScreen(group: item.group)),
-        );
-      },
+      floatingActionButton: !isEmpty
+          ? FloatingActionButton(
+              onPressed: () => _showNewChatSheet(context, ref),
+              child: const Icon(Icons.edit_outlined),
+            )
+          : null,
     );
   }
 
@@ -270,118 +149,328 @@ class ChatListScreen extends ConsumerWidget {
         expand: false,
         initialChildSize: 0.6,
         maxChildSize: 0.9,
-        builder: (context, scrollController) => Column(
-          children: [
-            const SizedBox(height: 12),
-            Container(
-              width: 36,
-              height: 4,
-              decoration: BoxDecoration(
-                color: Theme.of(context).colorScheme.outlineVariant,
-                borderRadius: BorderRadius.circular(2),
-              ),
-            ),
-            const SizedBox(height: 16),
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 20),
-              child: Align(
-                alignment: Alignment.centerLeft,
-                child: Text('选择角色开始聊天',
-                    style: Theme.of(context)
-                        .textTheme
-                        .titleMedium
-                        ?.copyWith(fontWeight: FontWeight.bold)),
-              ),
-            ),
-            const SizedBox(height: 8),
-            Expanded(
-              child: ListView(
-                controller: scrollController,
-                children: appState.roles.map((role) {
-                  final color = _parseColor(role.color);
-                  return ListTile(
-                    leading: CircleAvatar(
-                      backgroundColor: color.withValues(alpha: 0.15),
-                      child: Text(role.icon,
-                          style: const TextStyle(fontSize: 22)),
-                    ),
-                    title: Text(role.name),
-                    subtitle: Text(role.description),
-                    onTap: () {
-                      Navigator.pop(context);
-                      notifier.switchRole(role.id);
-                      Navigator.push(
-                        context,
-                        MaterialPageRoute(
-                            builder: (_) => ChatDetailScreen(role: role)),
+        builder: (context, scrollController) {
+          final theme = Theme.of(context);
+          return Padding(
+            padding: const EdgeInsets.symmetric(horizontal: AppSpacing.md),
+            child: Column(
+              children: [
+                const SizedBox(height: AppSpacing.md),
+                Text(
+                  '选择角色开始聊天',
+                  style: theme.textTheme.titleLarge,
+                ),
+                const SizedBox(height: AppSpacing.sm),
+                Expanded(
+                  child: ListView.separated(
+                    controller: scrollController,
+                    padding: const EdgeInsets.symmetric(vertical: AppSpacing.xs),
+                    itemCount: appState.roles.length,
+                    separatorBuilder: (_, _) =>
+                        const SizedBox(height: AppSpacing.xs),
+                    itemBuilder: (_, i) {
+                      final role = appState.roles[i];
+                      final color = _parseColor(role.color);
+                      return _ChatCard(
+                        leading: _RoleAvatar(color: color, icon: role.icon),
+                        title: role.name,
+                        time: '',
+                        subtitle: role.description,
+                        accent: color,
+                        onTap: () {
+                          Navigator.pop(context);
+                          notifier.switchRole(role.id);
+                          Navigator.push(
+                            context,
+                            MaterialPageRoute(
+                              builder: (_) =>
+                                  ChatDetailScreen(role: role),
+                            ),
+                          );
+                        },
                       );
                     },
-                  );
-                }).toList(),
-              ),
+                  ),
+                ),
+              ],
             ),
-          ],
+          );
+        },
+      ),
+    );
+  }
+}
+
+class _SectionLabel extends StatelessWidget {
+  final String label;
+  final int count;
+  const _SectionLabel({required this.label, required this.count});
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(4, AppSpacing.sm, 4, AppSpacing.xs),
+      child: Row(
+        children: [
+          Text(
+            label,
+            style: theme.textTheme.labelLarge?.copyWith(
+              color: theme.colorScheme.onSurfaceVariant,
+              fontWeight: FontWeight.w600,
+              letterSpacing: 0.4,
+            ),
+          ),
+          const SizedBox(width: AppSpacing.xs),
+          Text(
+            count.toString(),
+            style: theme.textTheme.labelSmall?.copyWith(
+              color: theme.colorScheme.onSurfaceVariant
+                  .withValues(alpha: 0.6),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _ChatCard extends StatelessWidget {
+  final Widget leading;
+  final String title;
+  final String time;
+  final String? trailingChip;
+  final String subtitle;
+  final Color? accent;
+  final VoidCallback onTap;
+
+  const _ChatCard({
+    required this.leading,
+    required this.title,
+    required this.time,
+    this.trailingChip,
+    required this.subtitle,
+    this.accent,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    return Padding(
+      padding: const EdgeInsets.only(bottom: AppSpacing.xs),
+      child: Material(
+        color: scheme.surfaceContainerLow,
+        borderRadius: BorderRadius.circular(AppRadius.lg),
+        child: InkWell(
+          onTap: onTap,
+          borderRadius: BorderRadius.circular(AppRadius.lg),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(
+                horizontal: AppSpacing.md, vertical: AppSpacing.sm + 2),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.center,
+              children: [
+                leading,
+                const SizedBox(width: AppSpacing.sm),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          Flexible(
+                            child: Text(
+                              title,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: theme.textTheme.titleMedium?.copyWith(
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          ),
+                          if (trailingChip != null) ...[
+                            const SizedBox(width: AppSpacing.xs),
+                            Container(
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 8, vertical: 2),
+                              decoration: BoxDecoration(
+                                color: scheme.secondaryContainer,
+                                borderRadius:
+                                    BorderRadius.circular(AppRadius.pill),
+                              ),
+                              child: Text(
+                                trailingChip!,
+                                style: theme.textTheme.labelSmall?.copyWith(
+                                  color: scheme.onSecondaryContainer,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                            ),
+                          ],
+                          const Spacer(),
+                          if (time.isNotEmpty)
+                            Text(
+                              time,
+                              style: theme.textTheme.labelSmall?.copyWith(
+                                color: scheme.onSurfaceVariant
+                                    .withValues(alpha: 0.7),
+                              ),
+                            ),
+                        ],
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        subtitle,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: theme.textTheme.bodySmall?.copyWith(
+                          color: scheme.onSurfaceVariant,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
         ),
       ),
     );
   }
 }
 
-// ---- Mini group avatar for list ----
-class _MiniGroupAvatar extends StatelessWidget {
-  final List<Role> roles;
-
-  const _MiniGroupAvatar({required this.roles});
+class _RoleAvatar extends StatelessWidget {
+  final Color color;
+  final String icon;
+  const _RoleAvatar({required this.color, required this.icon});
 
   @override
   Widget build(BuildContext context) {
-    final display = roles.take(4).toList();
-    return GridView.count(
-      crossAxisCount: 2,
-      shrinkWrap: true,
-      physics: const NeverScrollableScrollPhysics(),
-      mainAxisSpacing: 2,
-      crossAxisSpacing: 2,
-      children: display.map((role) {
-        final color = _parseColor(role.color);
-        return Container(
-          decoration: BoxDecoration(
-            color: color.withValues(alpha: 0.15),
-            borderRadius: BorderRadius.circular(3),
-          ),
-          child: Center(
-            child: Text(role.icon, style: const TextStyle(fontSize: 10)),
-          ),
-        );
-      }).toList(),
+    return Container(
+      width: 48,
+      height: 48,
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [
+            color.withValues(alpha: 0.22),
+            color.withValues(alpha: 0.10),
+          ],
+        ),
+        borderRadius: BorderRadius.circular(AppRadius.md),
+        border: Border.all(
+          color: color.withValues(alpha: 0.28),
+          width: 0.5,
+        ),
+      ),
+      alignment: Alignment.center,
+      child: Text(icon, style: const TextStyle(fontSize: 24)),
     );
   }
 }
 
-// ---- Data classes ----
-abstract class _ListItem {
-  int get lastTime;
-  String get lastMessage;
+class _MiniGroupAvatar extends StatelessWidget {
+  final List<Role> roles;
+  const _MiniGroupAvatar({required this.roles});
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final display = roles.take(4).toList();
+    return Container(
+      width: 48,
+      height: 48,
+      padding: const EdgeInsets.all(4),
+      decoration: BoxDecoration(
+        color: scheme.surfaceContainerHighest,
+        borderRadius: BorderRadius.circular(AppRadius.md),
+      ),
+      child: GridView.count(
+        crossAxisCount: 2,
+        mainAxisSpacing: 2,
+        crossAxisSpacing: 2,
+        physics: const NeverScrollableScrollPhysics(),
+        children: display.map((role) {
+          final color = _parseColor(role.color);
+          return Container(
+            decoration: BoxDecoration(
+              color: color.withValues(alpha: 0.18),
+              borderRadius: BorderRadius.circular(AppRadius.xs / 2),
+            ),
+            alignment: Alignment.center,
+            child: Text(role.icon, style: const TextStyle(fontSize: 12)),
+          );
+        }).toList(),
+      ),
+    );
+  }
 }
 
-class _PrivateChatItem extends _ListItem {
+class _EmptyState extends StatelessWidget {
+  final VoidCallback onStart;
+  const _EmptyState({required this.onStart});
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    return Center(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Container(
+            width: 96,
+            height: 96,
+            decoration: BoxDecoration(
+              color: scheme.primaryContainer.withValues(alpha: 0.5),
+              borderRadius: BorderRadius.circular(AppRadius.xl),
+            ),
+            alignment: Alignment.center,
+            child: Icon(
+              Icons.chat_bubble_outline_rounded,
+              size: 44,
+              color: scheme.primary,
+            ),
+          ),
+          const SizedBox(height: AppSpacing.lg),
+          Text('还没有对话', style: theme.textTheme.titleLarge),
+          const SizedBox(height: AppSpacing.xs),
+          Text(
+            '选一个角色，跟你的助理打个招呼吧',
+            style: theme.textTheme.bodyMedium?.copyWith(
+              color: scheme.onSurfaceVariant,
+            ),
+          ),
+          const SizedBox(height: AppSpacing.lg),
+          FilledButton.icon(
+            onPressed: onStart,
+            icon: const Icon(Icons.add),
+            label: const Text('开始新对话'),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _PrivateChatItem {
   final Role role;
-  @override final String lastMessage;
-  @override final int lastTime;
-
-  _PrivateChatItem({
-    required this.role,
-    required this.lastMessage,
-    required this.lastTime,
-  });
+  final String lastMessage;
+  final int lastTime;
+  _PrivateChatItem(
+      {required this.role,
+      required this.lastMessage,
+      required this.lastTime});
 }
 
-class _GroupChatItem extends _ListItem {
+class _GroupChatItem {
   final Group group;
   final List<Role> roles;
-  @override final String lastMessage;
-  @override final int lastTime;
-
+  final String lastMessage;
+  final int lastTime;
   _GroupChatItem({
     required this.group,
     required this.roles,

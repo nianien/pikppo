@@ -1,9 +1,12 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'providers/app_state_provider.dart';
 import 'screens/chat_list_screen.dart';
 import 'screens/roles_screen.dart';
 import 'screens/apps_screen.dart';
 import 'screens/settings_screen.dart';
+import 'screens/onboarding_screen.dart';
+import 'theme/app_theme.dart';
 
 void main() {
   runApp(const ProviderScope(child: ButlerApp()));
@@ -15,25 +18,24 @@ class ButlerApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Private Butler',
+      title: 'pikppo',
       debugShowCheckedModeBanner: false,
-      theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(
-          seedColor: const Color(0xFF07C160),
-          brightness: Brightness.light,
-        ),
-        useMaterial3: true,
-      ),
-      darkTheme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(
-          seedColor: const Color(0xFF07C160),
-          brightness: Brightness.dark,
-        ),
-        useMaterial3: true,
-      ),
+      theme: AppTheme.light(),
+      darkTheme: AppTheme.dark(),
       themeMode: ThemeMode.system,
-      home: const MainShell(),
+      home: const _AppRoot(),
     );
+  }
+}
+
+class _AppRoot extends ConsumerWidget {
+  const _AppRoot();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final completed =
+        ref.watch(appStateProvider.select((s) => s.onboardingCompleted));
+    return completed ? const MainShell() : const OnboardingScreen();
   }
 }
 

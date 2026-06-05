@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../providers/app_state_provider.dart';
 import '../providers/model_service_provider.dart';
 import '../models/role.dart';
+import '../theme/design_tokens.dart';
 import 'chat_detail_screen.dart';
 import 'group_chat_screen.dart';
 
@@ -17,7 +18,6 @@ class RolesScreen extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final appState = ref.watch(appStateProvider);
     final notifier = ref.read(appStateProvider.notifier);
-    final theme = Theme.of(context);
 
     return Scaffold(
       appBar: AppBar(
@@ -40,39 +40,20 @@ class RolesScreen extends ConsumerWidget {
           ),
         ],
       ),
-      body: ListView.separated(
-        padding: const EdgeInsets.symmetric(vertical: 8),
-        itemCount: appState.roles.length,
-        separatorBuilder: (_, __) => Divider(
-          height: 1,
-          indent: 76,
-          color: theme.colorScheme.outlineVariant.withValues(alpha: 0.3),
+      body: ListView.builder(
+        padding: const EdgeInsets.fromLTRB(
+          AppSpacing.md,
+          AppSpacing.xs,
+          AppSpacing.md,
+          AppSpacing.xl,
         ),
+        itemCount: appState.roles.length,
         itemBuilder: (context, index) {
           final role = appState.roles[index];
           final color = _parseColor(role.color);
-
-          return ListTile(
-            contentPadding:
-                const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
-            leading: CircleAvatar(
-              radius: 24,
-              backgroundColor: color.withValues(alpha: 0.15),
-              child:
-                  Text(role.icon, style: const TextStyle(fontSize: 26)),
-            ),
-            title: Text(role.name,
-                style: theme.textTheme.titleMedium
-                    ?.copyWith(fontWeight: FontWeight.w600)),
-            subtitle: Padding(
-              padding: const EdgeInsets.only(top: 2),
-              child: Text(role.description,
-                  style: theme.textTheme.bodySmall?.copyWith(
-                      color: theme.colorScheme.onSurface
-                          .withValues(alpha: 0.5))),
-            ),
-            trailing:
-                Icon(Icons.chat_outlined, color: color, size: 22),
+          return _RoleCard(
+            role: role,
+            color: color,
             onTap: () {
               notifier.switchRole(role.id);
               Navigator.push(
@@ -552,6 +533,127 @@ class _CreateRoleScreenState extends ConsumerState<CreateRoleScreen> {
 
             const SizedBox(height: 40),
           ],
+        ),
+      ),
+    );
+  }
+}
+
+class _RoleCard extends StatelessWidget {
+  final Role role;
+  final Color color;
+  final VoidCallback onTap;
+
+  const _RoleCard(
+      {required this.role, required this.color, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    return Padding(
+      padding: const EdgeInsets.only(bottom: AppSpacing.sm),
+      child: Material(
+        color: scheme.surfaceContainerLow,
+        borderRadius: BorderRadius.circular(AppRadius.lg),
+        child: InkWell(
+          onTap: onTap,
+          borderRadius: BorderRadius.circular(AppRadius.lg),
+          child: Stack(
+            children: [
+              // Vertical color strip on the left as visual identity.
+              Positioned(
+                left: 0,
+                top: 12,
+                bottom: 12,
+                child: Container(
+                  width: 3,
+                  decoration: BoxDecoration(
+                    gradient: LinearGradient(
+                      begin: Alignment.topCenter,
+                      end: Alignment.bottomCenter,
+                      colors: [color, color.withValues(alpha: 0.5)],
+                    ),
+                    borderRadius: BorderRadius.circular(2),
+                  ),
+                ),
+              ),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(
+                    AppSpacing.md + 6,
+                    AppSpacing.md,
+                    AppSpacing.md,
+                    AppSpacing.md),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.center,
+                  children: [
+                    Container(
+                      width: 52,
+                      height: 52,
+                      decoration: BoxDecoration(
+                        gradient: LinearGradient(
+                          begin: Alignment.topLeft,
+                          end: Alignment.bottomRight,
+                          colors: [
+                            color.withValues(alpha: 0.22),
+                            color.withValues(alpha: 0.10),
+                          ],
+                        ),
+                        borderRadius:
+                            BorderRadius.circular(AppRadius.md),
+                        border: Border.all(
+                            color: color.withValues(alpha: 0.28),
+                            width: 0.5),
+                      ),
+                      alignment: Alignment.center,
+                      child: Text(role.icon,
+                          style: const TextStyle(fontSize: 26)),
+                    ),
+                    const SizedBox(width: AppSpacing.md),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(role.name,
+                              style: theme.textTheme.titleMedium?.copyWith(
+                                  fontWeight: FontWeight.w700)),
+                          const SizedBox(height: 2),
+                          Text(role.description,
+                              maxLines: 2,
+                              overflow: TextOverflow.ellipsis,
+                              style: theme.textTheme.bodySmall?.copyWith(
+                                  color: scheme.onSurfaceVariant,
+                                  height: 1.4)),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(width: AppSpacing.xs),
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 12, vertical: 6),
+                      decoration: BoxDecoration(
+                        color: color.withValues(alpha: 0.14),
+                        borderRadius:
+                            BorderRadius.circular(AppRadius.pill),
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(Icons.chat_bubble_outline_rounded,
+                              size: 14, color: color),
+                          const SizedBox(width: 4),
+                          Text('聊天',
+                              style: theme.textTheme.labelSmall?.copyWith(
+                                  color: color,
+                                  fontWeight: FontWeight.w700)),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );

@@ -4,6 +4,8 @@ import 'memory.dart';
 import 'group.dart';
 import 'calendar_event.dart';
 
+enum McpConnectionState { disconnected, connecting, connected, error }
+
 class AppState {
   final List<Role> roles;
   final List<Message> messages;
@@ -12,12 +14,18 @@ class AppState {
   final List<CalendarEvent> calendarEvents;
   final String currentRoleId;
   final String currentModel;
-  final String serviceType; // 'ollama' | 'lmstudio'
+  final String serviceType; // 'ollama' | 'lmstudio' | 'cloud'
   final String serviceHost;
+  final String mcpHost;
+  final McpConnectionState mcpState;
+  final String? mcpError;
+  final String cloudProvider; // 'anthropic' (extensible)
+  final List<String> cloudModels;
   final String userName;
   final String preferredLanguage;
   final bool isLoading;
-  final String? loadingGroupId; // which group is loading a response
+  final String? loadingGroupId;
+  final bool onboardingCompleted;
 
   const AppState({
     required this.roles,
@@ -29,10 +37,16 @@ class AppState {
     required this.serviceHost,
     this.groups = const [],
     this.calendarEvents = const [],
+    this.mcpHost = 'http://localhost:8000',
+    this.mcpState = McpConnectionState.disconnected,
+    this.mcpError,
+    this.cloudProvider = 'anthropic',
+    this.cloudModels = const [],
     this.userName = '',
     this.preferredLanguage = '中文',
     this.isLoading = false,
     this.loadingGroupId,
+    this.onboardingCompleted = false,
   });
 
   AppState copyWith({
@@ -45,11 +59,18 @@ class AppState {
     String? currentModel,
     String? serviceType,
     String? serviceHost,
+    String? mcpHost,
+    McpConnectionState? mcpState,
+    String? mcpError,
+    String? cloudProvider,
+    List<String>? cloudModels,
     String? userName,
     String? preferredLanguage,
     bool? isLoading,
     String? loadingGroupId,
     bool clearLoadingGroupId = false,
+    bool clearMcpError = false,
+    bool? onboardingCompleted,
   }) {
     return AppState(
       roles: roles ?? this.roles,
@@ -61,11 +82,17 @@ class AppState {
       currentModel: currentModel ?? this.currentModel,
       serviceType: serviceType ?? this.serviceType,
       serviceHost: serviceHost ?? this.serviceHost,
+      mcpHost: mcpHost ?? this.mcpHost,
+      mcpState: mcpState ?? this.mcpState,
+      mcpError: clearMcpError ? null : (mcpError ?? this.mcpError),
+      cloudProvider: cloudProvider ?? this.cloudProvider,
+      cloudModels: cloudModels ?? this.cloudModels,
       userName: userName ?? this.userName,
       preferredLanguage: preferredLanguage ?? this.preferredLanguage,
       isLoading: isLoading ?? this.isLoading,
       loadingGroupId:
           clearLoadingGroupId ? null : (loadingGroupId ?? this.loadingGroupId),
+      onboardingCompleted: onboardingCompleted ?? this.onboardingCompleted,
     );
   }
 
@@ -90,6 +117,15 @@ class AppState {
   Group? getGroupById(String id) =>
       groups.where((g) => g.id == id).firstOrNull;
 
-  String get defaultHost =>
-      serviceType == 'ollama' ? 'http://10.0.2.2:11434' : 'http://10.0.2.2:1234';
+  String get defaultHost => switch (serviceType) {
+        'ollama' => 'http://localhost:11434',
+        'lmstudio' => 'http://localhost:1234',
+        'cloud' => 'https://api.anthropic.com',
+        _ => 'http://localhost:11434',
+      };
+
+  /// Memories visible to a given role chat: shared profile + that role's own.
+  List<Memory> memoriesForRole(String roleId) {
+    return memories.where((m) => m.roleId == null || m.roleId == roleId).toList();
+  }
 }

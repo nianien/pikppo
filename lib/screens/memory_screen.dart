@@ -4,6 +4,10 @@ import 'package:uuid/uuid.dart';
 import '../providers/app_state_provider.dart';
 import '../models/app_state.dart';
 import '../models/memory.dart';
+import '../theme/design_tokens.dart';
+
+Color _parseRoleColor(String hex) =>
+    Color(int.parse(hex.replaceFirst('#', '0xFF')));
 
 const _uuid = Uuid();
 
@@ -161,59 +165,34 @@ class _MemoryScreenState extends ConsumerState<MemoryScreen>
   }
 
   Widget _buildSemanticTab(List<Memory> memories, ThemeData theme) {
-    if (memories.isEmpty) {
-      return const Center(child: Text('暂无语义记忆'));
-    }
-    return Padding(
-      padding: const EdgeInsets.all(16),
+    if (memories.isEmpty) return _emptyState(theme, '暂无语义记忆');
+    return SingleChildScrollView(
+      padding: const EdgeInsets.all(AppSpacing.md),
       child: Wrap(
-        spacing: 10,
-        runSpacing: 10,
-        children: memories.map((mem) {
-          return Dismissible(
-            key: Key(mem.id),
-            direction: DismissDirection.endToStart,
-            background: Container(
-              alignment: Alignment.centerRight,
-              padding: const EdgeInsets.only(right: 16),
-              color: Colors.red,
-              child: const Icon(Icons.delete, color: Colors.white),
-            ),
-            onDismissed: (_) {
-              ref.read(appStateProvider.notifier).deleteMemory(mem.id);
-            },
-            child: Chip(
-              avatar: mem.tags.isNotEmpty
-                  ? CircleAvatar(
-                      backgroundColor:
-                          theme.colorScheme.primary.withValues(alpha: 0.15),
-                      child: Text(mem.tags.first[0],
-                          style: TextStyle(
-                              fontSize: 10,
-                              color: theme.colorScheme.primary)),
-                    )
-                  : null,
-              label: Text(mem.content),
-              backgroundColor:
-                  theme.colorScheme.surfaceContainerHighest,
-              deleteIcon: const Icon(Icons.close, size: 16),
-              onDeleted: () {
-                ref.read(appStateProvider.notifier).deleteMemory(mem.id);
-              },
-            ),
-          );
-        }).toList(),
+        spacing: AppSpacing.xs,
+        runSpacing: AppSpacing.xs,
+        children: memories
+            .map((mem) => _SemanticChip(
+                  memory: mem,
+                  onDelete: () => ref
+                      .read(appStateProvider.notifier)
+                      .deleteMemory(mem.id),
+                ))
+            .toList(),
       ),
     );
   }
 
   Widget _buildListTab(
       List<Memory> memories, AppState appState, ThemeData theme) {
-    if (memories.isEmpty) {
-      return const Center(child: Text('暂无记忆'));
-    }
+    if (memories.isEmpty) return _emptyState(theme, '暂无记忆');
     return ListView.builder(
-      padding: const EdgeInsets.symmetric(vertical: 8),
+      padding: const EdgeInsets.fromLTRB(
+        AppSpacing.md,
+        AppSpacing.xs,
+        AppSpacing.md,
+        AppSpacing.xl,
+      ),
       itemCount: memories.length,
       itemBuilder: (context, index) {
         final mem = memories[index];
@@ -223,70 +202,208 @@ class _MemoryScreenState extends ConsumerState<MemoryScreen>
                 .firstOrNull
             : null;
 
-        return Dismissible(
-          key: Key(mem.id),
-          direction: DismissDirection.endToStart,
-          background: Container(
-            alignment: Alignment.centerRight,
-            padding: const EdgeInsets.only(right: 20),
-            color: Colors.red,
-            child:
-                const Icon(Icons.delete_outline, color: Colors.white),
-          ),
-          onDismissed: (_) {
-            ref.read(appStateProvider.notifier).deleteMemory(mem.id);
-          },
-          child: ListTile(
-            leading: CircleAvatar(
-              backgroundColor: theme.colorScheme.surfaceContainerHighest,
-              child: Icon(
-                mem.type == 'episodic'
-                    ? Icons.history
-                    : Icons.pending_actions,
-                size: 20,
-                color: theme.colorScheme.primary,
-              ),
-            ),
-            title: Text(mem.content),
-            subtitle: SingleChildScrollView(
-              scrollDirection: Axis.horizontal,
-              child: Row(
-              children: [
-                Text(_formatTime(mem.timestamp),
-                    style: theme.textTheme.labelSmall),
-                if (role != null) ...[
-                  const SizedBox(width: 8),
-                  Container(
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
-                    decoration: BoxDecoration(
-                      color: Color(int.parse(
-                              role.color.replaceFirst('#', '0xFF')))
-                          .withValues(alpha: 0.15),
-                      borderRadius: BorderRadius.circular(4),
-                    ),
-                    child: Text(
-                      role.name,
-                      style: TextStyle(
-                        fontSize: 10,
-                        color: Color(int.parse(
-                            role.color.replaceFirst('#', '0xFF'))),
-                      ),
-                    ),
-                  ),
-                ],
-                ...mem.tags.map((tag) => Padding(
-                      padding: const EdgeInsets.only(left: 6),
-                      child: Text('· $tag',
-                          style: theme.textTheme.labelSmall
-                              ?.copyWith(color: theme.colorScheme.outline)),
-                    )),
-              ],
-            ),
-            ),
-          ),
+        return _MemoryCard(
+          memory: mem,
+          roleName: role?.name,
+          roleColor: role != null ? _parseRoleColor(role.color) : null,
+          onDelete: () =>
+              ref.read(appStateProvider.notifier).deleteMemory(mem.id),
         );
       },
+    );
+  }
+
+  Widget _emptyState(ThemeData theme, String text) {
+    return Center(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Container(
+            width: 72,
+            height: 72,
+            decoration: BoxDecoration(
+              color: theme.colorScheme.surfaceContainerHighest,
+              borderRadius: BorderRadius.circular(AppRadius.lg),
+            ),
+            child: Icon(
+              Icons.auto_awesome_outlined,
+              color:
+                  theme.colorScheme.onSurfaceVariant.withValues(alpha: 0.5),
+            ),
+          ),
+          const SizedBox(height: AppSpacing.md),
+          Text(
+            text,
+            style: theme.textTheme.bodyMedium?.copyWith(
+              color:
+                  theme.colorScheme.onSurfaceVariant.withValues(alpha: 0.7),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _SemanticChip extends StatelessWidget {
+  final Memory memory;
+  final VoidCallback onDelete;
+  const _SemanticChip({required this.memory, required this.onDelete});
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    return Material(
+      color: scheme.primaryContainer.withValues(alpha: 0.4),
+      borderRadius: BorderRadius.circular(AppRadius.pill),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(AppRadius.pill),
+        onLongPress: onDelete,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(
+              horizontal: AppSpacing.sm + 2, vertical: AppSpacing.xs),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (memory.tags.isNotEmpty) ...[
+                Text('#${memory.tags.first}',
+                    style: theme.textTheme.labelSmall?.copyWith(
+                        color: scheme.primary,
+                        fontWeight: FontWeight.w600)),
+                const SizedBox(width: AppSpacing.xs),
+              ],
+              ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 240),
+                child: Text(
+                  memory.content,
+                  style: theme.textTheme.bodyMedium?.copyWith(
+                    color: scheme.onPrimaryContainer,
+                  ),
+                ),
+              ),
+              const SizedBox(width: AppSpacing.xs),
+              GestureDetector(
+                onTap: onDelete,
+                child: Icon(Icons.close,
+                    size: 16,
+                    color: scheme.onPrimaryContainer
+                        .withValues(alpha: 0.7)),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _MemoryCard extends StatelessWidget {
+  final Memory memory;
+  final String? roleName;
+  final Color? roleColor;
+  final VoidCallback onDelete;
+
+  const _MemoryCard({
+    required this.memory,
+    this.roleName,
+    this.roleColor,
+    required this.onDelete,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+    return Padding(
+      padding: const EdgeInsets.only(bottom: AppSpacing.xs),
+      child: Dismissible(
+        key: Key(memory.id),
+        direction: DismissDirection.endToStart,
+        background: Container(
+          alignment: Alignment.centerRight,
+          padding: const EdgeInsets.only(right: AppSpacing.lg),
+          decoration: BoxDecoration(
+            color: scheme.errorContainer,
+            borderRadius: BorderRadius.circular(AppRadius.lg),
+          ),
+          child:
+              Icon(Icons.delete_outline, color: scheme.onErrorContainer),
+        ),
+        onDismissed: (_) => onDelete(),
+        child: Material(
+          color: scheme.surfaceContainerLow,
+          borderRadius: BorderRadius.circular(AppRadius.lg),
+          child: Padding(
+            padding: const EdgeInsets.all(AppSpacing.md),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Container(
+                  width: 40,
+                  height: 40,
+                  decoration: BoxDecoration(
+                    color: scheme.primary.withValues(alpha: 0.12),
+                    borderRadius: BorderRadius.circular(AppRadius.md),
+                  ),
+                  child: Icon(
+                    memory.type == 'episodic'
+                        ? Icons.history
+                        : Icons.pending_actions,
+                    size: 20,
+                    color: scheme.primary,
+                  ),
+                ),
+                const SizedBox(width: AppSpacing.sm),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(memory.content,
+                          style: theme.textTheme.bodyLarge),
+                      const SizedBox(height: 6),
+                      Wrap(
+                        spacing: AppSpacing.xs,
+                        runSpacing: 4,
+                        crossAxisAlignment: WrapCrossAlignment.center,
+                        children: [
+                          Text(
+                            _formatTime(memory.timestamp),
+                            style: theme.textTheme.labelSmall?.copyWith(
+                                color: scheme.onSurfaceVariant),
+                          ),
+                          if (roleName != null && roleColor != null)
+                            Container(
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 8, vertical: 2),
+                              decoration: BoxDecoration(
+                                color: roleColor!.withValues(alpha: 0.16),
+                                borderRadius:
+                                    BorderRadius.circular(AppRadius.pill),
+                              ),
+                              child: Text(
+                                roleName!,
+                                style: theme.textTheme.labelSmall?.copyWith(
+                                  color: roleColor,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                            ),
+                          ...memory.tags.map((tag) => Text('#$tag',
+                              style: theme.textTheme.labelSmall?.copyWith(
+                                color: scheme.onSurfaceVariant
+                                    .withValues(alpha: 0.7),
+                              ))),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
     );
   }
 }

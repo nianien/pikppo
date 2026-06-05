@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 280" font-family="system-ui, -apple-system, sans-serif" font-size="14">
+  <!-- 内容区 -->
+  <rect x="20" y="10" width="360" height="190" rx="16" fill="#F8FAFC" stroke="#E2E8F0" stroke-width="1.5"/>
+  <text x="200" y="110" text-anchor="middle" fill="#94A3B8" font-size="16">聊天界面 / 内容区</text>
+
+  <!-- Dock 栏 -->
+  <rect x="20" y="210" width="360" height="56" rx="16" fill="#FFFFFF" stroke="#E2E8F0" stroke-width="1.5"/>
+
+  <!-- 聊天 Tab（选中） -->
+  <rect x="30" y="216" width="80" height="44" rx="10" fill="#EEF2FF"/>
+  <text x="70" y="236" text-anchor="middle" font-size="18">💬</text>
+  <text x="70" y="254" text-anchor="middle" font-size="11" font-weight="600" fill="#4F46E5">聊天</text>
+
+  <!-- 角色 Tab -->
+  <text x="165" y="236" text-anchor="middle" font-size="18">👥</text>
+  <text x="165" y="254" text-anchor="middle" font-size="11" fill="#64748B">角色</text>
+
+  <!-- 应用 Tab -->
+  <text x="255" y="236" text-anchor="middle" font-size="18">📱</text>
+  <text x="255" y="254" text-anchor="middle" font-size="11" fill="#64748B">应用</text>
+
+  <!-- 设置 Tab -->
+  <text x="345" y="236" text-anchor="middle" font-size="18">⚙️</text>
+  <text x="345" y="254" text-anchor="middle" font-size="11" fill="#64748B">设置</text>
+</svg>

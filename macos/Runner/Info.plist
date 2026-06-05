@@ -28,5 +28,9 @@
 	<string>MainMenu</string>
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
+	<key>NSLocationUsageDescription</key>
+	<string>pikppo 需要你的位置，用于在对话中提供本地化建议（餐饮、出行、天气等）。</string>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>pikppo 需要你的位置，用于在对话中提供本地化建议（餐饮、出行、天气等）。</string>
 </dict>
 </plist>

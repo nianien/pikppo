@@ -15,6 +15,23 @@ class Memory {
     required this.tags,
   });
 
+  Memory copyWith({
+    String? type,
+    String? content,
+    String? roleId,
+    int? timestamp,
+    List<String>? tags,
+    bool clearRoleId = false,
+  }) =>
+      Memory(
+        id: id,
+        type: type ?? this.type,
+        content: content ?? this.content,
+        roleId: clearRoleId ? null : (roleId ?? this.roleId),
+        timestamp: timestamp ?? this.timestamp,
+        tags: tags ?? this.tags,
+      );
+
   Map<String, dynamic> toJson() => {
         'id': id,
         'type': type,
