@@ -4,6 +4,8 @@ import '../models/group.dart';
 import '../models/message.dart';
 import '../models/role.dart';
 import '../providers/app_state_provider.dart';
+import '../theme/design_tokens.dart';
+import '../widgets/message_bubble.dart';
 import 'settings_screen.dart';
 
 Color _parseColor(String hex) {
@@ -24,6 +26,18 @@ class _GroupChatScreenState extends ConsumerState<GroupChatScreen> {
   final _scrollController = ScrollController();
   final _focusNode = FocusNode();
   bool _showMentionList = false;
+
+  @override
+  void initState() {
+    super.initState();
+    // 首次进入把已有历史滚到底（不动画）。
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (_scrollController.hasClients) {
+        _scrollController.jumpTo(
+            _scrollController.position.maxScrollExtent);
+      }
+    });
+  }
 
   @override
   void dispose() {
@@ -128,7 +142,14 @@ class _GroupChatScreenState extends ConsumerState<GroupChatScreen> {
         .whereType<Role>()
         .toList();
 
-    _scrollToBottom();
+    // 新消息进来才滚到底；用户回看历史时不打扰。
+    ref.listen<int>(
+      appStateProvider.select((s) =>
+          s.messages.where((m) => m.groupId == widget.group.id).length),
+      (prev, next) {
+        if (prev != null && next > prev) _scrollToBottom();
+      },
+    );
 
     return Scaffold(
       appBar: AppBar(
@@ -199,13 +220,25 @@ class _GroupChatScreenState extends ConsumerState<GroupChatScreen> {
                         return _GroupThinkingBubble(roles: roles);
                       }
                       final msg = messages[index];
+                      final prev = index == 0 ? null : messages[index - 1];
+                      final showSeparator =
+                          MessageTimeSeparator.shouldInsertBefore(msg, prev);
+                      Widget bubble;
                       if (msg.isUser) {
-                        return _UserBubble(message: msg, theme: theme);
+                        bubble = _UserBubble(message: msg, theme: theme);
+                      } else {
+                        final role = appState.getRoleById(msg.roleId);
+                        if (role == null) return const SizedBox.shrink();
+                        bubble = _RoleBubble(
+                            message: msg, role: role, theme: theme);
                       }
-                      final role = appState.getRoleById(msg.roleId);
-                      if (role == null) return const SizedBox.shrink();
-                      return _RoleBubble(
-                          message: msg, role: role, theme: theme);
+                      if (!showSeparator) return bubble;
+                      return Column(
+                        children: [
+                          MessageTimeSeparator(timestamp: msg.timestamp),
+                          bubble,
+                        ],
+                      );
                     },
                   ),
           ),
@@ -251,7 +284,7 @@ class _GroupChatScreenState extends ConsumerState<GroupChatScreen> {
           Container(
             constraints: const BoxConstraints(maxHeight: 200),
             decoration: BoxDecoration(
-              color: theme.colorScheme.surface,
+              color: theme.scaffoldBackgroundColor,
               border: Border(
                 top: BorderSide(
                     color: theme.colorScheme.outlineVariant.withValues(alpha: 0.3)),
@@ -283,7 +316,7 @@ class _GroupChatScreenState extends ConsumerState<GroupChatScreen> {
             bottom: MediaQuery.of(context).padding.bottom + 8,
           ),
           decoration: BoxDecoration(
-            color: theme.colorScheme.surface,
+            color: theme.scaffoldBackgroundColor,
             border: Border(
               top: BorderSide(
                   color:
@@ -453,28 +486,36 @@ class _UserBubble extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final scheme = theme.colorScheme;
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
       child: Row(
         mainAxisAlignment: MainAxisAlignment.end,
         children: [
           Flexible(
-            child: Container(
-              padding:
-                  const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-              decoration: BoxDecoration(
-                color: theme.colorScheme.primary,
-                borderRadius: const BorderRadius.only(
-                  topLeft: Radius.circular(16),
-                  topRight: Radius.circular(16),
-                  bottomLeft: Radius.circular(16),
-                  bottomRight: Radius.circular(4),
-                ),
+            child: Tooltip(
+              message: MessageTimeSeparator.formatFull(
+                DateTime.fromMillisecondsSinceEpoch(message.timestamp),
               ),
-              child: SelectableText(
-                message.content,
-                style: theme.textTheme.bodyMedium?.copyWith(
-                  color: theme.colorScheme.onPrimary,
+              preferBelow: false,
+              waitDuration: const Duration(milliseconds: 400),
+              child: Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                decoration: BoxDecoration(
+                  color: scheme.primary,
+                  borderRadius: const BorderRadius.only(
+                    topLeft: Radius.circular(AppRadius.bubble),
+                    topRight: Radius.circular(AppRadius.bubble),
+                    bottomLeft: Radius.circular(AppRadius.bubble),
+                    bottomRight: Radius.circular(AppRadius.bubbleTail),
+                  ),
+                ),
+                child: SelectableText(
+                  message.content,
+                  style: theme.textTheme.bodyMedium?.copyWith(
+                    color: scheme.onPrimary,
+                  ),
                 ),
               ),
             ),
@@ -518,21 +559,30 @@ class _RoleBubble extends StatelessWidget {
                       style: theme.textTheme.labelSmall
                           ?.copyWith(color: color)),
                 ),
-                Container(
-                  padding: const EdgeInsets.symmetric(
-                      horizontal: 14, vertical: 10),
-                  decoration: BoxDecoration(
-                    color: theme.colorScheme.surfaceContainerHighest,
-                    borderRadius: const BorderRadius.only(
-                      topLeft: Radius.circular(4),
-                      topRight: Radius.circular(16),
-                      bottomLeft: Radius.circular(16),
-                      bottomRight: Radius.circular(16),
-                    ),
+                Tooltip(
+                  message: MessageTimeSeparator.formatFull(
+                    DateTime.fromMillisecondsSinceEpoch(message.timestamp),
                   ),
-                  child: SelectableText(
-                    message.content,
-                    style: theme.textTheme.bodyMedium,
+                  preferBelow: false,
+                  waitDuration: const Duration(milliseconds: 400),
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 14, vertical: 10),
+                    decoration: BoxDecoration(
+                      color: theme.colorScheme.primaryContainer,
+                      borderRadius: const BorderRadius.only(
+                        topLeft: Radius.circular(AppRadius.bubbleTail),
+                        topRight: Radius.circular(AppRadius.bubble),
+                        bottomLeft: Radius.circular(AppRadius.bubble),
+                        bottomRight: Radius.circular(AppRadius.bubble),
+                      ),
+                    ),
+                    child: SelectableText(
+                      message.content,
+                      style: theme.textTheme.bodyMedium?.copyWith(
+                        color: theme.colorScheme.onPrimaryContainer,
+                      ),
+                    ),
                   ),
                 ),
               ],

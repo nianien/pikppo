@@ -14,10 +14,8 @@ import '../models/calendar_event.dart';
 import '../data/mock_data.dart';
 import '../services/agent.dart';
 import '../services/model_service.dart';
-import '../services/ollama_service.dart';
-import '../services/lmstudio_service.dart';
-import '../services/cloud_model_service.dart';
 import '../services/mcp_service.dart';
+import '../services/tool_registry.dart';
 import '../services/location_service.dart';
 import 'mcp_service_provider.dart';
 import 'model_service_provider.dart';
@@ -52,6 +50,7 @@ class AppStateNotifier extends StateNotifier<AppState> {
   final Set<String> _remindedEventIds = {};
   DateTime _lastUserActivity = DateTime.now();
   bool _summaryRunning = false;
+  late final ToolRegistry _localTools;
 
   AppStateNotifier(this._ref)
       : super(const AppState(
@@ -60,9 +59,10 @@ class AppStateNotifier extends StateNotifier<AppState> {
           memories: [],
           currentRoleId: 'work',
           currentModel: '',
-          serviceType: 'ollama',
+          serviceType: 'local',
           serviceHost: 'http://localhost:11434',
         )) {
+    _localTools = _buildLocalTools();
     _loadState();
     _startReminderCheck();
     _startSummaryLoop();
@@ -70,6 +70,13 @@ class AppStateNotifier extends StateNotifier<AppState> {
     // Fire-and-forget: 不阻塞首屏；权限弹窗会自然出现在首次 GPS 请求时。
     unawaited(_ref.read(locationServiceProvider).refresh());
   }
+
+  /// 进程内工具表。这里的工具直接在 Flutter 端运行，不走 MCP——用于本地数据
+  /// 操作或纯计算。pikppo-mcp 维护远程/外部工具（云日历、Drive 等），两者在
+  /// agent loop 里合并暴露给模型，dispatch 时按名分流。
+  ///
+  /// 目前为空——等 `note_add` / `note_search` 等本地操作迁入时再注册。
+  ToolRegistry _buildLocalTools() => ToolRegistry(const []);
 
   @override
   void dispose() {
@@ -169,11 +176,20 @@ class AppStateNotifier extends StateNotifier<AppState> {
     final prefs = await SharedPreferences.getInstance();
     final roleId = prefs.getString('currentRoleId') ?? 'work';
     final model = prefs.getString('currentModel') ?? '';
-    final serviceType = prefs.getString('serviceType') ?? 'ollama';
-    final serviceHost =
-        prefs.getString('serviceHost') ?? 'http://localhost:11434';
-    final mcpHost = prefs.getString('mcpHost') ?? 'http://localhost:8000';
+    // 旧版本可能存的是 `'ollama'` 或 `'lmstudio'`——归一到 `'local'`。
+    // LM Studio 已下线，localProvider 全部当作 ollama 处理。
+    var serviceType = prefs.getString('serviceType') ?? 'local';
+    if (serviceType == 'ollama' || serviceType == 'lmstudio') {
+      serviceType = 'local';
+    }
+    final localProvider = prefs.getString('localProvider') ?? 'ollama';
     final cloudProvider = prefs.getString('cloudProvider') ?? 'anthropic';
+    // 首次启动 / 旧版本没存过 host 时，按当前 type/provider + 当前平台给默认。
+    final defaultHost = serviceType == 'cloud'
+        ? _cloudDefaultHost(cloudProvider)
+        : _localDefaultHost(localProvider);
+    final serviceHost = prefs.getString('serviceHost') ?? defaultHost;
+    final mcpHost = prefs.getString('mcpHost') ?? 'http://localhost:8000';
     final userName = prefs.getString('userName') ?? '';
     final language = prefs.getString('preferredLanguage') ?? '中文';
     final onboardingCompleted = prefs.getBool('onboardingCompleted') ?? false;
@@ -219,21 +235,31 @@ class AppStateNotifier extends StateNotifier<AppState> {
       serviceType: serviceType,
       serviceHost: serviceHost,
       mcpHost: mcpHost,
+      localProvider: localProvider,
       cloudProvider: cloudProvider,
       userName: userName,
       preferredLanguage: language,
       onboardingCompleted: onboardingCompleted,
     );
 
-    // Load cloud API key (no-op if storage absent), then start MCP connection.
+    // Load cloud API keys (no-op if storage absent), then start MCP connection.
+    final storage = _ref.read(secureStorageProvider);
     try {
       await loadAnthropicApiKeyWith(
-        storage: _ref.read(secureStorageProvider),
+        storage: storage,
         setKey: (v) =>
             _ref.read(anthropicApiKeyProvider.notifier).state = v,
       );
     } catch (e) {
       debugPrint('loadAnthropicApiKey error: $e');
+    }
+    try {
+      await loadGeminiApiKeyWith(
+        storage: storage,
+        setKey: (v) => _ref.read(geminiApiKeyProvider.notifier).state = v,
+      );
+    } catch (e) {
+      debugPrint('loadGeminiApiKey error: $e');
     }
 
     unawaited(_mcp.connect(mcpHost));
@@ -246,6 +272,7 @@ class AppStateNotifier extends StateNotifier<AppState> {
     await prefs.setString('serviceType', state.serviceType);
     await prefs.setString('serviceHost', state.serviceHost);
     await prefs.setString('mcpHost', state.mcpHost);
+    await prefs.setString('localProvider', state.localProvider);
     await prefs.setString('cloudProvider', state.cloudProvider);
     await prefs.setString('userName', state.userName);
     await prefs.setString('preferredLanguage', state.preferredLanguage);
@@ -276,15 +303,50 @@ class AppStateNotifier extends StateNotifier<AppState> {
     _saveState();
   }
 
+  /// 切换顶层服务类型（local / cloud），host 自动回到对应 provider 的默认值。
   void updateServiceType(String type) {
-    final host = switch (type) {
-      'ollama' => 'http://localhost:11434',
-      'lmstudio' => 'http://localhost:1234',
-      'cloud' => 'https://api.anthropic.com',
-      _ => state.serviceHost,
-    };
+    final host = type == 'cloud'
+        ? _cloudDefaultHost(state.cloudProvider)
+        : _localDefaultHost(state.localProvider);
     state = state.copyWith(serviceType: type, serviceHost: host);
     _saveState();
+  }
+
+  /// 切换本地推理 provider（ollama / 未来的 vLLM 等）。host 回到该 provider 默认。
+  void updateLocalProvider(String provider) {
+    state = state.copyWith(
+      localProvider: provider,
+      serviceHost: _localDefaultHost(provider),
+    );
+    _saveState();
+  }
+
+  /// 切换云端 provider（anthropic / gemini / ...）。host 回到该 provider 默认。
+  /// API Key 由调用方保证已配置。
+  void updateCloudProvider(String provider) {
+    state = state.copyWith(
+      cloudProvider: provider,
+      serviceHost: _cloudDefaultHost(provider),
+    );
+    _saveState();
+  }
+
+  static String _cloudDefaultHost(String provider) => switch (provider) {
+        'gemini' => 'https://generativelanguage.googleapis.com',
+        _ => 'https://api.anthropic.com',
+      };
+
+  /// 本地推理默认 host。**按平台自适应**：
+  /// - Android 模拟器里 `localhost` 指模拟器自身、连不到宿主机，需要 `10.0.2.2`。
+  /// - 其它平台（iOS 模拟器、macOS / Windows / Linux 桌面）`localhost` 即宿主机。
+  /// - 真 Android 设备需要宿主机 LAN IP，无法自动推断，用户在设置里手填即可。
+  static String _localDefaultHost(String provider) {
+    final base = defaultTargetPlatform == TargetPlatform.android
+        ? '10.0.2.2'
+        : 'localhost';
+    return switch (provider) {
+      _ => 'http://$base:11434', // ollama
+    };
   }
 
   void updateServiceHost(String host) {
@@ -314,17 +376,24 @@ class AppStateNotifier extends StateNotifier<AppState> {
 
   // ---- Model service factory ----
 
+  /// 组装当前可用的 ModelService。直接调 [buildModelService] 纯工厂——不去
+  /// `ref.read(modelServiceProvider)`，否则会跟 provider 内部 `watch` 本 notifier
+  /// 的 state 构成循环依赖（Riverpod 抛 `CircularDependencyError`）。
+  ///
+  /// `OllamaService` 跨实例的能力缓存通过 host 维度 static 表保活，不依赖
+  /// 实例复用。
   ModelService? _modelService() {
-    if (state.serviceType == 'cloud') {
-      final apiKey = _ref.read(anthropicApiKeyProvider) ?? '';
-      if (apiKey.isEmpty) return null;
-      return CloudModelService(apiKey: apiKey, host: state.serviceHost);
+    if (state.serviceType != 'cloud' && state.currentModel.isEmpty) {
+      return null;
     }
-    if (state.serviceHost.isEmpty || state.currentModel.isEmpty) return null;
-    if (state.serviceType == 'ollama') {
-      return OllamaService(state.serviceHost);
-    }
-    return LMStudioService(state.serviceHost);
+    return buildModelService(
+      type: state.serviceType,
+      host: state.serviceHost,
+      localProvider: state.localProvider,
+      cloudProvider: state.cloudProvider,
+      anthropicKey: _ref.read(anthropicApiKeyProvider),
+      geminiKey: _ref.read(geminiApiKeyProvider),
+    );
   }
 
   // ---- Chat (private) ----
@@ -363,11 +432,14 @@ class AppStateNotifier extends StateNotifier<AppState> {
       final systemContent =
           await _buildPrivateSystemPrompt(role, state.currentRoleId);
 
-      // Agentic path (Claude + MCP connected): the model decides which tools
-      // to call. No need for the bespoke calendar regex/extraction path.
-      if (service.supportsTools && _mcp.isConnected) {
-        final tools = await _mcp.ensureTools();
-        if (tools.isNotEmpty) {
+      // Agentic path: 当前所选模型必须真的具备 tool 能力（Ollama 上 gemma3:4b
+      // 协议层支持、但模型本身没 tool capabilities，不能走 agent loop），同时
+      // 至少要有一个可用工具（本地 or MCP）。本地表非空时即便 MCP 离线也开启。
+      if (await service.modelSupportsTools(state.currentModel)) {
+        final mcpToolsAvailable = _mcp.isConnected
+            ? (await _mcp.ensureTools()).isNotEmpty
+            : false;
+        if (mcpToolsAvailable || _localTools.isNotEmpty) {
           await _runAgentLoop(
             service: service,
             systemContent: systemContent,
@@ -418,13 +490,18 @@ class AppStateNotifier extends StateNotifier<AppState> {
           .reversed
           .take(10)
           .toList()
-          .reversed;
+          .reversed
+          .toList();
+      final lastUserIdx = _indexOfLastUser(history);
       final messages = <Map<String, String>>[
         {'role': 'system', 'content': systemContent},
-        ...history.map((m) => {
-              'role': m.isUser ? 'user' : 'assistant',
-              'content': m.content,
-            }),
+        for (var i = 0; i < history.length; i++)
+          {
+            'role': history[i].isUser ? 'user' : 'assistant',
+            'content': i == lastUserIdx
+                ? _formatUserContentForLlm(history[i])
+                : history[i].content,
+          },
       ];
 
       final reply = await service.chat(messages, state.currentModel);
@@ -459,23 +536,35 @@ class AppStateNotifier extends StateNotifier<AppState> {
         .reversed
         .take(10)
         .toList()
-        .reversed;
+        .reversed
+        .toList();
+    final lastUserIdx = _indexOfLastUser(history);
     final messages = <Map<String, dynamic>>[
-      ...history.map((m) => {
-            'role': m.isUser ? 'user' : 'assistant',
-            'content': m.content,
-          }),
+      for (var i = 0; i < history.length; i++)
+        {
+          'role': history[i].isUser ? 'user' : 'assistant',
+          'content': i == lastUserIdx
+              ? _formatUserContentForLlm(history[i])
+              : history[i].content,
+        },
       // The latest user message is already in [history] (sendMessage appended
       // it before calling us), so we don't add it again here.
     ];
 
-    final tools = _mcp.tools
+    // 合并本地与 MCP 工具一并暴露给模型。本地工具在前——若与 MCP 同名，按
+    // dispatch 时的查找顺序本地胜出（同时定义里也只保留一份以免给模型造成歧义）。
+    final mcpDefs = _mcp.tools
+        .where((t) => !_localTools.has(t.name))
         .map((t) => ToolDefinition(
               name: t.name,
               description: t.description,
               inputSchema: t.inputSchema,
             ))
         .toList();
+    final tools = <ToolDefinition>[
+      ..._localTools.definitions(),
+      ...mcpDefs,
+    ];
 
     AgentStep step;
     try {
@@ -510,11 +599,13 @@ class AppStateNotifier extends StateNotifier<AppState> {
         _addAiStreamPart('🔧 调用工具：${call.name}', kind: 'tool_status');
       }
 
-      // Execute tool calls in order, collecting results.
+      // Execute tool calls in order, collecting results. 本地优先，未命中再走 MCP。
       final results = <ToolResult>[];
       for (final call in step.calls) {
         try {
-          final raw = await _mcp.callTool(call.name, call.input);
+          final raw = _localTools.has(call.name)
+              ? await _localTools.call(call.name, call.input)
+              : await _mcp.callTool(call.name, call.input);
           results.add(ToolResult(toolUseId: call.id, content: raw));
         } catch (e) {
           debugPrint('tool ${call.name} failed: $e');
@@ -532,7 +623,7 @@ class AppStateNotifier extends StateNotifier<AppState> {
       }
 
       messages.add(step.assistantMessage);
-      messages.add(service.buildToolResultMessage(results));
+      messages.addAll(service.buildToolResultMessages(results));
 
       try {
         step = await service.agentContinue(
@@ -602,8 +693,9 @@ class AppStateNotifier extends StateNotifier<AppState> {
         .toList();
 
     final calendarContext = await _buildCalendarContext();
-    final buf = StringBuffer(role.systemPrompt);
-    buf.write('\n\n${_buildContextHeader()}');
+    // 实时系统信息放最前并强声明权威性，避免小模型用训练时的旧日期/坐标乱答。
+    final buf = StringBuffer(_buildContextHeader());
+    buf.write('\n\n${role.systemPrompt}');
     if (profileMemories.isNotEmpty) {
       buf.write('\n\n关于用户：\n${profileMemories.join('、')}');
     }
@@ -623,6 +715,9 @@ class AppStateNotifier extends StateNotifier<AppState> {
   ///
   /// 时间总是实时；位置读 [LocationService] 缓存（永远不在 prompt 构建过程中
   /// 等待 GPS——首次定位异步进行，缓存命中后续 prompt 都能拿到）。
+  ///
+  /// 措辞按"系统强制信息"组织，明确告诉模型必须以此为准——小模型默认会用训
+  /// 练截止时的旧日期回答"今天是几号"。
   String _buildContextHeader() {
     final now = DateTime.now();
     final weekdays = ['一', '二', '三', '四', '五', '六', '日'];
@@ -636,21 +731,26 @@ class AppStateNotifier extends StateNotifier<AppState> {
     final hOff = offset.inHours.abs().toString().padLeft(2, '0');
     final mOff = (offset.inMinutes.abs() % 60).toString().padLeft(2, '0');
 
-    final buf = StringBuffer(
-        '当前时间：$date 周$wd $hh:$mm（$tz UTC$sign$hOff:$mOff）');
+    final lines = <String>[
+      '【系统实时信息（权威，请以此为准；不要使用训练数据中的日期或地点猜测）】',
+      '- 当前日期时间：$date 周$wd $hh:$mm（时区 $tz，UTC$sign$hOff:$mOff）',
+    ];
 
     final loc = _ref.read(locationServiceProvider);
     final fix = loc.lastKnown;
     if (fix != null) {
-      buf.write('\n当前位置：${fix.displayLabel}'
-          '（${fix.latitude.toStringAsFixed(4)}, ${fix.longitude.toStringAsFixed(4)}）');
+      lines.add('- 当前位置：${fix.displayLabel}'
+          '（GPS ${fix.latitude.toStringAsFixed(4)}, ${fix.longitude.toStringAsFixed(4)}）');
     } else if (loc.status == LocationStatus.denied ||
         loc.status == LocationStatus.deniedForever) {
-      buf.write('\n当前位置：用户未授权');
+      lines.add('- 当前位置：用户未授权获取，无法获知');
     } else if (loc.status == LocationStatus.serviceDisabled) {
-      buf.write('\n当前位置：设备定位服务关闭');
+      lines.add('- 当前位置：设备定位服务关闭，无法获知');
+    } else {
+      lines.add('- 当前位置：正在获取，暂未知');
     }
-    return buf.toString();
+    lines.add('- "今天"、"明天"、"现在"、"附近"等相对表达，必须基于上述实时信息换算。');
+    return lines.join('\n');
   }
 
   // ---- Memory ----
@@ -886,6 +986,28 @@ $userMessage''';
   String _fmtDate(DateTime d) =>
       '${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
 
+  /// 给"最后一条 user 消息"加显式日期提示。小模型不信 system 里的日期声明，
+  /// 但会跟问题贴在一起的自然语言提示走；只注入最后一条避免历史轮的旧时间戳
+  /// 互相干扰。assistant 与较早的 user 消息保持原文。
+  String _formatUserContentForLlm(Message m) {
+    final dt = DateTime.fromMillisecondsSinceEpoch(m.timestamp);
+    final weekdays = ['一', '二', '三', '四', '五', '六', '日'];
+    final wd = weekdays[dt.weekday - 1];
+    final hh = dt.hour.toString().padLeft(2, '0');
+    final mm = dt.minute.toString().padLeft(2, '0');
+    return '（系统提示：当前时间是 ${_fmtDate(dt)} 周$wd $hh:$mm ${dt.timeZoneName}，'
+        '所有"今天/明天/现在"按此换算，不要使用训练数据中的旧日期。）\n\n'
+        '${m.content}';
+  }
+
+  /// 在历史消息列表里找最后一条 user 消息的索引；没有则 -1。
+  int _indexOfLastUser(List<Message> messages) {
+    for (var i = messages.length - 1; i >= 0; i--) {
+      if (messages[i].isUser) return i;
+    }
+    return -1;
+  }
+
   List<Message> getMessagesForRole(String roleId) {
     return state.messages.where((m) => m.roleId == roleId).toList()
       ..sort((a, b) => a.timestamp.compareTo(b.timestamp));
@@ -1003,8 +1125,8 @@ $userMessage''';
             .map((id) => state.getRoleById(id)?.name ?? id)
             .join('、');
 
-        final systemBuf = StringBuffer(role.systemPrompt);
-        systemBuf.write('\n\n${_buildContextHeader()}');
+        final systemBuf = StringBuffer(_buildContextHeader());
+        systemBuf.write('\n\n${role.systemPrompt}');
         if (profileMemories.isNotEmpty) {
           systemBuf.write('\n\n关于用户：\n$profileMemories');
         }
@@ -1026,15 +1148,25 @@ $userMessage''';
             .reversed
             .take(10)
             .toList()
-            .reversed;
+            .reversed
+            .toList();
+        final lastUserIdx = _indexOfLastUser(history);
         final messages = <Map<String, String>>[
           {'role': 'system', 'content': systemBuf.toString()},
-          ...history.map((m) {
-            if (m.isUser) return {'role': 'user', 'content': m.content};
-            final speaker =
-                state.getRoleById(m.roleId)?.name ?? m.roleId;
-            return {'role': 'assistant', 'content': '[$speaker]: ${m.content}'};
-          }),
+          for (var i = 0; i < history.length; i++)
+            if (history[i].isUser)
+              {
+                'role': 'user',
+                'content': i == lastUserIdx
+                    ? _formatUserContentForLlm(history[i])
+                    : history[i].content,
+              }
+            else
+              {
+                'role': 'assistant',
+                'content':
+                    '[${state.getRoleById(history[i].roleId)?.name ?? history[i].roleId}]: ${history[i].content}',
+              },
         ];
 
         final reply = await service.chat(messages, state.currentModel);

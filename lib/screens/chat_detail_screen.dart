@@ -23,6 +23,18 @@ class _ChatDetailScreenState extends ConsumerState<ChatDetailScreen> {
   final _focusNode = FocusNode();
 
   @override
+  void initState() {
+    super.initState();
+    // 首次进入时把已有历史滚到底（不动画）。
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (_scrollController.hasClients) {
+        _scrollController.jumpTo(
+            _scrollController.position.maxScrollExtent);
+      }
+    });
+  }
+
+  @override
   void dispose() {
     _controller.dispose();
     _scrollController.dispose();
@@ -69,7 +81,17 @@ class _ChatDetailScreenState extends ConsumerState<ChatDetailScreen> {
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
     final roleColor = _parseColor(widget.role.color);
-    _scrollToBottom();
+
+    // 新消息（自己发的或 AI 回的）才滚到底；用户主动往上滚回看历史时不打扰。
+    ref.listen<int>(
+      appStateProvider.select((s) => s.messages
+          .where((m) =>
+              m.roleId == widget.role.id && m.groupId == null)
+          .length),
+      (prev, next) {
+        if (prev != null && next > prev) _scrollToBottom();
+      },
+    );
 
     return Scaffold(
       appBar: AppBar(
@@ -138,10 +160,20 @@ class _ChatDetailScreenState extends ConsumerState<ChatDetailScreen> {
                         return ThinkingBubble(role: widget.role);
                       }
                       final msg = messages[index];
-                      return MessageBubble(
+                      final prev = index == 0 ? null : messages[index - 1];
+                      final showSeparator =
+                          MessageTimeSeparator.shouldInsertBefore(msg, prev);
+                      final bubble = MessageBubble(
                         message: msg,
                         role: widget.role,
                         onAskButler: _onAskButler,
+                      );
+                      if (!showSeparator) return bubble;
+                      return Column(
+                        children: [
+                          MessageTimeSeparator(timestamp: msg.timestamp),
+                          bubble,
+                        ],
                       );
                     },
                   ),
@@ -266,7 +298,7 @@ class _InputBar extends StatelessWidget {
         MediaQuery.of(context).padding.bottom + AppSpacing.xs,
       ),
       decoration: BoxDecoration(
-        color: scheme.surface,
+        color: theme.scaffoldBackgroundColor,
         border: Border(
           top: BorderSide(
             color: scheme.outlineVariant.withValues(alpha: 0.4),
@@ -319,15 +351,17 @@ class _InputBar extends StatelessWidget {
                       ),
                     ),
                   )
+                // 圆形 Send 键：跟 FAB 同一套色（scheme.primary = brand 春绿）。
                 : Material(
                     key: const ValueKey('send'),
                     color: scheme.primary,
-                    borderRadius: BorderRadius.circular(AppRadius.lg),
+                    shape: const CircleBorder(),
                     child: InkWell(
                       onTap: onSend,
-                      borderRadius: BorderRadius.circular(AppRadius.lg),
-                      child: Padding(
-                        padding: const EdgeInsets.all(10),
+                      customBorder: const CircleBorder(),
+                      child: SizedBox(
+                        width: 40,
+                        height: 40,
                         child: Icon(Icons.arrow_upward_rounded,
                             color: scheme.onPrimary, size: 22),
                       ),

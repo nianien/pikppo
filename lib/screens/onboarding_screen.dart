@@ -93,7 +93,7 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
             center: const Alignment(0, -0.6),
             radius: 1.4,
             colors: [
-              AppPalette.seedSoft.withValues(
+              AppPalette.container.withValues(
                   alpha: theme.brightness == Brightness.dark ? 0.18 : 0.55),
               scheme.surface,
             ],

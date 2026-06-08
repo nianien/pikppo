@@ -14,12 +14,17 @@ class AppState {
   final List<CalendarEvent> calendarEvents;
   final String currentRoleId;
   final String currentModel;
-  final String serviceType; // 'ollama' | 'lmstudio' | 'cloud'
+  /// 顶层服务类型：`'local'`（本地推理，目前唯一 provider 是 Ollama）或
+  /// `'cloud'`（云端 API，由 [cloudProvider] 选择具体厂商）。
+  final String serviceType;
   final String serviceHost;
   final String mcpHost;
   final McpConnectionState mcpState;
   final String? mcpError;
-  final String cloudProvider; // 'anthropic' (extensible)
+  /// 本地推理厂商：`'ollama'`（目前唯一）。预留以便扩展 vLLM / llama.cpp。
+  final String localProvider;
+  /// 云端厂商：`'anthropic'` | `'gemini'`。
+  final String cloudProvider;
   final List<String> cloudModels;
   final String userName;
   final String preferredLanguage;
@@ -40,6 +45,7 @@ class AppState {
     this.mcpHost = 'http://localhost:8000',
     this.mcpState = McpConnectionState.disconnected,
     this.mcpError,
+    this.localProvider = 'ollama',
     this.cloudProvider = 'anthropic',
     this.cloudModels = const [],
     this.userName = '',
@@ -62,6 +68,7 @@ class AppState {
     String? mcpHost,
     McpConnectionState? mcpState,
     String? mcpError,
+    String? localProvider,
     String? cloudProvider,
     List<String>? cloudModels,
     String? userName,
@@ -85,6 +92,7 @@ class AppState {
       mcpHost: mcpHost ?? this.mcpHost,
       mcpState: mcpState ?? this.mcpState,
       mcpError: clearMcpError ? null : (mcpError ?? this.mcpError),
+      localProvider: localProvider ?? this.localProvider,
       cloudProvider: cloudProvider ?? this.cloudProvider,
       cloudModels: cloudModels ?? this.cloudModels,
       userName: userName ?? this.userName,
@@ -117,12 +125,17 @@ class AppState {
   Group? getGroupById(String id) =>
       groups.where((g) => g.id == id).firstOrNull;
 
-  String get defaultHost => switch (serviceType) {
-        'ollama' => 'http://localhost:11434',
-        'lmstudio' => 'http://localhost:1234',
-        'cloud' => 'https://api.anthropic.com',
-        _ => 'http://localhost:11434',
+  String get defaultHost {
+    if (serviceType == 'cloud') {
+      return switch (cloudProvider) {
+        'gemini' => 'https://generativelanguage.googleapis.com',
+        _ => 'https://api.anthropic.com',
       };
+    }
+    return switch (localProvider) {
+      _ => 'http://localhost:11434', // ollama
+    };
+  }
 
   /// Memories visible to a given role chat: shared profile + that role's own.
   List<Memory> memoriesForRole(String roleId) {

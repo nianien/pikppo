@@ -4,6 +4,55 @@ import '../models/message.dart';
 import '../models/role.dart';
 import '../theme/design_tokens.dart';
 
+/// 跨天日期分隔条：仅在相邻消息分别属于不同日期时插入。
+/// 每条消息的精确时间由 [MessageBubble] 的 tooltip 提供，这里只解决"日期跨越
+/// 没有锚点会让人迷失"的唯一硬边界。同一天内不显示任何常驻时间。
+class MessageTimeSeparator extends StatelessWidget {
+  final int timestamp;
+  const MessageTimeSeparator({super.key, required this.timestamp});
+
+  /// 是否在 [current] 之前插入分隔条；[previous] 为 null（首条）或与 current
+  /// 不在同一日历日时插入。
+  static bool shouldInsertBefore(Message current, Message? previous) {
+    final c = DateTime.fromMillisecondsSinceEpoch(current.timestamp);
+    if (previous == null) return true;
+    final p = DateTime.fromMillisecondsSinceEpoch(previous.timestamp);
+    return c.year != p.year || c.month != p.month || c.day != p.day;
+  }
+
+  static String formatDate(DateTime dt) {
+    final now = DateTime.now();
+    if (dt.year == now.year) return '${dt.month}月${dt.day}日';
+    return '${dt.year}年${dt.month}月${dt.day}日';
+  }
+
+  /// 精确到分钟的完整时间戳，用于 tooltip。
+  static String formatFull(DateTime dt) {
+    final hh = dt.hour.toString().padLeft(2, '0');
+    final mm = dt.minute.toString().padLeft(2, '0');
+    return '${dt.year}年${dt.month.toString().padLeft(2, '0')}月'
+        '${dt.day.toString().padLeft(2, '0')}日 $hh:$mm';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final dt = DateTime.fromMillisecondsSinceEpoch(timestamp);
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: AppSpacing.sm),
+      child: Center(
+        child: Text(
+          formatDate(dt),
+          style: theme.textTheme.labelSmall?.copyWith(
+            color: theme.colorScheme.onSurfaceVariant.withValues(alpha: 0.7),
+            fontSize: 11,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 Color _parseColor(String hex) =>
     Color(int.parse(hex.replaceFirst('#', '0xFF')));
 
@@ -26,38 +75,40 @@ class MessageBubble extends StatelessWidget {
     final scheme = theme.colorScheme;
     final roleColor = _parseColor(role.color);
 
+    // 气泡圆角：主体 18 + 尾角 5（设计稿明确尺寸）。
     final radius = isUser
         ? const BorderRadius.only(
-            topLeft: Radius.circular(AppRadius.lg),
-            topRight: Radius.circular(AppRadius.lg),
-            bottomLeft: Radius.circular(AppRadius.lg),
-            bottomRight: Radius.circular(AppRadius.xs),
+            topLeft: Radius.circular(AppRadius.bubble),
+            topRight: Radius.circular(AppRadius.bubble),
+            bottomLeft: Radius.circular(AppRadius.bubble),
+            bottomRight: Radius.circular(AppRadius.bubbleTail),
           )
         : const BorderRadius.only(
-            topLeft: Radius.circular(AppRadius.lg),
-            topRight: Radius.circular(AppRadius.lg),
-            bottomLeft: Radius.circular(AppRadius.xs),
-            bottomRight: Radius.circular(AppRadius.lg),
+            topLeft: Radius.circular(AppRadius.bubble),
+            topRight: Radius.circular(AppRadius.bubble),
+            bottomLeft: Radius.circular(AppRadius.bubbleTail),
+            bottomRight: Radius.circular(AppRadius.bubble),
           );
 
-    final bubble = Container(
+    // 用 Tooltip 包裹气泡：桌面 hover、移动端长按（在气泡内边距区域，不与
+    // SelectableText 的长按选词冲突）都会浮出完整时间，且不占用布局。
+    final tooltipMessage = MessageTimeSeparator.formatFull(
+      DateTime.fromMillisecondsSinceEpoch(message.timestamp),
+    );
+
+    // 用户气泡用 scheme.primary，跟 FAB / Send 键 / 其它 Material 主操作色统一。
+    // AI 气泡用 primaryContainer（= 浅容器底）。
+    final bubbleInner = Container(
       padding:
           const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
       decoration: BoxDecoration(
-        gradient: isUser
-            ? LinearGradient(
-                begin: Alignment.topLeft,
-                end: Alignment.bottomRight,
-                colors: [scheme.primary, scheme.primary.withValues(alpha: 0.85)],
-              )
-            : null,
-        color: isUser ? null : scheme.surfaceContainerHigh,
+        color: isUser ? scheme.primary : scheme.primaryContainer,
         borderRadius: radius,
       ),
       child: SelectableText(
         message.content,
         style: theme.textTheme.bodyMedium?.copyWith(
-          color: isUser ? scheme.onPrimary : scheme.onSurface,
+          color: isUser ? scheme.onPrimary : scheme.onPrimaryContainer,
           height: 1.5,
         ),
         contextMenuBuilder: (context, editableTextState) {
@@ -82,6 +133,13 @@ class MessageBubble extends StatelessWidget {
           );
         },
       ),
+    );
+
+    final bubble = Tooltip(
+      message: tooltipMessage,
+      preferBelow: false,
+      waitDuration: const Duration(milliseconds: 400),
+      child: bubbleInner,
     );
 
     return Padding(

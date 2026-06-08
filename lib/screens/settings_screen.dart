@@ -17,7 +17,9 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   late TextEditingController _hostController;
   late TextEditingController _nameController;
   late TextEditingController _mcpHostController;
-  late TextEditingController _apiKeyController;
+  // 两家云厂商各自独立持有 key，切换 provider 时输入框联动当前 provider 的 key。
+  late TextEditingController _anthropicKeyController;
+  late TextEditingController _geminiKeyController;
   List<String>? _availableModels;
   bool _isChecking = false;
   String? _connectionError;
@@ -30,8 +32,11 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     _hostController = TextEditingController(text: appState.serviceHost);
     _nameController = TextEditingController(text: appState.userName);
     _mcpHostController = TextEditingController(text: appState.mcpHost);
-    _apiKeyController = TextEditingController(
+    _anthropicKeyController = TextEditingController(
       text: ref.read(anthropicApiKeyProvider) ?? '',
+    );
+    _geminiKeyController = TextEditingController(
+      text: ref.read(geminiApiKeyProvider) ?? '',
     );
   }
 
@@ -40,8 +45,39 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     _hostController.dispose();
     _nameController.dispose();
     _mcpHostController.dispose();
-    _apiKeyController.dispose();
+    _anthropicKeyController.dispose();
+    _geminiKeyController.dispose();
     super.dispose();
+  }
+
+  TextEditingController get _activeApiKeyController =>
+      ref.read(appStateProvider).cloudProvider == 'gemini'
+          ? _geminiKeyController
+          : _anthropicKeyController;
+
+  /// 切服务类型 / provider 的副作用统一在此：同步 host 输入框、清掉旧的模型列
+  /// 表和连接错误，让用户重新检测连接。
+  void _afterProviderChange() {
+    _hostController.text = ref.read(appStateProvider).serviceHost;
+    setState(() {
+      _availableModels = null;
+      _connectionError = null;
+    });
+  }
+
+  void _setServiceType(String type) {
+    ref.read(appStateProvider.notifier).updateServiceType(type);
+    _afterProviderChange();
+  }
+
+  void _setLocalProvider(String provider) {
+    ref.read(appStateProvider.notifier).updateLocalProvider(provider);
+    _afterProviderChange();
+  }
+
+  void _setCloudProvider(String provider) {
+    ref.read(appStateProvider.notifier).updateCloudProvider(provider);
+    _afterProviderChange();
   }
 
   Future<void> _checkConnection() async {
@@ -51,19 +87,28 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     });
 
     final notifier = ref.read(appStateProvider.notifier);
-    final type = ref.read(appStateProvider).serviceType;
+    final appState = ref.read(appStateProvider);
+    final type = appState.serviceType;
+    final storage = ref.read(secureStorageProvider);
     if (type == 'cloud') {
-      final key = _apiKeyController.text.trim();
-      await saveAnthropicApiKeyWith(
-        storage: ref.read(secureStorageProvider),
-        key: key,
-        setKey: (v) =>
-            ref.read(anthropicApiKeyProvider.notifier).state = v,
-      );
-      notifier.updateServiceHost(_hostController.text.trim());
-    } else {
-      notifier.updateServiceHost(_hostController.text.trim());
+      // Persist whichever provider's key is currently showing.
+      if (appState.cloudProvider == 'gemini') {
+        await saveGeminiApiKeyWith(
+          storage: storage,
+          key: _geminiKeyController.text.trim(),
+          setKey: (v) =>
+              ref.read(geminiApiKeyProvider.notifier).state = v,
+        );
+      } else {
+        await saveAnthropicApiKeyWith(
+          storage: storage,
+          key: _anthropicKeyController.text.trim(),
+          setKey: (v) =>
+              ref.read(anthropicApiKeyProvider.notifier).state = v,
+        );
+      }
     }
+    notifier.updateServiceHost(_hostController.text.trim());
 
     try {
       final service = ref.read(modelServiceProvider);
@@ -128,36 +173,55 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             children: [
               _Field(
                 label: '服务类型',
-                child: SegmentedButton<String>(
-                  segments: const [
-                    ButtonSegment(
-                        value: 'ollama', label: Text('Ollama')),
-                    ButtonSegment(
-                        value: 'lmstudio', label: Text('LM Studio')),
-                    ButtonSegment(value: 'cloud', label: Text('云端')),
-                  ],
-                  selected: {appState.serviceType},
-                  onSelectionChanged: (val) {
-                    final type = val.first;
-                    notifier.updateServiceType(type);
-                    switch (type) {
-                      case 'ollama':
-                        _hostController.text = 'http://10.0.2.2:11434';
-                        break;
-                      case 'lmstudio':
-                        _hostController.text = 'http://10.0.2.2:1234';
-                        break;
-                      case 'cloud':
-                        _hostController.text =
-                            'https://api.anthropic.com';
-                        break;
-                    }
-                    setState(() {
-                      _availableModels = null;
-                      _connectionError = null;
-                    });
+                child: RadioGroup<String>(
+                  groupValue: appState.serviceType,
+                  // Radio 自身的点击通过 ancestor 走这里；InkWell 包住的标签
+                  // 点击走 onPick——两路最终都调 _setServiceType。
+                  onChanged: (v) {
+                    if (v != null) _setServiceType(v);
                   },
+                  child: Row(
+                    children: [
+                      _RadioOption<String>(
+                        label: '本地',
+                        value: 'local',
+                        onPick: _setServiceType,
+                      ),
+                      const SizedBox(width: AppSpacing.md),
+                      _RadioOption<String>(
+                        label: '云端',
+                        value: 'cloud',
+                        onPick: _setServiceType,
+                      ),
+                    ],
+                  ),
                 ),
+              ),
+              _Field(
+                label: '提供方',
+                child: appState.serviceType == 'local'
+                    ? DropdownButtonFormField<String>(
+                        initialValue: appState.localProvider,
+                        items: const [
+                          DropdownMenuItem(
+                              value: 'ollama', child: Text('Ollama')),
+                        ],
+                        onChanged: (val) {
+                          if (val != null) _setLocalProvider(val);
+                        },
+                      )
+                    : DropdownButtonFormField<String>(
+                        initialValue: appState.cloudProvider,
+                        items: const [
+                          DropdownMenuItem(
+                              value: 'anthropic', child: Text('Anthropic')),
+                          DropdownMenuItem(
+                              value: 'gemini', child: Text('Gemini')),
+                        ],
+                        onChanged: (val) {
+                          if (val != null) _setCloudProvider(val);
+                        },
+                      ),
               ),
               _Field(
                 label: '服务地址',
@@ -169,12 +233,16 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
               ),
               if (appState.serviceType == 'cloud')
                 _Field(
-                  label: 'Anthropic API Key',
+                  label: appState.cloudProvider == 'gemini'
+                      ? 'Google AI Studio API Key'
+                      : 'Anthropic API Key',
                   child: TextField(
-                    controller: _apiKeyController,
+                    controller: _activeApiKeyController,
                     obscureText: !_showApiKey,
                     decoration: InputDecoration(
-                      hintText: 'sk-ant-...',
+                      hintText: appState.cloudProvider == 'gemini'
+                          ? 'AIza...'
+                          : 'sk-ant-...',
                       suffixIcon: IconButton(
                         icon: Icon(_showApiKey
                             ? Icons.visibility_off
@@ -183,13 +251,26 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                             () => _showApiKey = !_showApiKey),
                       ),
                     ),
-                    onChanged: (val) => saveAnthropicApiKeyWith(
-                      storage: ref.read(secureStorageProvider),
-                      key: val.trim(),
-                      setKey: (v) => ref
-                          .read(anthropicApiKeyProvider.notifier)
-                          .state = v,
-                    ),
+                    onChanged: (val) {
+                      final storage = ref.read(secureStorageProvider);
+                      if (appState.cloudProvider == 'gemini') {
+                        saveGeminiApiKeyWith(
+                          storage: storage,
+                          key: val.trim(),
+                          setKey: (v) => ref
+                              .read(geminiApiKeyProvider.notifier)
+                              .state = v,
+                        );
+                      } else {
+                        saveAnthropicApiKeyWith(
+                          storage: storage,
+                          key: val.trim(),
+                          setKey: (v) => ref
+                              .read(anthropicApiKeyProvider.notifier)
+                              .state = v,
+                        );
+                      }
+                    },
                   ),
                 ),
               SizedBox(
@@ -461,6 +542,44 @@ class _Field extends StatelessWidget {
         ),
         child,
       ],
+    );
+  }
+}
+
+/// 单选项：Radio + 文字标签整体一个 InkWell，保证标签也是有效点击区域。
+/// 群组状态由外层 [RadioGroup] 统一管理；本组件只负责呈现和点击转发。
+class _RadioOption<T> extends StatelessWidget {
+  final String label;
+  final T value;
+  final ValueChanged<T> onPick;
+
+  const _RadioOption({
+    required this.label,
+    required this.value,
+    required this.onPick,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return InkWell(
+      borderRadius: BorderRadius.circular(AppRadius.sm),
+      onTap: () => onPick(value),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 4, horizontal: 4),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Radio<T>(
+              value: value,
+              visualDensity: VisualDensity.compact,
+              materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+            ),
+            const SizedBox(width: 2),
+            Text(label, style: theme.textTheme.bodyMedium),
+          ],
+        ),
+      ),
     );
   }
 }

@@ -161,18 +161,21 @@ class CloudModelService extends ModelService {
   }
 
   @override
-  Map<String, dynamic> buildToolResultMessage(List<ToolResult> results) {
-    return {
-      'role': 'user',
-      'content': results
-          .map((r) => {
-                'type': 'tool_result',
-                'tool_use_id': r.toolUseId,
-                'content': r.content,
-                if (r.isError) 'is_error': true,
-              })
-          .toList(),
-    };
+  List<Map<String, dynamic>> buildToolResultMessages(List<ToolResult> results) {
+    // Anthropic 把所有 tool_result 块塞在同一条 user 消息里。
+    return [
+      {
+        'role': 'user',
+        'content': results
+            .map((r) => {
+                  'type': 'tool_result',
+                  'tool_use_id': r.toolUseId,
+                  'content': r.content,
+                  if (r.isError) 'is_error': true,
+                })
+            .toList(),
+      }
+    ];
   }
 
   static String _extractText(List? content) {
