@@ -1,6 +1,5 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import '../models/app_state.dart';
 import '../providers/app_state_provider.dart';
 import '../providers/model_service_provider.dart';
 import '../theme/design_tokens.dart';
@@ -16,7 +15,6 @@ class SettingsScreen extends ConsumerStatefulWidget {
 class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   late TextEditingController _hostController;
   late TextEditingController _nameController;
-  late TextEditingController _mcpHostController;
   // 两家云厂商各自独立持有 key，切换 provider 时输入框联动当前 provider 的 key。
   late TextEditingController _anthropicKeyController;
   late TextEditingController _geminiKeyController;
@@ -31,7 +29,6 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     final appState = ref.read(appStateProvider);
     _hostController = TextEditingController(text: appState.serviceHost);
     _nameController = TextEditingController(text: appState.userName);
-    _mcpHostController = TextEditingController(text: appState.mcpHost);
     _anthropicKeyController = TextEditingController(
       text: ref.read(anthropicApiKeyProvider) ?? '',
     );
@@ -44,7 +41,6 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   void dispose() {
     _hostController.dispose();
     _nameController.dispose();
-    _mcpHostController.dispose();
     _anthropicKeyController.dispose();
     _geminiKeyController.dispose();
     super.dispose();
@@ -143,12 +139,6 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
         _isChecking = false;
       });
     }
-  }
-
-  Future<void> _reconnectMcp() async {
-    await ref
-        .read(appStateProvider.notifier)
-        .reconnectMcp(host: _mcpHostController.text.trim());
   }
 
   @override
@@ -324,27 +314,6 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                   label: '当前模型',
                   value: appState.currentModel,
                 ),
-            ],
-          ),
-          _Section(
-            title: 'MCP 工具服务',
-            subtitle: '日历等外部工具的接入端',
-            children: [
-              _Field(
-                label: '服务地址',
-                child: TextField(
-                  controller: _mcpHostController,
-                  decoration: const InputDecoration(
-                    hintText: 'http://localhost:8000（streamable-http）',
-                  ),
-                  onSubmitted: (_) => _reconnectMcp(),
-                ),
-              ),
-              _McpStatusRow(
-                mcpState: appState.mcpState,
-                error: appState.mcpError,
-                onReconnect: _reconnectMcp,
-              ),
             ],
           ),
           _Section(
@@ -624,82 +593,3 @@ class _ChipRow extends StatelessWidget {
   }
 }
 
-class _McpStatusRow extends StatelessWidget {
-  final McpConnectionState mcpState;
-  final String? error;
-  final VoidCallback onReconnect;
-
-  const _McpStatusRow({
-    required this.mcpState,
-    required this.error,
-    required this.onReconnect,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final (label, color, icon) = switch (mcpState) {
-      McpConnectionState.connected => (
-          '已连接',
-          theme.colorScheme.primary,
-          Icons.check_circle_outline_rounded
-        ),
-      McpConnectionState.connecting => (
-          '连接中…',
-          theme.colorScheme.tertiary,
-          Icons.sync_rounded,
-        ),
-      McpConnectionState.error => (
-          '连接失败',
-          theme.colorScheme.error,
-          Icons.error_outline_rounded
-        ),
-      McpConnectionState.disconnected => (
-          '未连接',
-          theme.colorScheme.outline,
-          Icons.cloud_off_outlined
-        ),
-    };
-
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Container(
-          padding: const EdgeInsets.symmetric(
-              horizontal: AppSpacing.sm, vertical: AppSpacing.xs),
-          decoration: BoxDecoration(
-            color: color.withValues(alpha: 0.12),
-            borderRadius: BorderRadius.circular(AppRadius.md),
-          ),
-          child: Row(
-            children: [
-              Icon(icon, size: 18, color: color),
-              const SizedBox(width: AppSpacing.xs),
-              Text(label,
-                  style: theme.textTheme.bodyMedium?.copyWith(color: color)),
-              const Spacer(),
-              TextButton.icon(
-                onPressed: onReconnect,
-                icon: const Icon(Icons.refresh, size: 16),
-                label: const Text('重连'),
-                style: TextButton.styleFrom(
-                  minimumSize: const Size(0, 32),
-                  padding: const EdgeInsets.symmetric(horizontal: 12),
-                ),
-              ),
-            ],
-          ),
-        ),
-        if (error != null && mcpState == McpConnectionState.error)
-          Padding(
-            padding: const EdgeInsets.only(top: 6, left: 4),
-            child: Text(
-              error!,
-              style: theme.textTheme.bodySmall
-                  ?.copyWith(color: theme.colorScheme.error),
-            ),
-          ),
-      ],
-    );
-  }
-}

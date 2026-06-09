@@ -8,84 +8,33 @@ import '../theme/design_tokens.dart';
 
 const _uuid = Uuid();
 
-/// MCP 工具入口页。每个图标对应一个外部工具：日历已通过 MCP 接入，其余为占位。
-/// 不放 app 内在能力（记忆、角色），那些归在设置 / 角色页。
+/// MCP 工具入口页。每个卡片对应一个**已接入**的外部工具——发布版不展示"开发
+/// 中"占位。新工具上线时往 `_apps` 列表追加即可，网格自适应。
 class AppsScreen extends ConsumerWidget {
   const AppsScreen({super.key});
 
+  static final _apps = <_AppItem>[
+    _AppItem(
+      icon: Icons.calendar_month,
+      name: '日历',
+      color: const Color(0xFF3B82F6),
+      category: '效率',
+      builder: (_) => const _CalendarPage(),
+    ),
+  ];
+
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final mcpState =
-        ref.watch(appStateProvider.select((s) => s.mcpState));
-
-    final apps = <_AppItem>[
-      _AppItem(
-        icon: Icons.calendar_month,
-        name: '日历',
-        color: const Color(0xFF3B82F6),
-        category: '效率',
-        available: true,
-        builder: (_) => const _CalendarPage(),
-      ),
-      const _AppItem(
-        icon: Icons.checklist,
-        name: '待办',
-        color: Color(0xFF22C55E),
-        category: '效率',
-        available: false,
-      ),
-      const _AppItem(
-        icon: Icons.email_outlined,
-        name: '邮件',
-        color: Color(0xFFEF4444),
-        category: '效率',
-        available: false,
-      ),
-      const _AppItem(
-        icon: Icons.translate,
-        name: '翻译',
-        color: Color(0xFF06B6D4),
-        category: '工具',
-        available: false,
-      ),
-      const _AppItem(
-        icon: Icons.search,
-        name: '搜索',
-        color: Color(0xFFF97316),
-        category: '工具',
-        available: false,
-      ),
-      const _AppItem(
-        icon: Icons.map_outlined,
-        name: '地图',
-        color: Color(0xFF8B5CF6),
-        category: '生活',
-        available: false,
-      ),
-      const _AppItem(
-        icon: Icons.wb_sunny_outlined,
-        name: '天气',
-        color: Color(0xFFEAB308),
-        category: '生活',
-        available: false,
-      ),
-    ];
-
-    // Group apps by category for a more structured layout.
     final byCategory = <String, List<_AppItem>>{};
-    for (final a in apps) {
+    for (final a in _apps) {
       byCategory.putIfAbsent(a.category, () => []).add(a);
     }
-    final categoryOrder = ['效率', '工具', '生活'];
+    final categoryOrder = ['效率', '工具', '生活']
+        .where(byCategory.containsKey)
+        .toList();
 
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('应用'),
-        actions: [
-          _McpStatusChip(mcpState: mcpState),
-          const SizedBox(width: AppSpacing.sm),
-        ],
-      ),
+      appBar: AppBar(title: const Text('应用')),
       body: ListView(
         padding: const EdgeInsets.fromLTRB(
           AppSpacing.md,
@@ -94,73 +43,36 @@ class AppsScreen extends ConsumerWidget {
           AppSpacing.xl,
         ),
         children: [
-          for (final cat in categoryOrder)
-            if (byCategory.containsKey(cat)) ...[
-              Padding(
-                padding: const EdgeInsets.fromLTRB(
-                    4, AppSpacing.md, 4, AppSpacing.sm),
-                child: Text(
-                  cat,
-                  style: Theme.of(context).textTheme.labelLarge?.copyWith(
-                        color: Theme.of(context)
-                            .colorScheme
-                            .onSurfaceVariant,
-                        fontWeight: FontWeight.w600,
-                        letterSpacing: 0.4,
-                      ),
-                ),
+          for (final cat in categoryOrder) ...[
+            Padding(
+              padding: const EdgeInsets.fromLTRB(
+                  4, AppSpacing.md, 4, AppSpacing.sm),
+              child: Text(
+                cat,
+                style: Theme.of(context).textTheme.labelLarge?.copyWith(
+                      color: Theme.of(context)
+                          .colorScheme
+                          .onSurfaceVariant,
+                      fontWeight: FontWeight.w600,
+                      letterSpacing: 0.4,
+                    ),
               ),
-              GridView.builder(
-                shrinkWrap: true,
-                physics: const NeverScrollableScrollPhysics(),
-                gridDelegate:
-                    const SliverGridDelegateWithFixedCrossAxisCount(
-                  crossAxisCount: 3,
-                  mainAxisSpacing: AppSpacing.sm,
-                  crossAxisSpacing: AppSpacing.sm,
-                  childAspectRatio: 0.95,
-                ),
-                itemCount: byCategory[cat]!.length,
-                itemBuilder: (context, index) =>
-                    _AppCard(app: byCategory[cat]![index]),
+            ),
+            GridView.builder(
+              shrinkWrap: true,
+              physics: const NeverScrollableScrollPhysics(),
+              gridDelegate:
+                  const SliverGridDelegateWithFixedCrossAxisCount(
+                crossAxisCount: 3,
+                mainAxisSpacing: AppSpacing.sm,
+                crossAxisSpacing: AppSpacing.sm,
+                childAspectRatio: 0.95,
               ),
-            ],
-        ],
-      ),
-    );
-  }
-}
-
-class _McpStatusChip extends StatelessWidget {
-  final McpConnectionState mcpState;
-  const _McpStatusChip({required this.mcpState});
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final (label, color) = switch (mcpState) {
-      McpConnectionState.connected => ('MCP', theme.colorScheme.primary),
-      McpConnectionState.connecting => ('连接中', theme.colorScheme.tertiary),
-      McpConnectionState.error => ('未连接', theme.colorScheme.error),
-      McpConnectionState.disconnected => ('未连接', theme.colorScheme.outline),
-    };
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-      decoration: BoxDecoration(
-        color: color.withValues(alpha: 0.12),
-        borderRadius: BorderRadius.circular(12),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Container(
-            width: 6,
-            height: 6,
-            decoration: BoxDecoration(color: color, shape: BoxShape.circle),
-          ),
-          const SizedBox(width: 6),
-          Text(label,
-              style: theme.textTheme.labelSmall?.copyWith(color: color)),
+              itemCount: byCategory[cat]!.length,
+              itemBuilder: (context, index) =>
+                  _AppCard(app: byCategory[cat]![index]),
+            ),
+          ],
         ],
       ),
     );
@@ -172,16 +84,14 @@ class _AppItem {
   final String name;
   final Color color;
   final String category;
-  final bool available;
-  final WidgetBuilder? builder;
+  final WidgetBuilder builder;
 
   const _AppItem({
     required this.icon,
     required this.name,
     required this.color,
     required this.category,
-    required this.available,
-    this.builder,
+    required this.builder,
   });
 }
 
@@ -193,60 +103,47 @@ class _AppCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
-    final disabled = !app.available || app.builder == null;
 
     return Material(
       color: scheme.surfaceContainerLow,
       borderRadius: BorderRadius.circular(AppRadius.lg),
       child: InkWell(
         borderRadius: BorderRadius.circular(AppRadius.lg),
-        onTap: () {
-          if (disabled) {
-            ScaffoldMessenger.of(context).showSnackBar(
-              SnackBar(content: Text('${app.name} 工具开发中')),
-            );
-            return;
-          }
-          Navigator.push(
-            context,
-            MaterialPageRoute(builder: app.builder!),
-          );
-        },
-        child: Opacity(
-          opacity: disabled ? 0.55 : 1,
-          child: Padding(
-            padding: const EdgeInsets.all(AppSpacing.sm),
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                Container(
-                  width: 56,
-                  height: 56,
-                  decoration: BoxDecoration(
-                    gradient: LinearGradient(
-                      begin: Alignment.topLeft,
-                      end: Alignment.bottomRight,
-                      colors: [
-                        app.color.withValues(alpha: 0.22),
-                        app.color.withValues(alpha: 0.10),
-                      ],
-                    ),
-                    borderRadius: BorderRadius.circular(AppRadius.md),
-                    border: Border.all(
-                        color: app.color.withValues(alpha: 0.25),
-                        width: 0.5),
+        onTap: () => Navigator.push(
+          context,
+          MaterialPageRoute(builder: app.builder),
+        ),
+        child: Padding(
+          padding: const EdgeInsets.all(AppSpacing.sm),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Container(
+                width: 56,
+                height: 56,
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(
+                    begin: Alignment.topLeft,
+                    end: Alignment.bottomRight,
+                    colors: [
+                      app.color.withValues(alpha: 0.22),
+                      app.color.withValues(alpha: 0.10),
+                    ],
                   ),
-                  child: Icon(app.icon, color: app.color, size: 28),
+                  borderRadius: BorderRadius.circular(AppRadius.md),
+                  border: Border.all(
+                      color: app.color.withValues(alpha: 0.25), width: 0.5),
                 ),
-                const SizedBox(height: AppSpacing.sm),
-                Text(
-                  app.name,
-                  style: theme.textTheme.bodyMedium?.copyWith(
-                      fontWeight: FontWeight.w600,
-                      color: scheme.onSurface),
-                ),
-              ],
-            ),
+                child: Icon(app.icon, color: app.color, size: 28),
+              ),
+              const SizedBox(height: AppSpacing.sm),
+              Text(
+                app.name,
+                style: theme.textTheme.bodyMedium?.copyWith(
+                    fontWeight: FontWeight.w600,
+                    color: scheme.onSurface),
+              ),
+            ],
           ),
         ),
       ),

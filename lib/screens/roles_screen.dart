@@ -4,12 +4,9 @@ import '../providers/app_state_provider.dart';
 import '../providers/model_service_provider.dart';
 import '../models/role.dart';
 import '../theme/design_tokens.dart';
+import '../utils/color_hex.dart';
 import 'chat_detail_screen.dart';
 import 'group_chat_screen.dart';
-
-Color _parseColor(String hex) {
-  return Color(int.parse(hex.replaceFirst('#', '0xFF')));
-}
 
 class RolesScreen extends ConsumerWidget {
   const RolesScreen({super.key});
@@ -50,7 +47,7 @@ class RolesScreen extends ConsumerWidget {
         itemCount: appState.roles.length,
         itemBuilder: (context, index) {
           final role = appState.roles[index];
-          final color = _parseColor(role.color);
+          final color = parseHexColor(role.color);
           return _RoleCard(
             role: role,
             color: color,
@@ -155,7 +152,7 @@ class RolesScreen extends ConsumerWidget {
                   ),
                   const SizedBox(height: 8),
                   ...appState.roles.map((role) {
-                    final color = _parseColor(role.color);
+                    final color = parseHexColor(role.color);
                     final isSelected = selected.contains(role.id);
                     return CheckboxListTile(
                       value: isSelected,

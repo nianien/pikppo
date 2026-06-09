@@ -5,12 +5,9 @@ import '../models/message.dart';
 import '../models/role.dart';
 import '../providers/app_state_provider.dart';
 import '../theme/design_tokens.dart';
+import '../utils/color_hex.dart';
 import '../widgets/message_bubble.dart';
 import 'settings_screen.dart';
-
-Color _parseColor(String hex) {
-  return Color(int.parse(hex.replaceFirst('#', '0xFF')));
-}
 
 class GroupChatScreen extends ConsumerStatefulWidget {
   final Group group;
@@ -294,7 +291,7 @@ class _GroupChatScreenState extends ConsumerState<GroupChatScreen> {
               shrinkWrap: true,
               padding: EdgeInsets.zero,
               children: roles.map((role) {
-                final color = _parseColor(role.color);
+                final color = parseHexColor(role.color);
                 return ListTile(
                   dense: true,
                   leading: CircleAvatar(
@@ -461,7 +458,7 @@ class _GroupAvatar extends StatelessWidget {
         mainAxisSpacing: 2,
         crossAxisSpacing: 2,
         children: display.map((role) {
-          final color = _parseColor(role.color);
+          final color = parseHexColor(role.color);
           return Container(
             decoration: BoxDecoration(
               color: color.withValues(alpha: 0.15),
@@ -536,7 +533,7 @@ class _RoleBubble extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final color = _parseColor(role.color);
+    final color = parseHexColor(role.color);
 
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
@@ -627,7 +624,7 @@ class _GroupThinkingBubbleState extends State<_GroupThinkingBubble>
     final theme = Theme.of(context);
     final role = widget.roles.isNotEmpty ? widget.roles.first : null;
     final color =
-        role != null ? _parseColor(role.color) : theme.colorScheme.primary;
+        role != null ? parseHexColor(role.color) : theme.colorScheme.primary;
 
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),

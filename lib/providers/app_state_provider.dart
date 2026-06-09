@@ -1,6 +1,5 @@
 import 'dart:async';
 import 'dart:convert';
-import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -11,11 +10,16 @@ import '../models/message.dart';
 import '../models/memory.dart';
 import '../models/group.dart';
 import '../models/calendar_event.dart';
-import '../data/mock_data.dart';
+import '../data/preset_roles.dart';
 import '../services/agent.dart';
 import '../services/model_service.dart';
 import '../services/mcp_service.dart';
 import '../services/tool_registry.dart';
+import '../utils/chat_history.dart';
+import '../utils/time_format.dart';
+import '../utils/user_facing_error.dart';
+import 'memory_summarizer.dart';
+import 'reminder_scheduler.dart';
 import '../services/location_service.dart';
 import 'mcp_service_provider.dart';
 import 'model_service_provider.dart';
@@ -44,13 +48,16 @@ final appStateProvider =
 
 class AppStateNotifier extends StateNotifier<AppState> {
   final Ref _ref;
-  Timer? _reminderTimer;
-  Timer? _summaryTimer;
   StreamSubscription<McpConnectionState>? _mcpSub;
-  final Set<String> _remindedEventIds = {};
-  DateTime _lastUserActivity = DateTime.now();
-  bool _summaryRunning = false;
   late final ToolRegistry _localTools;
+  late final ReminderScheduler _reminderScheduler;
+  late final MemorySummarizer _summarizer;
+
+  /// 防抖落盘：连续 state 改动只触发一次实际写。`_pendingSave` 串联防止并发，
+  /// `dispose` 时 flush 保最后一次变更不丢。
+  Timer? _saveDebounce;
+  Future<void> _pendingSave = Future.value();
+  static const _kSaveDebounce = Duration(milliseconds: 120);
 
   AppStateNotifier(this._ref)
       : super(const AppState(
@@ -63,9 +70,19 @@ class AppStateNotifier extends StateNotifier<AppState> {
           serviceHost: 'http://localhost:11434',
         )) {
     _localTools = _buildLocalTools();
+    _reminderScheduler = ReminderScheduler(
+      interval: _kReminderInterval,
+      getEvents: () => state.calendarEvents,
+      onReminder: _onReminderDue,
+    );
+    _summarizer = MemorySummarizer(
+      _ref,
+      interval: _kMemorySummaryInterval,
+      idleThreshold: _kIdleSummaryThreshold,
+    );
     _loadState();
-    _startReminderCheck();
-    _startSummaryLoop();
+    _reminderScheduler.start();
+    _summarizer.start();
     _wireMcpListener();
     // Fire-and-forget: 不阻塞首屏；权限弹窗会自然出现在首次 GPS 请求时。
     unawaited(_ref.read(locationServiceProvider).refresh());
@@ -79,10 +96,14 @@ class AppStateNotifier extends StateNotifier<AppState> {
   ToolRegistry _buildLocalTools() => ToolRegistry(const []);
 
   @override
-  void dispose() {
-    _reminderTimer?.cancel();
-    _summaryTimer?.cancel();
+  Future<void> dispose() async {
+    _reminderScheduler.stop();
+    _summarizer.stop();
     _mcpSub?.cancel();
+    // Flush 待落盘的变更——避免最后一次 setState 因防抖窗口未到而丢失。
+    _saveDebounce?.cancel();
+    _saveDebounce = null;
+    await _writeSnapshot();
     super.dispose();
   }
 
@@ -103,58 +124,23 @@ class AppStateNotifier extends StateNotifier<AppState> {
     });
   }
 
-  Future<void> reconnectMcp({String? host}) async {
-    final target = host ?? state.mcpHost;
-    if (target.isEmpty) return;
-    state = state.copyWith(mcpHost: target);
-    await _saveState();
-    await _mcp.connect(target);
+  /// 重新连接 MCP——程序内部使用（如网络恢复后），不接受外部 host 参数。
+  /// host 来自 [defaultMcpHost]（编译期默认 + dart-define 覆盖）。
+  Future<void> reconnectMcp() async {
+    await _mcp.connect(defaultMcpHost);
   }
 
-  void updateMcpHost(String host) {
-    state = state.copyWith(mcpHost: host);
-    _saveState();
-  }
+  // ---- Reminder hook ----
 
-  // ---- Reminder loop ----
-
-  void _startReminderCheck() {
-    _reminderTimer = Timer.periodic(_kReminderInterval, (_) {
-      _checkUpcomingEvents();
-    });
-  }
-
-  void _checkUpcomingEvents() {
-    final now = DateTime.now();
-    for (final event in state.calendarEvents) {
-      if (event.time == null) continue;
-      if (event.reminderMinutes == null) continue;
-
-      final parts = event.time!.split(':');
-      if (parts.length != 2) continue;
-
-      final eventDateTime = DateTime(
-        event.date.year,
-        event.date.month,
-        event.date.day,
-        int.parse(parts[0]),
-        int.parse(parts[1]),
-      );
-
-      final diffMinutes = eventDateTime.difference(now).inMinutes;
-      if (diffMinutes > 0 &&
-          diffMinutes <= event.reminderMinutes! &&
-          !_remindedEventIds.contains(event.id)) {
-        _remindedEventIds.add(event.id);
-        final desc = event.description != null ? '\n${event.description}' : '';
-        final timeHint = diffMinutes >= 60
-            ? '约${diffMinutes ~/ 60}小时后'
-            : '$diffMinutes分钟后';
-        _addReminderMessage(
-          '⏰ 日程提醒（$timeHint开始）\n${event.time} ${event.title}$desc',
-        );
-      }
-    }
+  /// [ReminderScheduler] 命中提醒窗口时回调到这里——拼好文案发到当前角色对话。
+  void _onReminderDue(CalendarEvent event, int diffMinutes) {
+    final desc = event.description != null ? '\n${event.description}' : '';
+    final timeHint = diffMinutes >= 60
+        ? '约${diffMinutes ~/ 60}小时后'
+        : '$diffMinutes分钟后';
+    _addReminderMessage(
+      '⏰ 日程提醒（$timeHint开始）\n${event.time} ${event.title}$desc',
+    );
   }
 
   void _addReminderMessage(String content) {
@@ -189,41 +175,21 @@ class AppStateNotifier extends StateNotifier<AppState> {
         ? _cloudDefaultHost(cloudProvider)
         : _localDefaultHost(localProvider);
     final serviceHost = prefs.getString('serviceHost') ?? defaultHost;
-    final mcpHost = prefs.getString('mcpHost') ?? 'http://localhost:8000';
     final userName = prefs.getString('userName') ?? '';
     final language = prefs.getString('preferredLanguage') ?? '中文';
     final onboardingCompleted = prefs.getBool('onboardingCompleted') ?? false;
 
-    final rolesJson = prefs.getString('customRoles');
+    // 持久化数据反序列化：逐条 try/catch——单条坏数据不应让整张表加载失败。
+    // 跳过的条目计数仅入日志；后续可接 crash reporting 上报。
     final roles = <Role>[...defaultRoles];
-    if (rolesJson != null) {
-      final customRoles = (jsonDecode(rolesJson) as List)
-          .map((e) => Role.fromJson(e as Map<String, dynamic>))
-          .toList();
-      roles.addAll(customRoles);
-    }
-
-    final messagesJson = prefs.getString('messages');
-    final messages = messagesJson == null
-        ? <Message>[]
-        : (jsonDecode(messagesJson) as List)
-            .map((e) => Message.fromJson(e as Map<String, dynamic>))
-            .toList();
-
-    final memoriesJson = prefs.getString('memories');
-    final memories = memoriesJson == null
-        ? <Memory>[]
-        : (jsonDecode(memoriesJson) as List)
-            .map((e) => Memory.fromJson(e as Map<String, dynamic>))
-            .toList();
-
-    final groupsJson = prefs.getString('groups');
-    var groups = <Group>[];
-    if (groupsJson != null) {
-      groups = (jsonDecode(groupsJson) as List)
-          .map((e) => Group.fromJson(e as Map<String, dynamic>))
-          .toList();
-    }
+    roles.addAll(_decodeList(
+        prefs.getString('customRoles'), 'customRoles', Role.fromJson));
+    final messages = _decodeList(
+        prefs.getString('messages'), 'messages', Message.fromJson);
+    final memories = _decodeList(
+        prefs.getString('memories'), 'memories', Memory.fromJson);
+    final groups =
+        _decodeList(prefs.getString('groups'), 'groups', Group.fromJson);
 
     state = state.copyWith(
       roles: roles,
@@ -234,7 +200,6 @@ class AppStateNotifier extends StateNotifier<AppState> {
       currentModel: model,
       serviceType: serviceType,
       serviceHost: serviceHost,
-      mcpHost: mcpHost,
       localProvider: localProvider,
       cloudProvider: cloudProvider,
       userName: userName,
@@ -251,7 +216,7 @@ class AppStateNotifier extends StateNotifier<AppState> {
             _ref.read(anthropicApiKeyProvider.notifier).state = v,
       );
     } catch (e) {
-      debugPrint('loadAnthropicApiKey error: $e');
+      debugPrint('loadAnthropicApiKey failed: ${debugReason(e)}');
     }
     try {
       await loadGeminiApiKeyWith(
@@ -259,19 +224,72 @@ class AppStateNotifier extends StateNotifier<AppState> {
         setKey: (v) => _ref.read(geminiApiKeyProvider.notifier).state = v,
       );
     } catch (e) {
-      debugPrint('loadGeminiApiKey error: $e');
+      debugPrint('loadGeminiApiKey failed: ${debugReason(e)}');
     }
 
-    unawaited(_mcp.connect(mcpHost));
+    unawaited(_mcp.connect(defaultMcpHost));
   }
 
-  Future<void> _saveState() async {
+  /// 反序列化持久化的 JSON 列表，per-row 容错：单条坏数据跳过 + 入日志，
+  /// 不让一条脏数据让整张表加载失败。
+  List<T> _decodeList<T>(
+    String? raw,
+    String tableName,
+    T Function(Map<String, dynamic>) fromJson,
+  ) {
+    if (raw == null) return <T>[];
+    List<dynamic> rows;
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is! List) {
+        debugPrint('load $tableName: expected List, got ${decoded.runtimeType}');
+        return <T>[];
+      }
+      rows = decoded;
+    } catch (e) {
+      debugPrint('load $tableName: JSON decode failed: ${debugReason(e)}');
+      return <T>[];
+    }
+    final out = <T>[];
+    var skipped = 0;
+    for (final row in rows) {
+      try {
+        if (row is! Map) {
+          skipped++;
+          continue;
+        }
+        out.add(fromJson(row.cast<String, dynamic>()));
+      } catch (e) {
+        skipped++;
+        debugPrint('load $tableName: skip bad row: ${debugReason(e)}');
+      }
+    }
+    if (skipped > 0) {
+      debugPrint('load $tableName: skipped $skipped corrupt row(s)');
+    }
+    return out;
+  }
+
+  /// 调度一次落盘——多次连续调用合并成一次实际写入，避免 sendMessage / addMemory
+  /// 之类高频 setState 引起的 IO 风暴。dispose 时 flush 兜底。
+  void _saveState() {
+    _saveDebounce?.cancel();
+    _saveDebounce = Timer(_kSaveDebounce, () {
+      _saveDebounce = null;
+      _pendingSave = _pendingSave.then((_) => _writeSnapshot());
+    });
+  }
+
+  /// 立即把当前 [state] 写入持久化层——串联在 [_pendingSave] 后面避免并发写。
+  ///
+  /// 注：当前用 SharedPreferences 全量 JSON——后续接入 drift 后这里改成
+  /// per-entity 增量写。该方法暂时不外露。
+  Future<void> _writeSnapshot() async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString('currentRoleId', state.currentRoleId);
     await prefs.setString('currentModel', state.currentModel);
     await prefs.setString('serviceType', state.serviceType);
     await prefs.setString('serviceHost', state.serviceHost);
-    await prefs.setString('mcpHost', state.mcpHost);
     await prefs.setString('localProvider', state.localProvider);
     await prefs.setString('cloudProvider', state.cloudProvider);
     await prefs.setString('userName', state.userName);
@@ -430,7 +448,7 @@ class AppStateNotifier extends StateNotifier<AppState> {
 
       final role = state.currentRole;
       final systemContent =
-          await _buildPrivateSystemPrompt(role, state.currentRoleId);
+          await _buildSystemPrompt(role, state.currentRoleId);
 
       // Agentic path: 当前所选模型必须真的具备 tool 能力（Ollama 上 gemma3:4b
       // 协议层支持、但模型本身没 tool capabilities，不能走 agent loop），同时
@@ -449,50 +467,12 @@ class AppStateNotifier extends StateNotifier<AppState> {
         }
       }
 
-      // Non-agent path: kick off bespoke calendar extraction + reminder parse
-      // in parallel (doesn't block reply), then a plain chat completion.
-      _aiExtractCalendarEvents(content, service).then((events) async {
-        if (events.isEmpty) return;
-        final succeeded = <CalendarEvent>[];
-        final failures = <String>[];
-        for (final event in events) {
-          try {
-            await addCalendarEvent(event);
-            succeeded.add(event);
-          } catch (e) {
-            debugPrint('auto-add calendar event failed: $e');
-            failures.add(e is McpUnavailableException
-                ? 'MCP 服务未连接'
-                : e.toString());
-          }
-        }
-        if (succeeded.isNotEmpty) {
-          final parts = succeeded.map((e) {
-            final t = e.time != null ? '${e.time} ' : '';
-            final r = e.reminderMinutes != null ? '（${e.reminderText}提醒）' : '';
-            return '$t${e.title}$r';
-          }).join('、');
-          _addAiStreamPart('📅 已自动添加日程：$parts');
-        }
-        if (failures.isNotEmpty) {
-          _addAiStreamPart(
-            '⚠️ 日程添加失败：${failures.first}',
-            kind: 'reminder',
-          );
-        }
-      });
-
-      _handleReminderRequest(content, service);
-
-      final history = state.currentRoleMessages
-          .where((m) => m.kind == 'chat')
-          .toList()
-          .reversed
-          .take(10)
-          .toList()
-          .reversed
-          .toList();
-      final lastUserIdx = _indexOfLastUser(history);
+      // 非 agent 路径：纯对话回复。日程/提醒抽取走 agent loop，模型自主 emit
+      // tool_use 调用 MCP；本路径仅服务 tool 能力缺失的模型。
+      final history = recentChatHistory(
+        state.currentRoleMessages.where((m) => m.kind == 'chat').toList(),
+      );
+      final lastUserIdx = indexOfLastUser(history);
       final messages = <Map<String, String>>[
         {'role': 'system', 'content': systemContent},
         for (var i = 0; i < history.length; i++)
@@ -507,15 +487,8 @@ class AppStateNotifier extends StateNotifier<AppState> {
       final reply = await service.chat(messages, state.currentModel);
       _addAiMessage(reply);
     } catch (e) {
-      debugPrint('sendMessage error: $e');
-      if (e is DioException && e.type == DioExceptionType.connectionTimeout) {
-        _addAiMessage('请求超时，请重试');
-      } else if (e is DioException &&
-          e.type == DioExceptionType.connectionError) {
-        _addAiMessage('无法连接到模型服务，请检查服务是否启动');
-      } else {
-        _addAiMessage('请求失败：$e');
-      }
+      debugPrint('sendMessage failed: ${debugReason(e)}');
+      _addAiMessage(userFacingError(e));
     }
   }
 
@@ -530,15 +503,10 @@ class AppStateNotifier extends StateNotifier<AppState> {
     // The current user input is the trailing message; earlier turns are plain
     // text bubbles, so we represent them as string content. Filter to chat
     // messages only — tool_status/reminder bubbles are UI-only.
-    final history = state.currentRoleMessages
-        .where((m) => m.kind == 'chat')
-        .toList()
-        .reversed
-        .take(10)
-        .toList()
-        .reversed
-        .toList();
-    final lastUserIdx = _indexOfLastUser(history);
+    final history = recentChatHistory(
+      state.currentRoleMessages.where((m) => m.kind == 'chat').toList(),
+    );
+    final lastUserIdx = indexOfLastUser(history);
     final messages = <Map<String, dynamic>>[
       for (var i = 0; i < history.length; i++)
         {
@@ -575,8 +543,8 @@ class AppStateNotifier extends StateNotifier<AppState> {
         tools: tools,
       );
     } catch (e) {
-      debugPrint('agent start error: $e');
-      _addAiMessage('请求失败：$e');
+      debugPrint('agent start failed: ${debugReason(e)}');
+      _addAiMessage(userFacingError(e));
       return;
     }
 
@@ -608,10 +576,11 @@ class AppStateNotifier extends StateNotifier<AppState> {
               : await _mcp.callTool(call.name, call.input);
           results.add(ToolResult(toolUseId: call.id, content: raw));
         } catch (e) {
-          debugPrint('tool ${call.name} failed: $e');
+          debugPrint('tool ${call.name} failed: ${debugReason(e)}');
+          // tool 错误回灌给模型——让 LLM 决定是否重试 / 改换方案；UI 不直接显示。
           results.add(ToolResult(
             toolUseId: call.id,
-            content: 'tool error: $e',
+            content: userFacingError(e),
             isError: true,
           ));
         }
@@ -633,8 +602,8 @@ class AppStateNotifier extends StateNotifier<AppState> {
           tools: tools,
         );
       } catch (e) {
-        debugPrint('agent continue error: $e');
-        _addAiMessage('请求失败：$e');
+        debugPrint('agent continue failed: ${debugReason(e)}');
+        _addAiMessage(userFacingError(e));
         return;
       }
     }
@@ -675,8 +644,13 @@ class AppStateNotifier extends StateNotifier<AppState> {
     _saveState();
   }
 
-  /// Build the system prompt for a private chat with [role].
-  Future<String> _buildPrivateSystemPrompt(Role role, String roleId) async {
+  /// 组装某个 [role] 的 system prompt——私聊和群聊共用。
+  /// [groupSuffix] 给群聊用，附加成员列表 + 协作规则；私聊为 null。
+  Future<String> _buildSystemPrompt(
+    Role role,
+    String roleId, {
+    String? groupSuffix,
+  }) async {
     final visible = state.memoriesForRole(roleId);
     final profileMemories = visible
         .where((m) => m.roleId == null && m.type == 'semantic')
@@ -694,8 +668,8 @@ class AppStateNotifier extends StateNotifier<AppState> {
 
     final calendarContext = await _buildCalendarContext();
     // 实时系统信息放最前并强声明权威性，避免小模型用训练时的旧日期/坐标乱答。
-    final buf = StringBuffer(_buildContextHeader());
-    buf.write('\n\n${role.systemPrompt}');
+    final buf = StringBuffer(_buildContextHeader())
+      ..write('\n\n${role.systemPrompt}');
     if (profileMemories.isNotEmpty) {
       buf.write('\n\n关于用户：\n${profileMemories.join('、')}');
     }
@@ -705,9 +679,8 @@ class AppStateNotifier extends StateNotifier<AppState> {
     if (episodic.isNotEmpty) {
       buf.write('\n\n近期事件：\n${episodic.join('；')}');
     }
-    if (calendarContext.isNotEmpty) {
-      buf.write(calendarContext);
-    }
+    if (calendarContext.isNotEmpty) buf.write(calendarContext);
+    if (groupSuffix != null) buf.write(groupSuffix);
     return buf.toString();
   }
 
@@ -719,21 +692,9 @@ class AppStateNotifier extends StateNotifier<AppState> {
   /// 措辞按"系统强制信息"组织，明确告诉模型必须以此为准——小模型默认会用训
   /// 练截止时的旧日期回答"今天是几号"。
   String _buildContextHeader() {
-    final now = DateTime.now();
-    final weekdays = ['一', '二', '三', '四', '五', '六', '日'];
-    final date = _fmtDate(now);
-    final wd = weekdays[now.weekday - 1];
-    final hh = now.hour.toString().padLeft(2, '0');
-    final mm = now.minute.toString().padLeft(2, '0');
-    final tz = now.timeZoneName;
-    final offset = now.timeZoneOffset;
-    final sign = offset.isNegative ? '-' : '+';
-    final hOff = offset.inHours.abs().toString().padLeft(2, '0');
-    final mOff = (offset.inMinutes.abs() % 60).toString().padLeft(2, '0');
-
     final lines = <String>[
       '【系统实时信息（权威，请以此为准；不要使用训练数据中的日期或地点猜测）】',
-      '- 当前日期时间：$date 周$wd $hh:$mm（时区 $tz，UTC$sign$hOff:$mOff）',
+      '- 当前日期时间：${fmtSystemTimestamp(DateTime.now())}',
     ];
 
     final loc = _ref.read(locationServiceProvider);
@@ -781,19 +742,19 @@ class AppStateNotifier extends StateNotifier<AppState> {
   Future<void> updateCalendarEvent(CalendarEvent updated) async {
     await _mcp.updateEvent(updated);
     // 时间/提醒可能被调整，需要重新进入提醒窗口。
-    _remindedEventIds.remove(updated.id);
+    _reminderScheduler.forget(updated.id);
     await _refreshCalendarCache();
   }
 
   Future<void> deleteCalendarEvent(String id) async {
     await _mcp.deleteEvent(id);
-    _remindedEventIds.remove(id);
+    _reminderScheduler.forget(id);
     await _refreshCalendarCache();
   }
 
   Future<List<CalendarEvent>> getEventsForDay(DateTime day) async {
     if (!_mcp.isConnected) return [];
-    final dateStr = _fmtDate(day);
+    final dateStr = fmtDate(day);
     return _mcp.listEvents(startDate: dateStr, endDate: dateStr);
   }
 
@@ -801,7 +762,7 @@ class AppStateNotifier extends StateNotifier<AppState> {
       DateTime start, DateTime end) async {
     if (!_mcp.isConnected) return [];
     return _mcp.listEvents(
-        startDate: _fmtDate(start), endDate: _fmtDate(end));
+        startDate: fmtDate(start), endDate: fmtDate(end));
   }
 
   Future<void> _refreshCalendarCache() async {
@@ -814,139 +775,14 @@ class AppStateNotifier extends StateNotifier<AppState> {
       final today = DateTime(now.year, now.month, now.day);
       final end = today.add(const Duration(days: 30));
       final events = await getEventsForRange(today, end);
-      // 收敛去重集合：只保留窗口内仍然存在的事件 id，避免长期累积。
+      // 窗口外的事件清出去重表——避免长期累积。
       final liveIds = events.map((e) => e.id).toSet();
-      _remindedEventIds.retainAll(liveIds);
+      for (final e in state.calendarEvents) {
+        if (!liveIds.contains(e.id)) _reminderScheduler.forget(e.id);
+      }
       state = state.copyWith(calendarEvents: events);
     } catch (e) {
-      debugPrint('refreshCalendarCache error: $e');
-    }
-  }
-
-  // ---- AI extraction (calendar) ----
-
-  void _handleReminderRequest(String content, ModelService service) {
-    _aiParseReminderRequest(content, service).then((minutes) async {
-      if (minutes == null) return;
-      final now = DateTime.now();
-      final futureEvents = state.calendarEvents.where((e) {
-        if (e.time == null) return false;
-        final parts = e.time!.split(':');
-        if (parts.length != 2) return false;
-        final dt = DateTime(e.date.year, e.date.month, e.date.day,
-            int.parse(parts[0]), int.parse(parts[1]));
-        return dt.isAfter(now);
-      }).toList()
-        ..sort((a, b) {
-          final aParts = a.time!.split(':');
-          final bParts = b.time!.split(':');
-          final aDt = DateTime(a.date.year, a.date.month, a.date.day,
-              int.parse(aParts[0]), int.parse(aParts[1]));
-          final bDt = DateTime(b.date.year, b.date.month, b.date.day,
-              int.parse(bParts[0]), int.parse(bParts[1]));
-          return aDt.compareTo(bDt);
-        });
-      if (futureEvents.isEmpty) return;
-
-      final target = futureEvents.first;
-      try {
-        await updateCalendarEvent(target.copyWith(reminderMinutes: minutes));
-      } catch (e) {
-        debugPrint('reminder update failed: $e');
-        return;
-      }
-      final reminderText = minutes >= 1440
-          ? '提前${minutes ~/ 1440}天'
-          : (minutes >= 60 ? '提前${minutes ~/ 60}小时' : '提前$minutes分钟');
-      _addAiMessage('🔔 已设置提醒：${target.time} ${target.title}（$reminderText）');
-    });
-  }
-
-  Future<int?> _aiParseReminderRequest(
-      String content, ModelService service) async {
-    try {
-      final prompt = '''判断用户是否在设置日程提醒。如果是，返回提前提醒的分钟数（纯数字）。如果不是，返回 null。
-
-示例：
-"提前一小时提醒我" → 60
-"提前30分钟提醒" → 30
-"提前半小时提醒我" → 30
-"提前两小时提醒" → 120
-"提前1天提醒" → 1440
-"提前10分钟提醒我" → 10
-"你好" → null
-"明天开会" → null
-
-只返回数字或null，不要其他文字。
-
-用户说：$content''';
-      final result = await service.chat([
-        {'role': 'user', 'content': prompt},
-      ], state.currentModel);
-      final cleaned = result.trim().toLowerCase();
-      if (cleaned == 'null' || cleaned.isEmpty) return null;
-      final match = RegExp(r'\d+').firstMatch(cleaned);
-      if (match == null) return null;
-      final val = int.tryParse(match.group(0)!);
-      return (val != null && val > 0) ? val : null;
-    } catch (e) {
-      debugPrint('aiParseReminderRequest error: $e');
-      return null;
-    }
-  }
-
-  Future<List<CalendarEvent>> _aiExtractCalendarEvents(
-      String userMessage, ModelService service) async {
-    try {
-      final now = DateTime.now();
-      final weekday = ['一', '二', '三', '四', '五', '六', '日'][now.weekday - 1];
-      final today = _fmtDate(now);
-      final prompt = '''你是一个日程提取助手。分析以下文本，提取其中包含的日程/会议/约会/活动等事件。
-
-规则：
-1. 如果文本中没有任何日程相关内容，只返回 []
-2. 如果有，返回JSON数组，每个事件格式：
-   {"title":"简短标题","date":"YYYY-MM-DD","time":"HH:mm","description":"备注","reminderMinutes":数字}
-3. title 要简洁
-4. description 放会议号、链接、地点等补充信息，没有则不填
-5. reminderMinutes：如果用户提到提醒，换算成分钟数填入；没提到则不填
-6. time、description、reminderMinutes 都是可选字段
-7. 只返回JSON数组，不要任何其他文字
-
-当前：$today 周$weekday
-日期换算："今天"=$today，"明天"+1天，"后天"+2天，"下周X"=下个周X的日期。
-
-文本内容：
-$userMessage''';
-      final result = await service.chat([
-        {'role': 'user', 'content': prompt},
-      ], state.currentModel);
-      final jsonStr = _extractJsonArray(result);
-      if (jsonStr == null) return [];
-      final list = jsonDecode(jsonStr) as List;
-      if (list.isEmpty) return [];
-      return list.map((item) {
-        final m = item as Map<String, dynamic>;
-        final dateStr = m['date'] as String;
-        final parts = dateStr.split('-');
-        if (parts.length != 3) return null;
-        final date = DateTime(
-          int.parse(parts[0]),
-          int.parse(parts[1]),
-          int.parse(parts[2]),
-        );
-        return CalendarEvent(
-          id: _uuid.v4(),
-          title: m['title'] as String,
-          date: date,
-          time: m['time'] as String?,
-          description: m['description'] as String?,
-          reminderMinutes: m['reminderMinutes'] as int?,
-        );
-      }).whereType<CalendarEvent>().toList();
-    } catch (e) {
-      debugPrint('aiExtractCalendarEvents error: $e');
-      return [];
+      debugPrint('refreshCalendarCache failed: ${debugReason(e)}');
     }
   }
 
@@ -976,36 +812,15 @@ $userMessage''';
 
   // ---- Misc helpers ----
 
-  String? _extractJsonArray(String text) {
-    final start = text.indexOf('[');
-    final end = text.lastIndexOf(']');
-    if (start == -1 || end == -1 || end <= start) return null;
-    return text.substring(start, end + 1);
-  }
-
-  String _fmtDate(DateTime d) =>
-      '${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
-
   /// 给"最后一条 user 消息"加显式日期提示。小模型不信 system 里的日期声明，
   /// 但会跟问题贴在一起的自然语言提示走；只注入最后一条避免历史轮的旧时间戳
   /// 互相干扰。assistant 与较早的 user 消息保持原文。
   String _formatUserContentForLlm(Message m) {
     final dt = DateTime.fromMillisecondsSinceEpoch(m.timestamp);
-    final weekdays = ['一', '二', '三', '四', '五', '六', '日'];
-    final wd = weekdays[dt.weekday - 1];
-    final hh = dt.hour.toString().padLeft(2, '0');
-    final mm = dt.minute.toString().padLeft(2, '0');
-    return '（系统提示：当前时间是 ${_fmtDate(dt)} 周$wd $hh:$mm ${dt.timeZoneName}，'
+    return '（系统提示：当前时间是 ${fmtDate(dt)} ${fmtWeekday(dt)} '
+        '${fmtHourMinute(dt)} ${dt.timeZoneName}，'
         '所有"今天/明天/现在"按此换算，不要使用训练数据中的旧日期。）\n\n'
         '${m.content}';
-  }
-
-  /// 在历史消息列表里找最后一条 user 消息的索引；没有则 -1。
-  int _indexOfLastUser(List<Message> messages) {
-    for (var i = messages.length - 1; i >= 0; i--) {
-      if (messages[i].isUser) return i;
-    }
-    return -1;
   }
 
   List<Message> getMessagesForRole(String roleId) {
@@ -1104,55 +919,23 @@ $userMessage''';
         final role = state.getRoleById(roleId);
         if (role == null) continue;
 
-        final calendarContext = await _buildCalendarContext();
-        final visible = state.memoriesForRole(roleId);
-        final profileMemories = visible
-            .where((m) => m.roleId == null && m.type == 'semantic')
-            .map((m) => m.content)
-            .join('、');
-        final roleSemantic = visible
-            .where((m) => m.roleId == roleId && m.type == 'semantic')
-            .map((m) => m.content)
-            .join('、');
-        final episodic = visible
-            .where((m) => m.roleId == roleId && m.type == 'episodic')
-            .take(5)
-            .map((m) => m.content)
-            .join('；');
-
         final otherNames = group.roleIds
             .where((id) => id != roleId)
             .map((id) => state.getRoleById(id)?.name ?? id)
             .join('、');
-
-        final systemBuf = StringBuffer(_buildContextHeader());
-        systemBuf.write('\n\n${role.systemPrompt}');
-        if (profileMemories.isNotEmpty) {
-          systemBuf.write('\n\n关于用户：\n$profileMemories');
-        }
-        if (roleSemantic.isNotEmpty) {
-          systemBuf.write('\n\n${role.name}的专属记忆：\n$roleSemantic');
-        }
-        if (episodic.isNotEmpty) {
-          systemBuf.write('\n\n近期事件：\n$episodic');
-        }
-        if (calendarContext.isNotEmpty) systemBuf.write(calendarContext);
-        systemBuf.write(
-          '\n\n你正在群聊"${group.name}"中。其他成员：$otherNames。'
-          '请基于自身能力简洁回复，不要重复其他成员已经说过的内容。',
+        final systemPrompt = await _buildSystemPrompt(
+          role,
+          roleId,
+          groupSuffix: '\n\n你正在群聊"${group.name}"中。其他成员：$otherNames。'
+              '请基于自身能力简洁回复，不要重复其他成员已经说过的内容。',
         );
 
-        final history = getGroupMessagesList(groupId)
-            .where((m) => m.kind == 'chat')
-            .toList()
-            .reversed
-            .take(10)
-            .toList()
-            .reversed
-            .toList();
-        final lastUserIdx = _indexOfLastUser(history);
+        final history = recentChatHistory(
+          getGroupMessagesList(groupId).where((m) => m.kind == 'chat').toList(),
+        );
+        final lastUserIdx = indexOfLastUser(history);
         final messages = <Map<String, String>>[
-          {'role': 'system', 'content': systemBuf.toString()},
+          {'role': 'system', 'content': systemPrompt},
           for (var i = 0; i < history.length; i++)
             if (history[i].isUser)
               {
@@ -1174,14 +957,8 @@ $userMessage''';
         await Future.delayed(const Duration(milliseconds: 300));
       }
     } catch (e) {
-      debugPrint('sendGroupMessage error: $e');
-      final fallback = group.roleIds.first;
-      if (e is DioException && e.type == DioExceptionType.connectionError) {
-        _addGroupAiMessage(
-            groupId, fallback, '无法连接到模型服务，请检查服务是否启动');
-      } else {
-        _addGroupAiMessage(groupId, fallback, '请求失败，请重试');
-      }
+      debugPrint('sendGroupMessage failed: ${debugReason(e)}');
+      _addGroupAiMessage(groupId, group.roleIds.first, userFacingError(e));
     }
 
     state = state.copyWith(clearLoadingGroupId: true);
@@ -1228,7 +1005,7 @@ $roleLines
       if (valid.isEmpty) return [group.roleIds.first];
       return valid;
     } catch (e) {
-      debugPrint('routeGroupMessage error: $e');
+      debugPrint('routeGroupMessage failed: ${debugReason(e)}');
       return [group.roleIds.first];
     }
   }
@@ -1259,176 +1036,22 @@ $roleLines
     _saveState();
   }
 
-  // ---- Memory auto-summary ----
+  // ---- Memory auto-summary hooks ----
 
-  void _startSummaryLoop() {
-    _summaryTimer = Timer.periodic(_kMemorySummaryInterval, (_) {
-      _maybeRunSummary(forceIdle: false);
-    });
-  }
+  void _markActivity() => _summarizer.markActivity();
 
-  void _markActivity() {
-    _lastUserActivity = DateTime.now();
-  }
+  /// 显式触发一次记忆归纳（设置页"立即归纳"按钮用）。
+  Future<void> runMemorySummaryNow() => _summarizer.runNow();
 
-  Future<void> _maybeRunSummary({required bool forceIdle}) async {
-    if (_summaryRunning) return;
-    // 设计：定期 timer + 用户闲置时触发；显式触发（设置页"立即归纳"）可绕过空闲检查。
-    if (!forceIdle) {
-      final idleFor = DateTime.now().difference(_lastUserActivity);
-      if (idleFor < _kIdleSummaryThreshold) return;
-    }
-
-    _summaryRunning = true;
-    try {
-      final service = _modelService();
-      if (service == null) return;
-      await _summarizeRoleConversations(service);
-    } catch (e) {
-      debugPrint('summary error: $e');
-    } finally {
-      _summaryRunning = false;
-    }
-  }
-
-  /// Manually trigger a summary pass (used by settings page).
-  Future<void> runMemorySummaryNow() async {
-    await _maybeRunSummary(forceIdle: true);
-  }
-
-  /// For each role with new messages since the last summary, ask the LLM to
-  /// extract durable facts and merge them into [memories]. Existing semantic
-  /// memories visible to the role are passed in so the model can choose to
-  /// `update` a stale fact (e.g. dietary change) instead of appending dupes.
-  Future<void> _summarizeRoleConversations(ModelService service) async {
-    final prefs = await SharedPreferences.getInstance();
-    for (final role in state.roles) {
-      final lastTs = prefs.getInt('summaryLastTs_${role.id}') ?? 0;
-      final recent = state.messages
-          .where((m) =>
-              m.roleId == role.id && m.kind == 'chat' && m.timestamp > lastTs)
-          .toList()
-        ..sort((a, b) => a.timestamp.compareTo(b.timestamp));
-      if (recent.length < 4) continue; // need a meaningful window
-
-      final transcript = recent
-          .map((m) =>
-              '${m.isUser ? "用户" : role.name}: ${m.content.replaceAll('\n', ' ')}')
-          .join('\n');
-
-      // Existing semantic memories the role might update (profile + own scope).
-      // Episodic memories are events — not candidates for updates.
-      final candidates = state
-          .memoriesForRole(role.id)
-          .where((m) => m.type == 'semantic')
-          .toList()
-        ..sort((a, b) => b.timestamp.compareTo(a.timestamp));
-      final existingJson = candidates
-          .take(40)
-          .map((m) => {
-                'id': m.id,
-                'scope': m.roleId == null ? 'profile' : 'role',
-                'content': m.content,
-              })
-          .toList();
-
-      final prompt = '''你是用户记忆归纳助手。从下面的对话片段中提取关于用户的稳定事实。
-
-已有可能相关的记忆（如有冲突，使用 op=update 替换；id 必须引用此处的 id）：
-${jsonEncode(existingJson)}
-
-输出 JSON 数组，每条：
-{"op":"add"|"update","id":"oldId(仅 op=update)","scope":"profile|role","type":"semantic|episodic","content":"事实"}
-
-规则：
-- 性格、家庭、健康、姓名、过敏等通用画像 → scope=profile
-- 仅与本角色领域相关 → scope=role
-- 稳定特征 → semantic；具体事件 → episodic
-- 与已有记忆冲突（如"喜欢咖啡"变"不喝咖啡"）→ op=update 引用旧 id
-- 完全新增 → op=add
-- 没有任何可归纳事实 → []
-- 单条 content ≤30 字，不要捏造
-
-角色：${role.name}（${role.description}）
-对话：
-$transcript''';
-
-      try {
-        final result = await service.chat([
-          {'role': 'user', 'content': prompt},
-        ], state.currentModel);
-        final jsonStr = _extractJsonArray(result);
-        if (jsonStr == null) {
-          await prefs.setInt('summaryLastTs_${role.id}', recent.last.timestamp);
-          continue;
-        }
-        final list = jsonDecode(jsonStr);
-        if (list is! List) continue;
-        _applyMemoryOps(list, role.id);
-        await prefs.setInt('summaryLastTs_${role.id}', recent.last.timestamp);
-      } catch (e) {
-        debugPrint('summarize role ${role.id} failed: $e');
-      }
-    }
-  }
-
-  /// Apply add/update operations returned by the summarizer. Falls back to
-  /// `add` if `op` is missing or `update` references an unknown id.
-  void _applyMemoryOps(List<dynamic> ops, String roleId) {
-    final byId = {for (final m in state.memories) m.id: m};
-    final updated = <String, Memory>{};
-    final added = <Memory>[];
-    final now = DateTime.now().millisecondsSinceEpoch;
-
-    for (final item in ops) {
-      if (item is! Map) continue;
-      final op = (item['op'] as String?) ?? 'add';
-      final scope = item['scope'] as String?;
-      final type = (item['type'] as String?) ?? 'semantic';
-      final content = (item['content'] as String?)?.trim();
-      if (content == null || content.isEmpty) continue;
-
-      if (op == 'update') {
-        final oldId = item['id'] as String?;
-        final old = oldId == null ? null : byId[oldId];
-        if (old != null) {
-          updated[old.id] = old.copyWith(
-            type: type,
-            content: content,
-            timestamp: now,
-          );
-          continue;
-        }
-        // Unknown id → treat as add
-      }
-
-      if (_memoryDuplicate(content, updated.values, added)) continue;
-      added.add(Memory(
-        id: _uuid.v4(),
-        type: type,
-        content: content,
-        roleId: scope == 'profile' ? null : roleId,
-        timestamp: now,
-        tags: const [],
-      ));
-    }
-
+  /// 由 [MemorySummarizer] 调回——把归纳出的 diff 应用到记忆列表。
+  void applyMemoryDiff({
+    required Map<String, Memory> updated,
+    required List<Memory> added,
+  }) {
     if (updated.isEmpty && added.isEmpty) return;
-    final next = state.memories
-        .map((m) => updated[m.id] ?? m)
-        .toList()
+    final next = state.memories.map((m) => updated[m.id] ?? m).toList()
       ..addAll(added);
     state = state.copyWith(memories: next);
     _saveState();
-  }
-
-  bool _memoryDuplicate(
-    String content,
-    Iterable<Memory> updated,
-    Iterable<Memory> added,
-  ) {
-    final norm = content.trim();
-    bool same(Memory m) => m.content.trim() == norm;
-    return state.memories.any(same) || updated.any(same) || added.any(same);
   }
 }

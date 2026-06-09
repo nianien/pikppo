@@ -3,11 +3,9 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../models/role.dart';
 import '../providers/app_state_provider.dart';
 import '../theme/design_tokens.dart';
+import '../utils/color_hex.dart';
 import '../widgets/message_bubble.dart';
 import 'settings_screen.dart';
-
-Color _parseColor(String hex) =>
-    Color(int.parse(hex.replaceFirst('#', '0xFF')));
 
 class ChatDetailScreen extends ConsumerStatefulWidget {
   final Role role;
@@ -80,7 +78,7 @@ class _ChatDetailScreenState extends ConsumerState<ChatDetailScreen> {
     final messages = appState.currentRoleMessages;
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
-    final roleColor = _parseColor(widget.role.color);
+    final roleColor = parseHexColor(widget.role.color);
 
     // 新消息（自己发的或 AI 回的）才滚到底；用户主动往上滚回看历史时不打扰。
     ref.listen<int>(
@@ -191,7 +189,7 @@ class _ChatDetailScreenState extends ConsumerState<ChatDetailScreen> {
 
   void _showChatInfo(BuildContext context) {
     final theme = Theme.of(context);
-    final roleColor = _parseColor(widget.role.color);
+    final roleColor = parseHexColor(widget.role.color);
     showModalBottomSheet(
       context: context,
       builder: (_) => SafeArea(
@@ -426,7 +424,7 @@ class _ChatEmptyState extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
-    final color = _parseColor(role.color);
+    final color = parseHexColor(role.color);
     return Center(
       child: Column(
         mainAxisSize: MainAxisSize.min,

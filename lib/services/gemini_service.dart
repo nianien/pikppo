@@ -189,7 +189,7 @@ class GeminiService extends ModelService {
           // turn so the orchestrator can pair results back later.
           id: 'gemini-call-$i-${fc['name']}',
           name: fc['name'] as String,
-          input: (fc['args'] as Map?)?.cast<String, dynamic>() ?? const {},
+          input: parseToolArguments(fc['args']),
         ));
       } else if (p.containsKey('text')) {
         textBuf.write(p['text'] as String? ?? '');

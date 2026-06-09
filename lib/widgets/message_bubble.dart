@@ -3,6 +3,8 @@ import 'package:flutter/material.dart';
 import '../models/message.dart';
 import '../models/role.dart';
 import '../theme/design_tokens.dart';
+import '../utils/color_hex.dart';
+import '../utils/time_format.dart';
 
 /// 跨天日期分隔条：仅在相邻消息分别属于不同日期时插入。
 /// 每条消息的精确时间由 [MessageBubble] 的 tooltip 提供，这里只解决"日期跨越
@@ -20,19 +22,15 @@ class MessageTimeSeparator extends StatelessWidget {
     return c.year != p.year || c.month != p.month || c.day != p.day;
   }
 
+  /// 分隔条上的简短日期：今年内省略年份。
   static String formatDate(DateTime dt) {
     final now = DateTime.now();
     if (dt.year == now.year) return '${dt.month}月${dt.day}日';
     return '${dt.year}年${dt.month}月${dt.day}日';
   }
 
-  /// 精确到分钟的完整时间戳，用于 tooltip。
-  static String formatFull(DateTime dt) {
-    final hh = dt.hour.toString().padLeft(2, '0');
-    final mm = dt.minute.toString().padLeft(2, '0');
-    return '${dt.year}年${dt.month.toString().padLeft(2, '0')}月'
-        '${dt.day.toString().padLeft(2, '0')}日 $hh:$mm';
-  }
+  /// 完整时间戳（tooltip 用）：委托给 [fmtMessageStamp]——单一来源。
+  static String formatFull(DateTime dt) => fmtMessageStamp(dt);
 
   @override
   Widget build(BuildContext context) {
@@ -53,9 +51,6 @@ class MessageTimeSeparator extends StatelessWidget {
   }
 }
 
-Color _parseColor(String hex) =>
-    Color(int.parse(hex.replaceFirst('#', '0xFF')));
-
 class MessageBubble extends StatelessWidget {
   final Message message;
   final Role role;
@@ -73,7 +68,7 @@ class MessageBubble extends StatelessWidget {
     final isUser = message.isUser;
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
-    final roleColor = _parseColor(role.color);
+    final roleColor = parseHexColor(role.color);
 
     // 气泡圆角：主体 18 + 尾角 5（设计稿明确尺寸）。
     final radius = isUser
@@ -242,7 +237,7 @@ class _ThinkingBubbleState extends State<ThinkingBubble>
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
-    final roleColor = _parseColor(widget.role.color);
+    final roleColor = parseHexColor(widget.role.color);
 
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),

@@ -4,11 +4,9 @@ import '../providers/app_state_provider.dart';
 import '../models/role.dart';
 import '../models/group.dart';
 import '../theme/design_tokens.dart';
+import '../utils/color_hex.dart';
 import 'chat_detail_screen.dart';
 import 'group_chat_screen.dart';
-
-Color _parseColor(String hex) =>
-    Color(int.parse(hex.replaceFirst('#', '0xFF')));
 
 String _formatTime(int? timestamp) {
   if (timestamp == null) return '';
@@ -107,7 +105,7 @@ class ChatListScreen extends ConsumerWidget {
                   _SectionLabel(label: '单聊', count: privateItems.length),
                   const SizedBox(height: AppSpacing.xs),
                   ...privateItems.map((item) {
-                    final color = _parseColor(item.role.color);
+                    final color = parseHexColor(item.role.color);
                     return _ChatCard(
                       leading: _RoleAvatar(
                           color: color, icon: item.role.icon),
@@ -170,7 +168,7 @@ class ChatListScreen extends ConsumerWidget {
                         const SizedBox(height: AppSpacing.xs),
                     itemBuilder: (_, i) {
                       final role = appState.roles[i];
-                      final color = _parseColor(role.color);
+                      final color = parseHexColor(role.color);
                       return _ChatCard(
                         leading: _RoleAvatar(color: color, icon: role.icon),
                         title: role.name,
@@ -394,7 +392,7 @@ class _MiniGroupAvatar extends StatelessWidget {
         crossAxisSpacing: 2,
         physics: const NeverScrollableScrollPhysics(),
         children: display.map((role) {
-          final color = _parseColor(role.color);
+          final color = parseHexColor(role.color);
           return Container(
             decoration: BoxDecoration(
               color: color.withValues(alpha: 0.18),

@@ -18,7 +18,6 @@ class AppState {
   /// `'cloud'`（云端 API，由 [cloudProvider] 选择具体厂商）。
   final String serviceType;
   final String serviceHost;
-  final String mcpHost;
   final McpConnectionState mcpState;
   final String? mcpError;
   /// 本地推理厂商：`'ollama'`（目前唯一）。预留以便扩展 vLLM / llama.cpp。
@@ -42,7 +41,6 @@ class AppState {
     required this.serviceHost,
     this.groups = const [],
     this.calendarEvents = const [],
-    this.mcpHost = 'http://localhost:8000',
     this.mcpState = McpConnectionState.disconnected,
     this.mcpError,
     this.localProvider = 'ollama',
@@ -65,7 +63,6 @@ class AppState {
     String? currentModel,
     String? serviceType,
     String? serviceHost,
-    String? mcpHost,
     McpConnectionState? mcpState,
     String? mcpError,
     String? localProvider,
@@ -89,7 +86,6 @@ class AppState {
       currentModel: currentModel ?? this.currentModel,
       serviceType: serviceType ?? this.serviceType,
       serviceHost: serviceHost ?? this.serviceHost,
-      mcpHost: mcpHost ?? this.mcpHost,
       mcpState: mcpState ?? this.mcpState,
       mcpError: clearMcpError ? null : (mcpError ?? this.mcpError),
       localProvider: localProvider ?? this.localProvider,

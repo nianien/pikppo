@@ -3,6 +3,22 @@
 /// cycle until the model returns plain text.
 library;
 
+import 'dart:convert';
+
+/// Tool 参数容错解析——大多数 provider 给 `Map<String, dynamic>`，少数（个别
+/// 老版 Ollama）会序列化成 JSON 字符串。两种都吃掉；解析失败给空 Map，让上层
+/// tool 报错而不是 Dart 端裸 cast 崩溃。
+Map<String, dynamic> parseToolArguments(dynamic raw) {
+  if (raw is Map) return raw.cast<String, dynamic>();
+  if (raw is String && raw.isNotEmpty) {
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is Map) return decoded.cast<String, dynamic>();
+    } catch (_) {/* fall through */}
+  }
+  return <String, dynamic>{};
+}
+
 class ToolDefinition {
   final String name;
   final String description;

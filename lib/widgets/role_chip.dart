@@ -1,9 +1,6 @@
 import 'package:flutter/material.dart';
 import '../models/role.dart';
-
-Color _parseColor(String hex) {
-  return Color(int.parse(hex.replaceFirst('#', '0xFF')));
-}
+import '../utils/color_hex.dart';
 
 class RoleChip extends StatelessWidget {
   final Role role;
@@ -19,7 +16,7 @@ class RoleChip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final color = _parseColor(role.color);
+    final color = parseHexColor(role.color);
     return ActionChip(
       avatar: Text(role.icon, style: const TextStyle(fontSize: 14)),
       label: Text(role.name),

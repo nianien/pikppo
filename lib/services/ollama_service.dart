@@ -1,4 +1,3 @@
-import 'dart:convert';
 import 'package:dio/dio.dart';
 import 'agent.dart';
 import 'model_service.dart';
@@ -151,7 +150,7 @@ class OllamaService extends ModelService {
         calls.add(ToolUseRequest(
           id: 'ollama-call-$i-${fn['name']}',
           name: fn['name'] as String,
-          input: _parseArguments(fn['arguments']),
+          input: parseToolArguments(fn['arguments']),
         ));
       }
       return AgentToolRequest(
@@ -181,17 +180,4 @@ class OllamaService extends ModelService {
         .toList();
   }
 
-  /// Ollama 的 `arguments` 在新版是 Map（已 JSON 解码），但旧版/某些 build 会
-  /// 输出 JSON 字符串。两种都吃掉，无法解析时给空 Map（让上层 tool 报错而不
-  /// 是 Dart 端崩 cast）。
-  static Map<String, dynamic> _parseArguments(dynamic raw) {
-    if (raw is Map) return raw.cast<String, dynamic>();
-    if (raw is String && raw.isNotEmpty) {
-      try {
-        final decoded = jsonDecode(raw);
-        if (decoded is Map) return decoded.cast<String, dynamic>();
-      } catch (_) {/* fall through */}
-    }
-    return <String, dynamic>{};
-  }
 }

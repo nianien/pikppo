@@ -1,9 +1,6 @@
 import 'package:flutter/material.dart';
 import '../models/role.dart';
-
-Color _parseColor(String hex) {
-  return Color(int.parse(hex.replaceFirst('#', '0xFF')));
-}
+import '../utils/color_hex.dart';
 
 class RoleSelectorSheet extends StatelessWidget {
   final List<Role> roles;
@@ -46,7 +43,7 @@ class RoleSelectorSheet extends StatelessWidget {
           const SizedBox(height: 12),
           ...roles.map((role) {
             final isSelected = role.id == currentRoleId;
-            final color = _parseColor(role.color);
+            final color = parseHexColor(role.color);
             return ListTile(
               leading: CircleAvatar(
                 backgroundColor: color.withValues(alpha: 0.15),

@@ -4,6 +4,17 @@ import 'package:flutter/foundation.dart';
 import 'package:mcp_client/mcp_client.dart';
 import '../models/app_state.dart';
 import '../models/calendar_event.dart';
+import '../utils/time_format.dart';
+
+/// pikppo-mcp 服务地址——**App 内置能力，不暴露给用户配置**。
+/// 默认按平台自动选；CI / dev / QA 可通过 `--dart-define=MCP_HOST=...` 覆盖。
+String get defaultMcpHost {
+  const override = String.fromEnvironment('MCP_HOST');
+  if (override.isNotEmpty) return override;
+  return defaultTargetPlatform == TargetPlatform.android
+      ? 'http://10.0.2.2:8000'
+      : 'http://localhost:8000';
+}
 
 /// MCP client wrapper. Owns the underlying [Client], exposes a connection-state
 /// stream, and provides typed helpers for the calendar tools we currently use.
@@ -171,7 +182,7 @@ class McpService {
   Future<CalendarEvent> createEvent(CalendarEvent event) async {
     final args = <String, dynamic>{
       'title': event.title,
-      'date': _fmtDate(event.date),
+      'date': fmtDate(event.date),
       if (event.time != null) 'time': event.time,
       if (event.endTime != null) 'end_time': event.endTime,
       if (event.description != null) 'description': event.description,
@@ -186,7 +197,7 @@ class McpService {
     final args = <String, dynamic>{
       'event_id': event.id,
       'title': event.title,
-      'date': _fmtDate(event.date),
+      'date': fmtDate(event.date),
       'time': event.time,
       'end_time': event.endTime,
       'description': event.description,
@@ -219,9 +230,6 @@ class McpService {
     if (path.isEmpty) return '$url/mcp';
     return url;
   }
-
-  static String _fmtDate(DateTime d) =>
-      '${d.year}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
 
   static Map<String, dynamic> _decodeMap(String raw) {
     final decoded = jsonDecode(raw);
