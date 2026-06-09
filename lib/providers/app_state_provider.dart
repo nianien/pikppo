@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'package:drift/drift.dart' show InsertMode;
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -11,6 +12,9 @@ import '../models/memory.dart';
 import '../models/group.dart';
 import '../models/calendar_event.dart';
 import '../data/preset_roles.dart';
+import '../db/database.dart';
+import '../db/mappers.dart';
+import '../db/migration.dart';
 import '../services/agent.dart';
 import '../services/model_service.dart';
 import '../services/mcp_service.dart';
@@ -18,6 +22,7 @@ import '../services/tool_registry.dart';
 import '../utils/chat_history.dart';
 import '../utils/time_format.dart';
 import '../utils/user_facing_error.dart';
+import 'database_provider.dart';
 import 'memory_summarizer.dart';
 import 'reminder_scheduler.dart';
 import '../services/location_service.dart';
@@ -153,10 +158,13 @@ class AppStateNotifier extends StateNotifier<AppState> {
       kind: 'reminder',
     );
     state = state.copyWith(messages: [...state.messages, msg]);
-    _saveState();
+    _persistMessage(msg);
   }
 
   // ---- Persistence ----
+
+  /// 当前数据库实例——首次访问时打开 + 解密 + （首次启动）迁移旧 prefs 数据。
+  Future<PikppoDatabase> get _db => _ref.read(databaseProvider.future);
 
   Future<void> _loadState() async {
     final prefs = await SharedPreferences.getInstance();
@@ -179,17 +187,17 @@ class AppStateNotifier extends StateNotifier<AppState> {
     final language = prefs.getString('preferredLanguage') ?? '中文';
     final onboardingCompleted = prefs.getBool('onboardingCompleted') ?? false;
 
-    // 持久化数据反序列化：逐条 try/catch——单条坏数据不应让整张表加载失败。
-    // 跳过的条目计数仅入日志；后续可接 crash reporting 上报。
-    final roles = <Role>[...defaultRoles];
-    roles.addAll(_decodeList(
-        prefs.getString('customRoles'), 'customRoles', Role.fromJson));
-    final messages = _decodeList(
-        prefs.getString('messages'), 'messages', Message.fromJson);
-    final memories = _decodeList(
-        prefs.getString('memories'), 'memories', Memory.fromJson);
-    final groups =
-        _decodeList(prefs.getString('groups'), 'groups', Group.fromJson);
+    // 打开 db + 迁移旧 prefs JSON（幂等，第二次启动跳过）。
+    final db = await _db;
+    await migrateFromPrefsIfNeeded(db);
+
+    // 业务数据从 drift 读——预置角色与自定义角色拼装；其它表全量加载到内存
+    // （当前 state 模型仍是内存为主、drift 作 source-of-truth）。
+    final customRoles = (await db.allCustomRoles()).map(customRoleFromRow);
+    final roles = <Role>[...defaultRoles, ...customRoles];
+    final messages = (await db.allMessages()).map(messageFromRow).toList();
+    final memories = (await db.allMemories()).map(memoryFromRow).toList();
+    final groups = (await db.allGroups()).map(groupFromRow).toList();
 
     state = state.copyWith(
       roles: roles,
@@ -230,46 +238,6 @@ class AppStateNotifier extends StateNotifier<AppState> {
     unawaited(_mcp.connect(defaultMcpHost));
   }
 
-  /// 反序列化持久化的 JSON 列表，per-row 容错：单条坏数据跳过 + 入日志，
-  /// 不让一条脏数据让整张表加载失败。
-  List<T> _decodeList<T>(
-    String? raw,
-    String tableName,
-    T Function(Map<String, dynamic>) fromJson,
-  ) {
-    if (raw == null) return <T>[];
-    List<dynamic> rows;
-    try {
-      final decoded = jsonDecode(raw);
-      if (decoded is! List) {
-        debugPrint('load $tableName: expected List, got ${decoded.runtimeType}');
-        return <T>[];
-      }
-      rows = decoded;
-    } catch (e) {
-      debugPrint('load $tableName: JSON decode failed: ${debugReason(e)}');
-      return <T>[];
-    }
-    final out = <T>[];
-    var skipped = 0;
-    for (final row in rows) {
-      try {
-        if (row is! Map) {
-          skipped++;
-          continue;
-        }
-        out.add(fromJson(row.cast<String, dynamic>()));
-      } catch (e) {
-        skipped++;
-        debugPrint('load $tableName: skip bad row: ${debugReason(e)}');
-      }
-    }
-    if (skipped > 0) {
-      debugPrint('load $tableName: skipped $skipped corrupt row(s)');
-    }
-    return out;
-  }
-
   /// 调度一次落盘——多次连续调用合并成一次实际写入，避免 sendMessage / addMemory
   /// 之类高频 setState 引起的 IO 风暴。dispose 时 flush 兜底。
   void _saveState() {
@@ -280,10 +248,9 @@ class AppStateNotifier extends StateNotifier<AppState> {
     });
   }
 
-  /// 立即把当前 [state] 写入持久化层——串联在 [_pendingSave] 后面避免并发写。
-  ///
-  /// 注：当前用 SharedPreferences 全量 JSON——后续接入 drift 后这里改成
-  /// per-entity 增量写。该方法暂时不外露。
+  /// 把小 KV 类设置（currentRole/Model/serviceType/语言等）落到 SharedPreferences。
+  /// 业务实体（messages/memories/groups/customRoles）由各自的 mutation 直接调
+  /// drift 增量写——不再走全量 JSON。
   Future<void> _writeSnapshot() async {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString('currentRoleId', state.currentRoleId);
@@ -295,18 +262,69 @@ class AppStateNotifier extends StateNotifier<AppState> {
     await prefs.setString('userName', state.userName);
     await prefs.setString('preferredLanguage', state.preferredLanguage);
     await prefs.setBool('onboardingCompleted', state.onboardingCompleted);
+  }
 
-    final defaultIds = defaultRoles.map((r) => r.id).toSet();
-    final customRoles =
-        state.roles.where((r) => !defaultIds.contains(r.id)).toList();
-    await prefs.setString(
-        'customRoles', jsonEncode(customRoles.map((r) => r.toJson()).toList()));
-    await prefs.setString(
-        'messages', jsonEncode(state.messages.map((m) => m.toJson()).toList()));
-    await prefs.setString('memories',
-        jsonEncode(state.memories.map((m) => m.toJson()).toList()));
-    await prefs.setString(
-        'groups', jsonEncode(state.groups.map((g) => g.toJson()).toList()));
+  // ---- DB write helpers（fire-and-forget；失败入日志，不阻塞 UI）----
+
+  void _persistMessage(Message m) {
+    unawaited(_db.then((db) => db.insertMessage(messageToCompanion(m))));
+  }
+
+  void _persistMessagesForRoleDelete(String roleId) {
+    unawaited(_db.then((db) => db.deleteMessagesForRole(roleId)));
+  }
+
+  void _persistMessagesForGroupDelete(String groupId) {
+    unawaited(_db.then((db) => db.deleteMessagesForGroup(groupId)));
+  }
+
+  void _persistMemory(Memory m) {
+    unawaited(_db.then((db) => db.insertMemory(memoryToCompanion(m))));
+  }
+
+  void _persistMemoryDelete(String id) {
+    unawaited(_db.then((db) => db.deleteMemory(id)));
+  }
+
+  void _persistMemoriesClear() {
+    unawaited(_db.then((db) => db.clearAllMemories()));
+  }
+
+  void _persistGroup(Group g) {
+    unawaited(_db.then((db) => db.insertGroup(groupToCompanion(g))));
+  }
+
+  void _persistGroupDelete(String id) {
+    unawaited(_db.then((db) async {
+      await db.deleteGroup(id);
+      await db.deleteMessagesForGroup(id);
+    }));
+  }
+
+  void _persistCustomRole(Role role) {
+    unawaited(_db.then((db) => db.insertCustomRole(customRoleToCompanion(role))));
+  }
+
+  /// 批量提交 memory diff——updated + added 一次事务，减少 IO。
+  void _persistMemoryDiff({
+    required Map<String, Memory> updated,
+    required List<Memory> added,
+  }) {
+    if (updated.isEmpty && added.isEmpty) return;
+    unawaited(_db.then((db) async {
+      await db.batch((batch) {
+        for (final m in updated.values) {
+          batch.insert(
+            db.memoryRows,
+            memoryToCompanion(m),
+            mode: InsertMode.insertOrReplace,
+          );
+        }
+        for (final m in added) {
+          batch.insert(db.memoryRows, memoryToCompanion(m));
+        }
+      });
+    }));
   }
 
   // ---- Settings mutations ----
@@ -384,7 +402,7 @@ class AppStateNotifier extends StateNotifier<AppState> {
 
   void addRole(Role role) {
     state = state.copyWith(roles: [...state.roles, role]);
-    _saveState();
+    _persistCustomRole(role);
   }
 
   void completeOnboarding() {
@@ -433,7 +451,7 @@ class AppStateNotifier extends StateNotifier<AppState> {
       messages: [...state.messages, userMsg],
       isLoading: true,
     );
-    _saveState();
+    _persistMessage(userMsg);
 
     try {
       if (state.currentModel.isEmpty) {
@@ -626,7 +644,7 @@ class AppStateNotifier extends StateNotifier<AppState> {
       kind: kind,
     );
     state = state.copyWith(messages: [...state.messages, msg]);
-    _saveState();
+    _persistMessage(msg);
   }
 
   void _addAiMessage(String content) {
@@ -641,7 +659,7 @@ class AppStateNotifier extends StateNotifier<AppState> {
       messages: [...state.messages, aiMsg],
       isLoading: false,
     );
-    _saveState();
+    _persistMessage(aiMsg);
   }
 
   /// 组装某个 [role] 的 system prompt——私聊和群聊共用。
@@ -718,18 +736,18 @@ class AppStateNotifier extends StateNotifier<AppState> {
 
   void addMemory(Memory memory) {
     state = state.copyWith(memories: [...state.memories, memory]);
-    _saveState();
+    _persistMemory(memory);
   }
 
   void deleteMemory(String id) {
     state = state.copyWith(
         memories: state.memories.where((m) => m.id != id).toList());
-    _saveState();
+    _persistMemoryDelete(id);
   }
 
   Future<void> clearAllMemories() async {
     state = state.copyWith(memories: []);
-    _saveState();
+    _persistMemoriesClear();
   }
 
   // ---- Calendar (via MCP) ----
@@ -840,7 +858,7 @@ class AppStateNotifier extends StateNotifier<AppState> {
           .where((m) => !(m.roleId == roleId && m.groupId == null))
           .toList(),
     );
-    _saveState();
+    _persistMessagesForRoleDelete(roleId);
   }
 
   // ---- Groups ----
@@ -852,7 +870,7 @@ class AppStateNotifier extends StateNotifier<AppState> {
       roleIds: roleIds,
     );
     state = state.copyWith(groups: [...state.groups, group]);
-    _saveState();
+    _persistGroup(group);
     return group;
   }
 
@@ -861,14 +879,14 @@ class AppStateNotifier extends StateNotifier<AppState> {
       groups: state.groups.where((g) => g.id != groupId).toList(),
       messages: state.messages.where((m) => m.groupId != groupId).toList(),
     );
-    _saveState();
+    _persistGroupDelete(groupId);
   }
 
   void clearGroupMessages(String groupId) {
     state = state.copyWith(
       messages: state.messages.where((m) => m.groupId != groupId).toList(),
     );
-    _saveState();
+    _persistMessagesForGroupDelete(groupId);
   }
 
   List<Message> getGroupMessagesList(String groupId) {
@@ -901,7 +919,7 @@ class AppStateNotifier extends StateNotifier<AppState> {
       messages: [...state.messages, userMsg],
       loadingGroupId: groupId,
     );
-    _saveState();
+    _persistMessage(userMsg);
 
     try {
       final service = _modelService();
@@ -1033,7 +1051,7 @@ $roleLines
       groupId: groupId,
     );
     state = state.copyWith(messages: [...state.messages, aiMsg]);
-    _saveState();
+    _persistMessage(aiMsg);
   }
 
   // ---- Memory auto-summary hooks ----
@@ -1052,6 +1070,6 @@ $roleLines
     final next = state.memories.map((m) => updated[m.id] ?? m).toList()
       ..addAll(added);
     state = state.copyWith(memories: next);
-    _saveState();
+    _persistMemoryDiff(updated: updated, added: added);
   }
 }

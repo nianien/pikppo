@@ -19,11 +19,19 @@ dependencies:
   flutter_secure_storage: ^9.2.2
   geolocator: ^14.0.0
   geocoding: ^4.0.0
+  # 本地持久化：drift + SQLCipher 加密。messages/memories/groups 等高频写入的
+  # 数据走 SQL（增量、不再全量 JSON 重写），key 由 flutter_secure_storage 托管。
+  drift: ^2.21.0
+  sqlcipher_flutter_libs: ^0.6.4
+  path_provider: ^2.1.5
+  path: ^1.9.0
 
 dev_dependencies:
   flutter_test:
     sdk: flutter
   flutter_lints: ^6.0.0
+  drift_dev: ^2.21.0
+  build_runner: ^2.4.13
 
 flutter:
   uses-material-design: true
