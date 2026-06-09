@@ -4,6 +4,7 @@ import '../models/role.dart';
 import '../providers/app_state_provider.dart';
 import '../theme/design_tokens.dart';
 import '../utils/color_hex.dart';
+import '../widgets/info_banner.dart';
 import '../widgets/message_bubble.dart';
 import 'settings_screen.dart';
 
@@ -137,8 +138,10 @@ class _ChatDetailScreenState extends ConsumerState<ChatDetailScreen> {
       body: Column(
         children: [
           if (appState.currentModel.isEmpty)
-            _NoModelBanner(
-              onTap: () => Navigator.push(
+            InfoBanner(
+              message: '请先在设置中配置并选择模型',
+              actionLabel: '去设置',
+              onAction: () => Navigator.push(
                 context,
                 MaterialPageRoute(
                     builder: (_) => const SettingsScreen()),
@@ -365,50 +368,6 @@ class _InputBar extends StatelessWidget {
                       ),
                     ),
                   ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _NoModelBanner extends StatelessWidget {
-  final VoidCallback onTap;
-  const _NoModelBanner({required this.onTap});
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final scheme = theme.colorScheme;
-    return Container(
-      margin: const EdgeInsets.fromLTRB(
-          AppSpacing.md, AppSpacing.xs, AppSpacing.md, 0),
-      padding: const EdgeInsets.symmetric(
-          horizontal: AppSpacing.md, vertical: AppSpacing.sm),
-      decoration: BoxDecoration(
-        color: scheme.tertiaryContainer.withValues(alpha: 0.6),
-        borderRadius: BorderRadius.circular(AppRadius.md),
-      ),
-      child: Row(
-        children: [
-          Icon(Icons.info_outline,
-              size: 18, color: scheme.onTertiaryContainer),
-          const SizedBox(width: AppSpacing.xs),
-          Expanded(
-            child: Text(
-              '请先在设置中配置并选择模型',
-              style: theme.textTheme.bodySmall
-                  ?.copyWith(color: scheme.onTertiaryContainer),
-            ),
-          ),
-          TextButton(
-            onPressed: onTap,
-            style: TextButton.styleFrom(
-              foregroundColor: scheme.onTertiaryContainer,
-              padding: const EdgeInsets.symmetric(horizontal: 12),
-              minimumSize: const Size(0, 32),
-            ),
-            child: const Text('去设置'),
           ),
         ],
       ),
