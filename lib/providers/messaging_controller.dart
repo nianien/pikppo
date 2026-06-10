@@ -66,7 +66,9 @@ class MessagingController {
       }
       final service = _notifier.modelService();
       if (service == null) {
-        _notifier.appendAiMessage('请先在设置中配置模型服务');
+        // 对话页顶部常驻 InfoBanner 已经告诉用户"未配置模型 + 去设置"——这里
+        // 再灌一条 AI 气泡只会污染对话流，悄悄退出 loading 即可。
+        _notifier.setIdle();
         return;
       }
 

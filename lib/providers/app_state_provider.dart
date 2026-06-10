@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'package:drift/drift.dart' show InsertMode;
 import 'package:flutter/foundation.dart';
+import 'package:flutter/material.dart' show Icons;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:uuid/uuid.dart';
@@ -20,6 +21,7 @@ import '../services/mcp_service.dart';
 import '../services/tool_registry.dart';
 import '../utils/time_format.dart';
 import '../utils/user_facing_error.dart';
+import '../widgets/app_toast.dart';
 import 'database_provider.dart';
 import 'memory_summarizer.dart';
 import 'messaging_controller.dart';
@@ -142,28 +144,19 @@ class AppStateNotifier extends StateNotifier<AppState> {
 
   // ---- Reminder hook ----
 
-  /// [ReminderScheduler] 命中提醒窗口时回调到这里——拼好文案发到当前角色对话。
+  /// [ReminderScheduler] 命中提醒窗口时回调到这里。
+  /// **不进对话流**——提醒可能在任何屏幕触发，跟"在跟谁聊天"无关；瞬时 toast
+  /// 即可，过去就过去，不留存。详细事件本身已经在日历里。
   void _onReminderDue(CalendarEvent event, int diffMinutes) {
-    final desc = event.description != null ? '\n${event.description}' : '';
     final timeHint = diffMinutes >= 60
-        ? '约${diffMinutes ~/ 60}小时后'
-        : '$diffMinutes分钟后';
-    _addReminderMessage(
-      '⏰ 日程提醒（$timeHint开始）\n${event.time} ${event.title}$desc',
+        ? '约${diffMinutes ~/ 60}小时后开始'
+        : '$diffMinutes 分钟后开始';
+    final timeLabel = event.time != null ? '${event.time} ' : '';
+    showAppToast(
+      '$timeLabel${event.title}（$timeHint）',
+      icon: Icons.alarm,
+      duration: const Duration(seconds: 5),
     );
-  }
-
-  void _addReminderMessage(String content) {
-    final msg = Message(
-      id: _uuid.v4(),
-      roleId: state.currentRoleId,
-      content: content,
-      isUser: false,
-      timestamp: DateTime.now().millisecondsSinceEpoch,
-      kind: 'reminder',
-    );
-    state = state.copyWith(messages: [...state.messages, msg]);
-    _persistMessage(msg);
   }
 
   // ---- Persistence ----

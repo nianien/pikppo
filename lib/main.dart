@@ -7,6 +7,7 @@ import 'screens/apps_screen.dart';
 import 'screens/settings_screen.dart';
 import 'screens/onboarding_screen.dart';
 import 'theme/app_theme.dart';
+import 'widgets/app_toast.dart';
 
 void main() {
   runApp(const ProviderScope(child: ButlerApp()));
@@ -20,6 +21,7 @@ class ButlerApp extends StatelessWidget {
     return MaterialApp(
       title: 'pikppo',
       debugShowCheckedModeBanner: false,
+      scaffoldMessengerKey: scaffoldMessengerKey,
       theme: AppTheme.light(),
       darkTheme: AppTheme.dark(),
       themeMode: ThemeMode.system,
