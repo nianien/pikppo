@@ -21,10 +21,14 @@ class _ChatDetailScreenState extends ConsumerState<ChatDetailScreen> {
   final _scrollController = ScrollController();
   final _focusNode = FocusNode();
 
+  /// 距离顶部多少像素触发加载更早消息。
+  static const _kLoadMoreThreshold = 240.0;
+  bool _loadingMoreOlder = false;
+
   @override
   void initState() {
     super.initState();
-    // 懒加载：进入私聊页时把这条角色的消息从 db 灌进 state。幂等。
+    // 懒加载：进入私聊页拉首屏（最新 N 条）。幂等。
     WidgetsBinding.instance.addPostFrameCallback((_) async {
       await ref
           .read(appStateProvider.notifier)
@@ -34,6 +38,33 @@ class _ChatDetailScreenState extends ConsumerState<ChatDetailScreen> {
         _scrollController.jumpTo(
             _scrollController.position.maxScrollExtent);
       }
+    });
+    // 向上滚到距离顶部 _kLoadMoreThreshold 内时拉下一页更早的消息。
+    _scrollController.addListener(_maybeLoadOlder);
+  }
+
+  /// 向上接近顶部时触发分页加载。加载完成后用 maxScrollExtent 增量补偿
+  /// 像素位置，避免新消息插入到顶部把用户的视觉焦点往下顶。
+  void _maybeLoadOlder() {
+    if (_loadingMoreOlder) return;
+    if (!_scrollController.hasClients) return;
+    final pos = _scrollController.position;
+    if (pos.pixels - pos.minScrollExtent >= _kLoadMoreThreshold) return;
+    _loadingMoreOlder = true;
+    final oldMax = pos.maxScrollExtent;
+    ref
+        .read(appStateProvider.notifier)
+        .loadMoreRoleMessages(widget.role.id)
+        .then((loaded) {
+      _loadingMoreOlder = false;
+      if (!loaded || !mounted) return;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted || !_scrollController.hasClients) return;
+        final delta = _scrollController.position.maxScrollExtent - oldMax;
+        if (delta > 0) {
+          _scrollController.jumpTo(_scrollController.position.pixels + delta);
+        }
+      });
     });
   }
 

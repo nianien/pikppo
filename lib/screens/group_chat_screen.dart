@@ -26,7 +26,7 @@ class _GroupChatScreenState extends ConsumerState<GroupChatScreen> {
   @override
   void initState() {
     super.initState();
-    // 懒加载：进入群聊页时把这个群的消息从 db 灌进 state。幂等。
+    // 懒加载：进入群聊页拉首屏（最新 N 条）。幂等。
     WidgetsBinding.instance.addPostFrameCallback((_) async {
       await ref
           .read(appStateProvider.notifier)
@@ -36,6 +36,34 @@ class _GroupChatScreenState extends ConsumerState<GroupChatScreen> {
         _scrollController.jumpTo(
             _scrollController.position.maxScrollExtent);
       }
+    });
+    _scrollController.addListener(_maybeLoadOlder);
+  }
+
+  static const _kLoadMoreThreshold = 240.0;
+  bool _loadingMoreOlder = false;
+
+  /// 向上接近顶部时分页加载；用 maxScrollExtent 增量补偿像素位置避免视觉跳动。
+  void _maybeLoadOlder() {
+    if (_loadingMoreOlder) return;
+    if (!_scrollController.hasClients) return;
+    final pos = _scrollController.position;
+    if (pos.pixels - pos.minScrollExtent >= _kLoadMoreThreshold) return;
+    _loadingMoreOlder = true;
+    final oldMax = pos.maxScrollExtent;
+    ref
+        .read(appStateProvider.notifier)
+        .loadMoreGroupMessages(widget.group.id)
+        .then((loaded) {
+      _loadingMoreOlder = false;
+      if (!loaded || !mounted) return;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted || !_scrollController.hasClients) return;
+        final delta = _scrollController.position.maxScrollExtent - oldMax;
+        if (delta > 0) {
+          _scrollController.jumpTo(_scrollController.position.pixels + delta);
+        }
+      });
     });
   }
 

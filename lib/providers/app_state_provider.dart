@@ -263,52 +263,136 @@ class AppStateNotifier extends StateNotifier<AppState> {
     return map;
   }
 
-  // ---- Lazy load: per-conversation messages ----
+  // ---- Lazy load: per-conversation messages（分页）----
 
-  /// 已加载到 [state.messages] 的会话 scope。键形如 `'role:<id>'` / `'group:<id>'`。
+  /// 单页大小——首次进入加载最新这么多条，向上滚动每次再追加这么多更早的。
+  static const _kMessagePageSize = 50;
+
+  /// 已加载过首屏（latest 页）的会话 scope。键形如 `'role:<id>'` / `'group:<id>'`。
   final Set<String> _loadedScopes = {};
 
-  /// 进入某私聊页时调——首次调用从 db 加载消息进 state，幂等：第二次直接返回。
+  /// 该 scope 是否还有更早的消息可拉（false = 已经到顶）。未加载过的 scope 不
+  /// 在 map 里；调用方应该用 [hasMoreMessages] 检查。
+  final Map<String, bool> _scopeHasMore = {};
+
+  /// 正在为该 scope 拉取消息（首屏或翻页）——避免并发重复请求。
+  final Set<String> _scopeLoading = {};
+
+  bool hasMoreMessages(String scopeKey) => _scopeHasMore[scopeKey] ?? false;
+
+  /// 进入某私聊页时调——首次加载最新一页消息。幂等：已加载/正在加载时直接返回。
   Future<void> ensureRoleMessagesLoaded(String roleId) async {
     final key = ConversationSummary.keyForRole(roleId);
-    if (_loadedScopes.contains(key)) return;
-    _loadedScopes.add(key);
+    if (_loadedScopes.contains(key) || _scopeLoading.contains(key)) return;
+    _scopeLoading.add(key);
     try {
       final db = await _db;
-      final rows = await db.messagesForRole(roleId);
-      if (rows.isEmpty) return;
-      final loaded = rows.map(messageFromRow).toList();
-      // 去重合并：可能同一条消息因并发 ensure 被加两次。
-      final existingIds = state.messages.map((m) => m.id).toSet();
-      final fresh = loaded.where((m) => !existingIds.contains(m.id));
-      state =
-          state.copyWith(messages: [...state.messages, ...fresh]);
+      final rows = await db.messagesForRoleLatest(roleId,
+          limit: _kMessagePageSize);
+      _appendLoadedMessages(rows);
+      _loadedScopes.add(key);
+      _scopeHasMore[key] = rows.length == _kMessagePageSize;
     } catch (e) {
       debugPrint(
           'ensureRoleMessagesLoaded($roleId) failed: ${debugReason(e)}');
-      _loadedScopes.remove(key); // 失败允许重试
+    } finally {
+      _scopeLoading.remove(key);
     }
   }
 
-  /// 进入某群聊页时调——同上但按 groupId。
-  Future<void> ensureGroupMessagesLoaded(String groupId) async {
-    final key = ConversationSummary.keyForGroup(groupId);
-    if (_loadedScopes.contains(key)) return;
-    _loadedScopes.add(key);
+  /// 向上翻页：拉早于当前已加载最旧消息的下一页。
+  /// 返回 true 表示这次拉到了新消息，UI 可以决定是否提示。
+  Future<bool> loadMoreRoleMessages(String roleId) async {
+    final key = ConversationSummary.keyForRole(roleId);
+    if (!hasMoreMessages(key) || _scopeLoading.contains(key)) return false;
+    final oldest = _oldestTimestampForScope(key);
+    if (oldest == null) return false;
+    _scopeLoading.add(key);
     try {
       final db = await _db;
-      final rows = await db.messagesForGroup(groupId);
-      if (rows.isEmpty) return;
-      final loaded = rows.map(messageFromRow).toList();
-      final existingIds = state.messages.map((m) => m.id).toSet();
-      final fresh = loaded.where((m) => !existingIds.contains(m.id));
-      state =
-          state.copyWith(messages: [...state.messages, ...fresh]);
+      final rows = await db.messagesForRoleBefore(roleId,
+          beforeTimestamp: oldest, limit: _kMessagePageSize);
+      _appendLoadedMessages(rows);
+      _scopeHasMore[key] = rows.length == _kMessagePageSize;
+      return rows.isNotEmpty;
+    } catch (e) {
+      debugPrint(
+          'loadMoreRoleMessages($roleId) failed: ${debugReason(e)}');
+      return false;
+    } finally {
+      _scopeLoading.remove(key);
+    }
+  }
+
+  /// 群聊版 [ensureRoleMessagesLoaded]。
+  Future<void> ensureGroupMessagesLoaded(String groupId) async {
+    final key = ConversationSummary.keyForGroup(groupId);
+    if (_loadedScopes.contains(key) || _scopeLoading.contains(key)) return;
+    _scopeLoading.add(key);
+    try {
+      final db = await _db;
+      final rows = await db.messagesForGroupLatest(groupId,
+          limit: _kMessagePageSize);
+      _appendLoadedMessages(rows);
+      _loadedScopes.add(key);
+      _scopeHasMore[key] = rows.length == _kMessagePageSize;
     } catch (e) {
       debugPrint(
           'ensureGroupMessagesLoaded($groupId) failed: ${debugReason(e)}');
-      _loadedScopes.remove(key);
+    } finally {
+      _scopeLoading.remove(key);
     }
+  }
+
+  /// 群聊版 [loadMoreRoleMessages]。
+  Future<bool> loadMoreGroupMessages(String groupId) async {
+    final key = ConversationSummary.keyForGroup(groupId);
+    if (!hasMoreMessages(key) || _scopeLoading.contains(key)) return false;
+    final oldest = _oldestTimestampForScope(key);
+    if (oldest == null) return false;
+    _scopeLoading.add(key);
+    try {
+      final db = await _db;
+      final rows = await db.messagesForGroupBefore(groupId,
+          beforeTimestamp: oldest, limit: _kMessagePageSize);
+      _appendLoadedMessages(rows);
+      _scopeHasMore[key] = rows.length == _kMessagePageSize;
+      return rows.isNotEmpty;
+    } catch (e) {
+      debugPrint(
+          'loadMoreGroupMessages($groupId) failed: ${debugReason(e)}');
+      return false;
+    } finally {
+      _scopeLoading.remove(key);
+    }
+  }
+
+  /// 把 db row 合并进 state.messages，按 id 去重避免重复加载。
+  void _appendLoadedMessages(List<MessageRow> rows) {
+    if (rows.isEmpty) return;
+    final existingIds = state.messages.map((m) => m.id).toSet();
+    final fresh = rows
+        .map(messageFromRow)
+        .where((m) => !existingIds.contains(m.id))
+        .toList();
+    if (fresh.isEmpty) return;
+    state = state.copyWith(messages: [...state.messages, ...fresh]);
+  }
+
+  /// 该 scope 当前已加载消息中最早的时间戳——翻页时作 before 锚点。
+  int? _oldestTimestampForScope(String scopeKey) {
+    final filtered = state.messages.where((m) {
+      if (scopeKey.startsWith('role:')) {
+        return m.groupId == null &&
+            m.roleId == scopeKey.substring('role:'.length);
+      }
+      if (scopeKey.startsWith('group:')) {
+        return m.groupId == scopeKey.substring('group:'.length);
+      }
+      return false;
+    });
+    if (filtered.isEmpty) return null;
+    return filtered.map((m) => m.timestamp).reduce((a, b) => a < b ? a : b);
   }
 
   /// 清掉某 scope 的会话摘要（清空消息 / 删群聊时用）。

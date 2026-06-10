@@ -34,6 +34,11 @@ class MessagingController {
   /// agent loop 最多迭代轮数——避免模型在 tool_use/tool_result 之间无限打转。
   static const _kMaxAgentIterations = 10;
 
+  /// 群聊角色逐个回复之间的间隔——纯节奏，避免瞬时刷屏。控制 0 = 无停顿。
+  /// 当前由 [sendGroupMessage] 内逐角色 reply 后 await。后续要做"用户可配"
+  /// 把它升到 settings 即可，注入点单一。
+  static const _kGroupSpeakerPause = Duration(milliseconds: 300);
+
   // ---- Convenience accessors ----
 
   McpService get _mcp => _ref.read(mcpServiceProvider);
@@ -305,8 +310,8 @@ class MessagingController {
         final reply =
             await service.chat(messages, _ref.read(appStateProvider).currentModel);
         _notifier.appendGroupAiMessage(groupId, roleId, reply);
-        // 错位 300ms 让多角色回复有节奏感——避免连续刷屏；非关键路径。
-        await Future.delayed(const Duration(milliseconds: 300));
+        // 让多角色回复有节奏感、避免瞬时刷屏；常量见 [_kGroupSpeakerPause]。
+        await Future.delayed(_kGroupSpeakerPause);
       }
     } catch (e) {
       debugPrint('sendGroupMessage failed: ${debugReason(e)}');

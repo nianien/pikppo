@@ -116,12 +116,68 @@ class PikppoDatabase extends _$PikppoDatabase {
             ..orderBy([(t) => OrderingTerm.asc(t.timestamp)]))
           .get();
 
+  /// 私聊分页：最新的 [limit] 条（按时间升序返回——方便直接拼接到 UI 列表
+  /// 末尾）。
+  Future<List<MessageRow>> messagesForRoleLatest(String roleId,
+      {required int limit}) async {
+    final rows = await (select(messageRows)
+          ..where((t) => t.roleId.equals(roleId) & t.groupId.isNull())
+          ..orderBy([(t) => OrderingTerm.desc(t.timestamp)])
+          ..limit(limit))
+        .get();
+    return rows.reversed.toList();
+  }
+
+  /// 私聊分页：早于 [beforeTimestamp] 的 [limit] 条（向上翻页时用）。
+  Future<List<MessageRow>> messagesForRoleBefore(
+    String roleId, {
+    required int beforeTimestamp,
+    required int limit,
+  }) async {
+    final rows = await (select(messageRows)
+          ..where((t) =>
+              t.roleId.equals(roleId) &
+              t.groupId.isNull() &
+              t.timestamp.isSmallerThanValue(beforeTimestamp))
+          ..orderBy([(t) => OrderingTerm.desc(t.timestamp)])
+          ..limit(limit))
+        .get();
+    return rows.reversed.toList();
+  }
+
   /// 群聊：指定 groupId。
   Future<List<MessageRow>> messagesForGroup(String groupId) =>
       (select(messageRows)
             ..where((t) => t.groupId.equals(groupId))
             ..orderBy([(t) => OrderingTerm.asc(t.timestamp)]))
           .get();
+
+  /// 群聊分页：最新的 [limit] 条（升序返回）。
+  Future<List<MessageRow>> messagesForGroupLatest(String groupId,
+      {required int limit}) async {
+    final rows = await (select(messageRows)
+          ..where((t) => t.groupId.equals(groupId))
+          ..orderBy([(t) => OrderingTerm.desc(t.timestamp)])
+          ..limit(limit))
+        .get();
+    return rows.reversed.toList();
+  }
+
+  /// 群聊分页：早于 [beforeTimestamp] 的 [limit] 条。
+  Future<List<MessageRow>> messagesForGroupBefore(
+    String groupId, {
+    required int beforeTimestamp,
+    required int limit,
+  }) async {
+    final rows = await (select(messageRows)
+          ..where((t) =>
+              t.groupId.equals(groupId) &
+              t.timestamp.isSmallerThanValue(beforeTimestamp))
+          ..orderBy([(t) => OrderingTerm.desc(t.timestamp)])
+          ..limit(limit))
+        .get();
+    return rows.reversed.toList();
+  }
 
   /// 每条会话（按 scopeKey 分组）的"末条消息"行——给启动时的聊天列表用。
   /// 不读消息全文，只取每个会话最近 1 条；几十行查询即可覆盖。
