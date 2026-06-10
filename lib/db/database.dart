@@ -109,6 +109,42 @@ class PikppoDatabase extends _$PikppoDatabase {
       (select(messageRows)..orderBy([(t) => OrderingTerm.asc(t.timestamp)]))
           .get();
 
+  /// 私聊：指定角色 + groupId 为 NULL。
+  Future<List<MessageRow>> messagesForRole(String roleId) =>
+      (select(messageRows)
+            ..where((t) => t.roleId.equals(roleId) & t.groupId.isNull())
+            ..orderBy([(t) => OrderingTerm.asc(t.timestamp)]))
+          .get();
+
+  /// 群聊：指定 groupId。
+  Future<List<MessageRow>> messagesForGroup(String groupId) =>
+      (select(messageRows)
+            ..where((t) => t.groupId.equals(groupId))
+            ..orderBy([(t) => OrderingTerm.asc(t.timestamp)]))
+          .get();
+
+  /// 每条会话（按 scopeKey 分组）的"末条消息"行——给启动时的聊天列表用。
+  /// 不读消息全文，只取每个会话最近 1 条；几十行查询即可覆盖。
+  Future<List<MessageRow>> latestPerConversation() async {
+    // 子查询：取每个 (role_id, group_id) 组合的 max(timestamp)
+    final raw = await customSelect(
+      '''
+SELECT m.* FROM messages m
+JOIN (
+  SELECT role_id, group_id, MAX(timestamp) AS max_ts
+  FROM messages
+  GROUP BY role_id, group_id
+) latest
+  ON m.role_id = latest.role_id
+  AND ((m.group_id IS NULL AND latest.group_id IS NULL) OR m.group_id = latest.group_id)
+  AND m.timestamp = latest.max_ts
+ORDER BY m.timestamp DESC
+''',
+      readsFrom: {messageRows},
+    ).get();
+    return raw.map((row) => messageRows.map(row.data)).toList();
+  }
+
   Future<void> insertMessage(MessageRowsCompanion row) =>
       into(messageRows).insertOnConflictUpdate(row);
 

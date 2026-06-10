@@ -4,10 +4,12 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:uuid/uuid.dart';
+import '../db/mappers.dart';
 import '../models/memory.dart';
 import '../services/model_service.dart';
 import '../utils/user_facing_error.dart';
 import 'app_state_provider.dart';
+import 'database_provider.dart';
 import 'model_service_provider.dart';
 
 const _uuid = Uuid();
@@ -70,11 +72,14 @@ class MemorySummarizer {
     final prefs = await SharedPreferences.getInstance();
     final state = _ref.read(appStateProvider);
     final model = state.currentModel;
+    // 直查 db——不依赖内存 state.messages（懒加载后未必包含所有 role）。
+    final db = await _ref.read(databaseProvider.future);
     for (final role in state.roles) {
       final lastTs = prefs.getInt('summaryLastTs_${role.id}') ?? 0;
-      final recent = state.messages
-          .where((m) =>
-              m.roleId == role.id && m.kind == 'chat' && m.timestamp > lastTs)
+      final rows = await db.messagesForRole(role.id);
+      final recent = rows
+          .where((m) => m.kind == 'chat' && m.timestamp > lastTs)
+          .map(messageFromRow)
           .toList()
         ..sort((a, b) => a.timestamp.compareTo(b.timestamp));
       if (recent.length < 4) continue; // need a meaningful window

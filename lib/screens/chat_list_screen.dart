@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../providers/app_state_provider.dart';
+import '../models/conversation_summary.dart';
 import '../models/role.dart';
 import '../models/group.dart';
 import '../theme/design_tokens.dart';
@@ -26,17 +27,18 @@ class ChatListScreen extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final appState = ref.watch(appStateProvider);
-    final notifier = ref.read(appStateProvider.notifier);
+
+    // 用启动时一次性预加载的会话摘要——避免迭代 state.messages 全表。
+    final summaries = appState.conversationSummaries;
 
     final groupItems = <_GroupChatItem>[];
     for (final group in appState.groups) {
-      final lastTime = notifier.getLastGroupMessageTime(group.id);
-      final msgs = notifier.getGroupMessagesList(group.id);
-      final lastMsg = msgs.isNotEmpty ? msgs.last.content : '群聊已创建';
+      final summary =
+          summaries[ConversationSummary.keyForGroup(group.id)];
       groupItems.add(_GroupChatItem(
         group: group,
-        lastMessage: lastMsg,
-        lastTime: lastTime ?? 0,
+        lastMessage: summary?.lastContent ?? '群聊已创建',
+        lastTime: summary?.lastTimestamp ?? 0,
         roles: group.roleIds
             .map((id) => appState.getRoleById(id))
             .whereType<Role>()
@@ -47,13 +49,13 @@ class ChatListScreen extends ConsumerWidget {
 
     final privateItems = <_PrivateChatItem>[];
     for (final role in appState.roles) {
-      final msgs = notifier.getMessagesForRole(role.id);
-      if (msgs.isEmpty) continue;
-      final lastMsg = msgs.last;
+      final summary =
+          summaries[ConversationSummary.keyForRole(role.id)];
+      if (summary == null) continue;
       privateItems.add(_PrivateChatItem(
         role: role,
-        lastMessage: lastMsg.content,
-        lastTime: lastMsg.timestamp,
+        lastMessage: summary.lastContent,
+        lastTime: summary.lastTimestamp,
       ));
     }
     privateItems.sort((a, b) => b.lastTime.compareTo(a.lastTime));
@@ -114,7 +116,9 @@ class ChatListScreen extends ConsumerWidget {
                       subtitle: item.lastMessage,
                       accent: color,
                       onTap: () {
-                        notifier.switchRole(item.role.id);
+                        ref
+                            .read(appStateProvider.notifier)
+                            .switchRole(item.role.id);
                         Navigator.push(
                           context,
                           MaterialPageRoute(

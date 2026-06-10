@@ -26,8 +26,12 @@ class _GroupChatScreenState extends ConsumerState<GroupChatScreen> {
   @override
   void initState() {
     super.initState();
-    // 首次进入把已有历史滚到底（不动画）。
-    WidgetsBinding.instance.addPostFrameCallback((_) {
+    // 懒加载：进入群聊页时把这个群的消息从 db 灌进 state。幂等。
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      await ref
+          .read(appStateProvider.notifier)
+          .ensureGroupMessagesLoaded(widget.group.id);
+      if (!mounted) return;
       if (_scrollController.hasClients) {
         _scrollController.jumpTo(
             _scrollController.position.maxScrollExtent);

@@ -3,15 +3,23 @@ import 'message.dart';
 import 'memory.dart';
 import 'group.dart';
 import 'calendar_event.dart';
+import 'conversation_summary.dart';
 
 enum McpConnectionState { disconnected, connecting, connected, error }
 
 class AppState {
   final List<Role> roles;
+  /// 已加载到内存的消息——按 conversation 懒加载，初始为空，进入聊天页时通过
+  /// [AppStateNotifier.ensureRoleMessagesLoaded] / `ensureGroupMessagesLoaded`
+  /// 按需填充。**永远只是某些 scope 的并集**，不是全表镜像。
   final List<Message> messages;
   final List<Memory> memories;
   final List<Group> groups;
   final List<CalendarEvent> calendarEvents;
+  /// 启动时一次性加载的会话摘要——每个 scope 的"末条消息时间 + 内容"，
+  /// 用来渲染聊天列表无需把整张 messages 读进内存。
+  /// Key 形如 `'role:<id>'` 或 `'group:<id>'`。
+  final Map<String, ConversationSummary> conversationSummaries;
   final String currentRoleId;
   final String currentModel;
   /// 顶层服务类型：`'local'`（本地推理，目前唯一 provider 是 Ollama）或
@@ -46,6 +54,7 @@ class AppState {
     this.localProvider = 'ollama',
     this.cloudProvider = 'anthropic',
     this.cloudModels = const [],
+    this.conversationSummaries = const {},
     this.userName = '',
     this.preferredLanguage = '中文',
     this.isLoading = false,
@@ -75,6 +84,7 @@ class AppState {
     bool clearLoadingGroupId = false,
     bool clearMcpError = false,
     bool? onboardingCompleted,
+    Map<String, ConversationSummary>? conversationSummaries,
   }) {
     return AppState(
       roles: roles ?? this.roles,
@@ -97,6 +107,8 @@ class AppState {
       loadingGroupId:
           clearLoadingGroupId ? null : (loadingGroupId ?? this.loadingGroupId),
       onboardingCompleted: onboardingCompleted ?? this.onboardingCompleted,
+      conversationSummaries:
+          conversationSummaries ?? this.conversationSummaries,
     );
   }
 

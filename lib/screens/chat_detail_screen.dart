@@ -24,8 +24,12 @@ class _ChatDetailScreenState extends ConsumerState<ChatDetailScreen> {
   @override
   void initState() {
     super.initState();
-    // 首次进入时把已有历史滚到底（不动画）。
-    WidgetsBinding.instance.addPostFrameCallback((_) {
+    // 懒加载：进入私聊页时把这条角色的消息从 db 灌进 state。幂等。
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      await ref
+          .read(appStateProvider.notifier)
+          .ensureRoleMessagesLoaded(widget.role.id);
+      if (!mounted) return;
       if (_scrollController.hasClients) {
         _scrollController.jumpTo(
             _scrollController.position.maxScrollExtent);

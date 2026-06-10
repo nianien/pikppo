@@ -10,6 +10,7 @@ import '../models/message.dart';
 import '../models/memory.dart';
 import '../models/group.dart';
 import '../models/calendar_event.dart';
+import '../models/conversation_summary.dart';
 import '../data/preset_roles.dart';
 import '../db/database.dart';
 import '../db/mappers.dart';
@@ -195,17 +196,18 @@ class AppStateNotifier extends StateNotifier<AppState> {
     final db = await _db;
     await migrateFromPrefsIfNeeded(db);
 
-    // 业务数据从 drift 读——预置角色与自定义角色拼装；其它表全量加载到内存
-    // （当前 state 模型仍是内存为主、drift 作 source-of-truth）。
+    // 启动时只加载小集合：角色、群聊、记忆、会话摘要——后两类用来渲染聊天
+    // 列表，不需要 messages 全表。**messages 按会话懒加载**，进入某个聊天页
+    // 时由 [ensureRoleMessagesLoaded] / [ensureGroupMessagesLoaded] 填进 state。
     final customRoles = (await db.allCustomRoles()).map(customRoleFromRow);
     final roles = <Role>[...defaultRoles, ...customRoles];
-    final messages = (await db.allMessages()).map(messageFromRow).toList();
     final memories = (await db.allMemories()).map(memoryFromRow).toList();
     final groups = (await db.allGroups()).map(groupFromRow).toList();
+    final summaries = await _loadConversationSummaries(db);
 
     state = state.copyWith(
       roles: roles,
-      messages: messages,
+      messages: const [],
       memories: memories,
       groups: groups,
       currentRoleId: roleId,
@@ -217,6 +219,7 @@ class AppStateNotifier extends StateNotifier<AppState> {
       userName: userName,
       preferredLanguage: language,
       onboardingCompleted: onboardingCompleted,
+      conversationSummaries: summaries,
     );
 
     // Load cloud API keys (no-op if storage absent), then start MCP connection.
@@ -240,6 +243,96 @@ class AppStateNotifier extends StateNotifier<AppState> {
     }
 
     unawaited(_mcp.connect(defaultMcpHost));
+  }
+
+  /// 启动时一次 SQL 查询拿到所有会话末条消息——给聊天列表渲染用。
+  Future<Map<String, ConversationSummary>> _loadConversationSummaries(
+      PikppoDatabase db) async {
+    final rows = await db.latestPerConversation();
+    final map = <String, ConversationSummary>{};
+    for (final r in rows) {
+      final key = r.groupId == null
+          ? ConversationSummary.keyForRole(r.roleId)
+          : ConversationSummary.keyForGroup(r.groupId!);
+      map[key] = ConversationSummary(
+        scopeKey: key,
+        lastTimestamp: r.timestamp,
+        lastContent: r.content,
+      );
+    }
+    return map;
+  }
+
+  // ---- Lazy load: per-conversation messages ----
+
+  /// 已加载到 [state.messages] 的会话 scope。键形如 `'role:<id>'` / `'group:<id>'`。
+  final Set<String> _loadedScopes = {};
+
+  /// 进入某私聊页时调——首次调用从 db 加载消息进 state，幂等：第二次直接返回。
+  Future<void> ensureRoleMessagesLoaded(String roleId) async {
+    final key = ConversationSummary.keyForRole(roleId);
+    if (_loadedScopes.contains(key)) return;
+    _loadedScopes.add(key);
+    try {
+      final db = await _db;
+      final rows = await db.messagesForRole(roleId);
+      if (rows.isEmpty) return;
+      final loaded = rows.map(messageFromRow).toList();
+      // 去重合并：可能同一条消息因并发 ensure 被加两次。
+      final existingIds = state.messages.map((m) => m.id).toSet();
+      final fresh = loaded.where((m) => !existingIds.contains(m.id));
+      state =
+          state.copyWith(messages: [...state.messages, ...fresh]);
+    } catch (e) {
+      debugPrint(
+          'ensureRoleMessagesLoaded($roleId) failed: ${debugReason(e)}');
+      _loadedScopes.remove(key); // 失败允许重试
+    }
+  }
+
+  /// 进入某群聊页时调——同上但按 groupId。
+  Future<void> ensureGroupMessagesLoaded(String groupId) async {
+    final key = ConversationSummary.keyForGroup(groupId);
+    if (_loadedScopes.contains(key)) return;
+    _loadedScopes.add(key);
+    try {
+      final db = await _db;
+      final rows = await db.messagesForGroup(groupId);
+      if (rows.isEmpty) return;
+      final loaded = rows.map(messageFromRow).toList();
+      final existingIds = state.messages.map((m) => m.id).toSet();
+      final fresh = loaded.where((m) => !existingIds.contains(m.id));
+      state =
+          state.copyWith(messages: [...state.messages, ...fresh]);
+    } catch (e) {
+      debugPrint(
+          'ensureGroupMessagesLoaded($groupId) failed: ${debugReason(e)}');
+      _loadedScopes.remove(key);
+    }
+  }
+
+  /// 清掉某 scope 的会话摘要（清空消息 / 删群聊时用）。
+  void _clearConversationSummary(String scopeKey) {
+    if (!state.conversationSummaries.containsKey(scopeKey)) return;
+    final next = Map<String, ConversationSummary>.from(
+        state.conversationSummaries)
+      ..remove(scopeKey);
+    state = state.copyWith(conversationSummaries: next);
+  }
+
+  /// 在某 scope 新增/更新一条消息后同步会话摘要——让聊天列表立刻看到。
+  void _bumpConversationSummary(Message m) {
+    final key = m.groupId == null
+        ? ConversationSummary.keyForRole(m.roleId)
+        : ConversationSummary.keyForGroup(m.groupId!);
+    final next = Map<String, ConversationSummary>.from(
+        state.conversationSummaries)
+      ..[key] = ConversationSummary(
+        scopeKey: key,
+        lastTimestamp: m.timestamp,
+        lastContent: m.content,
+      );
+    state = state.copyWith(conversationSummaries: next);
   }
 
   /// 调度一次落盘——多次连续调用合并成一次实际写入，避免 sendMessage / addMemory
@@ -272,6 +365,7 @@ class AppStateNotifier extends StateNotifier<AppState> {
 
   void _persistMessage(Message m) {
     unawaited(_db.then((db) => db.insertMessage(messageToCompanion(m))));
+    _bumpConversationSummary(m);
   }
 
   void _persistMessagesForRoleDelete(String roleId) {
@@ -671,6 +765,7 @@ class AppStateNotifier extends StateNotifier<AppState> {
           .toList(),
     );
     _persistMessagesForRoleDelete(roleId);
+    _clearConversationSummary(ConversationSummary.keyForRole(roleId));
   }
 
   // ---- Groups ----
@@ -692,6 +787,7 @@ class AppStateNotifier extends StateNotifier<AppState> {
       messages: state.messages.where((m) => m.groupId != groupId).toList(),
     );
     _persistGroupDelete(groupId);
+    _clearConversationSummary(ConversationSummary.keyForGroup(groupId));
   }
 
   void clearGroupMessages(String groupId) {
@@ -699,6 +795,7 @@ class AppStateNotifier extends StateNotifier<AppState> {
       messages: state.messages.where((m) => m.groupId != groupId).toList(),
     );
     _persistMessagesForGroupDelete(groupId);
+    _clearConversationSummary(ConversationSummary.keyForGroup(groupId));
   }
 
   List<Message> getGroupMessagesList(String groupId) {
