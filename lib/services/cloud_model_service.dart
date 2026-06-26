@@ -19,14 +19,24 @@ class CloudModelService extends ModelService {
     'claude-haiku-4-5',
   ];
 
-  CloudModelService({required this.apiKey, String host = _defaultBaseUrl})
-      : super(host) {
+  /// 网关模式 token（见 [llmGatewayToken]）。非空时走 `Authorization: Bearer`、
+  /// host 指网关、不带 `x-api-key`——真实 key 由网关注入。
+  final String? gatewayToken;
+
+  CloudModelService({
+    required this.apiKey,
+    String host = _defaultBaseUrl,
+    this.gatewayToken,
+  }) : super(host) {
     _dio = Dio(BaseOptions(
       baseUrl: host,
       connectTimeout: const Duration(seconds: 15),
       receiveTimeout: const Duration(seconds: 120),
       headers: {
-        'x-api-key': apiKey,
+        if (gatewayToken != null)
+          'Authorization': 'Bearer $gatewayToken'
+        else
+          'x-api-key': apiKey,
         'anthropic-version': _apiVersion,
         'content-type': 'application/json',
       },
@@ -38,7 +48,7 @@ class CloudModelService extends ModelService {
 
   @override
   Future<List<String>> fetchModels() async {
-    if (apiKey.isEmpty) return fallbackModels;
+    if (apiKey.isEmpty && gatewayToken == null) return fallbackModels;
     try {
       final response = await _dio.get('/v1/models');
       final data = response.data['data'] as List?;
@@ -47,6 +57,11 @@ class CloudModelService extends ModelService {
           .map((m) => (m as Map)['id'] as String)
           .where((id) => id.startsWith('claude'))
           .toList();
+    } on DioException catch (e) {
+      // 认证错误必须暴露给"测试连接"，静态回退只兜网络类故障。
+      final code = e.response?.statusCode;
+      if (code == 401 || code == 403) rethrow;
+      return fallbackModels;
     } catch (_) {
       return fallbackModels;
     }

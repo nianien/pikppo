@@ -62,6 +62,14 @@ class AppTheme {
     return base.copyWith(
       textTheme: _textTheme(base.textTheme, scheme),
 
+      // 文本选区高亮 + 光标 + 拖拽手柄统一用主色——未配时选中几乎看不见。
+      // 对话气泡按气泡底另用 DefaultSelectionStyle 覆盖（见 message_bubble.dart）。
+      textSelectionTheme: TextSelectionThemeData(
+        selectionColor: scheme.primary.withValues(alpha: 0.30),
+        cursorColor: scheme.primary,
+        selectionHandleColor: scheme.primary,
+      ),
+
       appBarTheme: AppBarTheme(
         backgroundColor: scaffoldBg,
         surfaceTintColor: Colors.transparent,

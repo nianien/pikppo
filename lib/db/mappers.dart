@@ -19,6 +19,11 @@ Message messageFromRow(MessageRow r) => Message(
       timestamp: r.timestamp,
       groupId: r.groupId,
       kind: r.kind,
+      attachmentType: r.attachmentType,
+      attachmentPath: r.attachmentPath,
+      attachmentName: r.attachmentName,
+      attachmentSize: r.attachmentSize,
+      chartData: r.chartData,
     );
 
 MessageRowsCompanion messageToCompanion(Message m) => MessageRowsCompanion(
@@ -29,6 +34,11 @@ MessageRowsCompanion messageToCompanion(Message m) => MessageRowsCompanion(
       timestamp: Value(m.timestamp),
       kind: Value(m.kind),
       groupId: Value(m.groupId),
+      attachmentType: Value(m.attachmentType),
+      attachmentPath: Value(m.attachmentPath),
+      attachmentName: Value(m.attachmentName),
+      attachmentSize: Value(m.attachmentSize),
+      chartData: Value(m.chartData),
     );
 
 // ---- Memory ----
@@ -45,6 +55,10 @@ Memory memoryFromRow(MemoryRow r) {
   );
 }
 
+/// 仅供 [migrateFromPrefsIfNeeded] 用——存量 prefs JSON 灌入 v3 schema 时，
+/// updatedAt 落 drift 默认（epoch 0），LWW 合并时会"主动认输"于任何新备份。
+/// **正常运行时一切记忆写都走 [MemoryRepository]**，那里盖单调钟戳；不要在
+/// 业务代码里复用这个函数。
 MemoryRowsCompanion memoryToCompanion(Memory m) => MemoryRowsCompanion(
       id: Value(m.id),
       type: Value(m.type),

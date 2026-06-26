@@ -4,9 +4,12 @@ import '../models/role.dart';
 import '../providers/app_state_provider.dart';
 import '../theme/design_tokens.dart';
 import '../utils/color_hex.dart';
+import '../widgets/chat_input_buttons.dart';
+import '../widgets/chat_message_list.dart';
 import '../widgets/info_banner.dart';
 import '../widgets/message_bubble.dart';
-import 'settings_screen.dart';
+import '../widgets/model_switcher_sheet.dart';
+import 'chat_selection_mixin.dart';
 
 class ChatDetailScreen extends ConsumerStatefulWidget {
   final Role role;
@@ -16,7 +19,8 @@ class ChatDetailScreen extends ConsumerStatefulWidget {
   ConsumerState<ChatDetailScreen> createState() => _ChatDetailScreenState();
 }
 
-class _ChatDetailScreenState extends ConsumerState<ChatDetailScreen> {
+class _ChatDetailScreenState extends ConsumerState<ChatDetailScreen>
+    with ChatSelectionMixin {
   final _controller = TextEditingController();
   final _scrollController = ScrollController();
   final _focusNode = FocusNode();
@@ -101,19 +105,14 @@ class _ChatDetailScreenState extends ConsumerState<ChatDetailScreen> {
     Future.delayed(const Duration(milliseconds: 500), _scrollToBottom);
   }
 
-  void _onAskButler(String selectedText) {
-    final question = '请解释一下：$selectedText';
-    ref.read(appStateProvider.notifier).sendMessage(question);
-    _scrollToBottom();
-    Future.delayed(const Duration(milliseconds: 500), _scrollToBottom);
-  }
-
   @override
   Widget build(BuildContext context) {
     final appState = ref.watch(appStateProvider);
-    final messages = appState.currentRoleMessages;
+    // 过滤掉旧版本残留的 tool_status 气泡——工具调用提示已改为瞬时态（toolStatus）。
+    final messages = appState.currentRoleMessages
+        .where((m) => m.kind != 'tool_status')
+        .toList();
     final theme = Theme.of(context);
-    final scheme = theme.colorScheme;
     final roleColor = parseHexColor(widget.role.color);
 
     // 新消息（自己发的或 AI 回的）才滚到底；用户主动往上滚回看历史时不打扰。
@@ -128,7 +127,9 @@ class _ChatDetailScreenState extends ConsumerState<ChatDetailScreen> {
     );
 
     return Scaffold(
-      appBar: AppBar(
+      appBar: selectionMode
+          ? buildSelectionAppBar(context)
+          : AppBar(
         titleSpacing: 0,
         title: Row(
           children: [
@@ -144,21 +145,23 @@ class _ChatDetailScreenState extends ConsumerState<ChatDetailScreen> {
                   style: const TextStyle(fontSize: 18)),
             ),
             const SizedBox(width: AppSpacing.sm),
-            Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Text(widget.role.name,
-                    style: theme.textTheme.titleMedium
-                        ?.copyWith(fontWeight: FontWeight.w700)),
-                if (appState.currentModel.isNotEmpty)
-                  Text(
-                    appState.currentModel,
-                    style: theme.textTheme.labelSmall?.copyWith(
-                        color: scheme.onSurfaceVariant
-                            .withValues(alpha: 0.7)),
-                  ),
-              ],
+            InkWell(
+              onTap: () => showModelSwitcherSheet(context, ref),
+              borderRadius: BorderRadius.circular(AppRadius.sm),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(
+                    horizontal: 4, vertical: 2),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(widget.role.name,
+                        style: theme.textTheme.titleMedium
+                            ?.copyWith(fontWeight: FontWeight.w700)),
+                    ModelChip(model: appState.currentModel),
+                  ],
+                ),
+              ),
             ),
           ],
         ),
@@ -173,53 +176,36 @@ class _ChatDetailScreenState extends ConsumerState<ChatDetailScreen> {
       body: Column(
         children: [
           if (appState.currentModel.isEmpty)
-            InfoBanner(
-              message: '请先在设置中配置并选择模型',
-              actionLabel: '去设置',
-              onAction: () => Navigator.push(
-                context,
-                MaterialPageRoute(
-                    builder: (_) => const SettingsScreen()),
-              ),
+            const InfoBanner(
+              message: '模型加载中…若长时间无响应，请检查网络后重启应用',
+              icon: Icons.cloud_off_outlined,
             ),
           Expanded(
-            child: messages.isEmpty
-                ? _ChatEmptyState(role: widget.role)
-                : ListView.builder(
-                    controller: _scrollController,
-                    padding: const EdgeInsets.symmetric(
-                        vertical: AppSpacing.sm),
-                    itemCount:
-                        messages.length + (appState.isLoading ? 1 : 0),
-                    itemBuilder: (context, index) {
-                      if (index == messages.length && appState.isLoading) {
-                        return ThinkingBubble(role: widget.role);
-                      }
-                      final msg = messages[index];
-                      final prev = index == 0 ? null : messages[index - 1];
-                      final showSeparator =
-                          MessageTimeSeparator.shouldInsertBefore(msg, prev);
-                      final bubble = MessageBubble(
-                        message: msg,
-                        role: widget.role,
-                        onAskButler: _onAskButler,
-                      );
-                      if (!showSeparator) return bubble;
-                      return Column(
-                        children: [
-                          MessageTimeSeparator(timestamp: msg.timestamp),
-                          bubble,
-                        ],
-                      );
-                    },
-                  ),
+            child: ChatMessageList(
+              scrollController: _scrollController,
+              messages: messages,
+              isLoading: appState.isLoading,
+              thinkingBubble: ThinkingBubble(
+                role: widget.role,
+                statusText: appState.toolStatus,
+              ),
+              roleForMessage: (_) => widget.role,
+              emptyState: _ChatEmptyState(role: widget.role),
+              selectionMode: selectionMode,
+              selectedIds: selectedIds,
+              onToggleSelect: toggleSelect,
+              onEnterSelection: (seed) => enterSelection(seed.id),
+              onRetry: (_) =>
+                  ref.read(appStateProvider.notifier).retryLastReply(),
+            ),
           ),
-          _InputBar(
-            controller: _controller,
-            focusNode: _focusNode,
-            isLoading: appState.isLoading,
-            onSend: _sendMessage,
-          ),
+          if (!selectionMode)
+            _InputBar(
+              controller: _controller,
+              focusNode: _focusNode,
+              isLoading: appState.isLoading,
+              onSend: _sendMessage,
+            ),
         ],
       ),
     );
@@ -344,6 +330,7 @@ class _InputBar extends StatelessWidget {
       ),
       child: Row(
         children: [
+          VoiceInputButton(controller: controller),
           Expanded(
             child: Container(
               decoration: BoxDecoration(
@@ -371,7 +358,7 @@ class _InputBar extends StatelessWidget {
               ),
             ),
           ),
-          const SizedBox(width: AppSpacing.xs),
+          const AttachmentButton(),
           AnimatedSwitcher(
             duration: AppDurations.fast,
             child: isLoading

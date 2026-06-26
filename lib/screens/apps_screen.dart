@@ -1,15 +1,13 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:uuid/uuid.dart';
-import '../models/app_state.dart';
 import '../models/calendar_event.dart';
 import '../providers/app_state_provider.dart';
+import '../providers/calendar_repository_provider.dart';
 import '../theme/design_tokens.dart';
+import 'exchange_screen.dart';
 
-const _uuid = Uuid();
-
-/// MCP 工具入口页。每个卡片对应一个**已接入**的外部工具——发布版不展示"开发
-/// 中"占位。新工具上线时往 `_apps` 列表追加即可，网格自适应。
+/// 应用入口页。每个卡片对应一个可独立打开的子页面。日历是 Phase 1 的本地化
+/// 域，未来加 notes / inbox / etc. 时往 `_apps` 追加即可。
 class AppsScreen extends ConsumerWidget {
   const AppsScreen({super.key});
 
@@ -20,6 +18,13 @@ class AppsScreen extends ConsumerWidget {
       color: const Color(0xFF3B82F6),
       category: '效率',
       builder: (_) => const _CalendarPage(),
+    ),
+    _AppItem(
+      icon: Icons.currency_exchange,
+      name: '汇率',
+      color: const Color(0xFF10B981),
+      category: '工具',
+      builder: (_) => const ExchangeScreen(),
     ),
   ];
 
@@ -162,34 +167,17 @@ class _CalendarPage extends ConsumerStatefulWidget {
 
 class _CalendarPageState extends ConsumerState<_CalendarPage> {
   DateTime _selectedDate = DateTime.now();
-  int _refreshKey = 0;
-
-  void _refresh() => setState(() => _refreshKey++);
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final notifier = ref.read(appStateProvider.notifier);
-    final mcpState =
-        ref.watch(appStateProvider.select((s) => s.mcpState));
-    ref.watch(appStateProvider.select((s) => s.calendarEvents.length));
-    final connected = mcpState == McpConnectionState.connected;
+    // 订阅本地 30 天事件流——drift 自动通知，无需手动 refresh。
+    final asyncEvents = ref.watch(upcomingCalendarEventsProvider);
 
     return Scaffold(
       appBar: AppBar(title: const Text('日历')),
       body: Column(
         children: [
-          if (!connected)
-            Container(
-              width: double.infinity,
-              padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
-              color: theme.colorScheme.errorContainer.withValues(alpha: 0.6),
-              child: Text(
-                'MCP 服务未连接，日历无法使用。请到设置页配置或重连。',
-                style: theme.textTheme.bodySmall?.copyWith(
-                    color: theme.colorScheme.onErrorContainer),
-              ),
-            ),
           CalendarDatePicker(
             initialDate: _selectedDate,
             firstDate: DateTime(2024),
@@ -199,13 +187,18 @@ class _CalendarPageState extends ConsumerState<_CalendarPage> {
             },
           ),
           Expanded(
-            child: FutureBuilder<List<CalendarEvent>>(
-              key: ValueKey('$_selectedDate-$_refreshKey-$connected'),
-              future: connected
-                  ? notifier.getEventsForDay(_selectedDate)
-                  : Future.value(const []),
-              builder: (context, snapshot) {
-                final events = snapshot.data ?? [];
+            child: asyncEvents.when(
+              loading: () => const Center(child: CircularProgressIndicator()),
+              error: (err, _) => Center(
+                child: Padding(
+                  padding: const EdgeInsets.all(24),
+                  child: Text('日历加载失败：$err',
+                      style: theme.textTheme.bodyMedium?.copyWith(
+                          color: theme.colorScheme.error)),
+                ),
+              ),
+              data: (events) {
+                final dayEvents = _eventsForDay(events, _selectedDate);
                 return Column(
                   children: [
                     Padding(
@@ -219,7 +212,7 @@ class _CalendarPageState extends ConsumerState<_CalendarPage> {
                                 ?.copyWith(fontWeight: FontWeight.bold),
                           ),
                           const Spacer(),
-                          Text('${events.length}个日程',
+                          Text('${dayEvents.length}个日程',
                               style: theme.textTheme.bodySmall?.copyWith(
                                   color: theme.colorScheme.onSurface
                                       .withValues(alpha: 0.5))),
@@ -227,7 +220,7 @@ class _CalendarPageState extends ConsumerState<_CalendarPage> {
                       ),
                     ),
                     Expanded(
-                      child: events.isEmpty
+                      child: dayEvents.isEmpty
                           ? Center(
                               child: Column(
                                 mainAxisSize: MainAxisSize.min,
@@ -237,11 +230,7 @@ class _CalendarPageState extends ConsumerState<_CalendarPage> {
                                       color: theme.colorScheme.onSurface
                                           .withValues(alpha: 0.15)),
                                   const SizedBox(height: 8),
-                                  Text(
-                                      snapshot.connectionState ==
-                                              ConnectionState.waiting
-                                          ? '加载中...'
-                                          : '当日无日程',
+                                  Text('当日无日程',
                                       style: theme.textTheme.bodyMedium
                                           ?.copyWith(
                                               color: theme.colorScheme.onSurface
@@ -252,24 +241,14 @@ class _CalendarPageState extends ConsumerState<_CalendarPage> {
                           : ListView.builder(
                               padding:
                                   const EdgeInsets.symmetric(horizontal: 16),
-                              itemCount: events.length,
+                              itemCount: dayEvents.length,
                               itemBuilder: (context, index) {
-                                final event = events[index];
+                                final event = dayEvents[index];
                                 return _EventCard(
                                   event: event,
                                   onTap: () =>
                                       _showEventSheet(context, event),
-                                  onDelete: () async {
-                                    try {
-                                      await notifier
-                                          .deleteCalendarEvent(event.id);
-                                    } catch (e) {
-                                      if (!context.mounted) return;
-                                      _showError(context, '删除失败：$e');
-                                      return;
-                                    }
-                                    _refresh();
-                                  },
+                                  onDelete: () => _delete(context, event.id),
                                 );
                               },
                             ),
@@ -281,13 +260,27 @@ class _CalendarPageState extends ConsumerState<_CalendarPage> {
           ),
         ],
       ),
-      floatingActionButton: connected
-          ? FloatingActionButton(
-              onPressed: () => _showEventSheet(context, null),
-              child: const Icon(Icons.add),
-            )
-          : null,
+      floatingActionButton: FloatingActionButton(
+        onPressed: () => _showEventSheet(context, null),
+        child: const Icon(Icons.add),
+      ),
     );
+  }
+
+  /// 客户端按本地日期归属过滤——服务端流是 UTC，UI 视角应该按"本地哪一天"。
+  List<CalendarEvent> _eventsForDay(
+      List<CalendarEvent> events, DateTime day) {
+    final target = DateTime(day.year, day.month, day.day);
+    return events.where((e) => e.localDate == target).toList();
+  }
+
+  Future<void> _delete(BuildContext context, String id) async {
+    try {
+      await ref.read(appStateProvider.notifier).deleteCalendarEvent(id);
+    } catch (e) {
+      if (!context.mounted) return;
+      _showError(context, '删除失败：$e');
+    }
   }
 
   void _showError(BuildContext context, String msg) {
@@ -299,15 +292,15 @@ class _CalendarPageState extends ConsumerState<_CalendarPage> {
     final titleCtrl = TextEditingController(text: existing?.title ?? '');
     final descCtrl =
         TextEditingController(text: existing?.description ?? '');
-    DateTime pickedDate = existing?.date ??
+    DateTime pickedDate = existing?.localDate ??
         DateTime(_selectedDate.year, _selectedDate.month, _selectedDate.day);
-    TimeOfDay? pickedTime;
+    TimeOfDay? pickedTime = existing != null && !existing.allDay
+        ? TimeOfDay(
+            hour: existing.localStart.hour,
+            minute: existing.localStart.minute,
+          )
+        : null;
     int? reminderMinutes = existing?.reminderMinutes;
-    if (existing?.time != null) {
-      final parts = existing!.time!.split(':');
-      pickedTime =
-          TimeOfDay(hour: int.parse(parts[0]), minute: int.parse(parts[1]));
-    }
 
     showModalBottomSheet(
       context: context,
@@ -347,17 +340,8 @@ class _CalendarPageState extends ConsumerState<_CalendarPage> {
                       if (isEdit)
                         IconButton(
                           onPressed: () async {
-                            try {
-                              await ref
-                                  .read(appStateProvider.notifier)
-                                  .deleteCalendarEvent(existing.id);
-                            } catch (e) {
-                              if (!context.mounted) return;
-                              _showError(context, '删除失败：$e');
-                              return;
-                            }
+                            await _delete(context, existing.id);
                             if (context.mounted) Navigator.pop(context);
-                            _refresh();
                           },
                           icon: Icon(Icons.delete_outline,
                               color: theme.colorScheme.error),
@@ -436,7 +420,7 @@ class _CalendarPageState extends ConsumerState<_CalendarPage> {
                             child: Text(
                               pickedTime != null
                                   ? '${pickedTime!.hour.toString().padLeft(2, '0')}:${pickedTime!.minute.toString().padLeft(2, '0')}'
-                                  : '不设置',
+                                  : '全天',
                               style: pickedTime == null
                                   ? TextStyle(
                                       color: theme.colorScheme.onSurface
@@ -538,37 +522,46 @@ class _CalendarPageState extends ConsumerState<_CalendarPage> {
                       onPressed: () async {
                         final title = titleCtrl.text.trim();
                         if (title.isEmpty) return;
-                        final timeStr = pickedTime != null
-                            ? '${pickedTime!.hour.toString().padLeft(2, '0')}:${pickedTime!.minute.toString().padLeft(2, '0')}'
-                            : null;
-                        final desc = descCtrl.text.trim().isEmpty
-                            ? null
-                            : descCtrl.text.trim();
+                        final desc = descCtrl.text.trim();
+                        final allDay = pickedTime == null;
+                        // 本地零点 / 本地 HH:mm —— Repository 入库前转 UTC。
+                        final startLocal = allDay
+                            ? DateTime(
+                                pickedDate.year,
+                                pickedDate.month,
+                                pickedDate.day,
+                              )
+                            : DateTime(
+                                pickedDate.year,
+                                pickedDate.month,
+                                pickedDate.day,
+                                pickedTime!.hour,
+                                pickedTime!.minute,
+                              );
 
                         final notifier =
                             ref.read(appStateProvider.notifier);
                         try {
                           if (isEdit) {
                             await notifier.updateCalendarEvent(
-                              existing.copyWith(
+                              existing.id,
+                              CalendarEventPatch(
                                 title: title,
-                                date: pickedDate,
-                                time: timeStr,
-                                clearTime: timeStr == null,
                                 description: desc,
-                                clearDescription: desc == null,
+                                startTime: startLocal,
+                                allDay: allDay,
                                 reminderMinutes: reminderMinutes,
-                                clearReminder: reminderMinutes == null,
+                                clearReminderMinutes:
+                                    reminderMinutes == null,
                               ),
                             );
                           } else {
                             await notifier.addCalendarEvent(
-                              CalendarEvent(
-                                id: _uuid.v4(),
+                              CalendarEventDraft(
                                 title: title,
-                                date: pickedDate,
-                                time: timeStr,
                                 description: desc,
+                                startTime: startLocal,
+                                allDay: allDay,
                                 reminderMinutes: reminderMinutes,
                               ),
                             );
@@ -579,7 +572,6 @@ class _CalendarPageState extends ConsumerState<_CalendarPage> {
                           return;
                         }
                         if (context.mounted) Navigator.pop(context);
-                        _refresh();
                       },
                       child: Text(isEdit ? '保存修改' : '添加日程'),
                     ),
@@ -644,10 +636,10 @@ class _EventCard extends StatelessWidget {
               children: [
                 SizedBox(
                   width: 52,
-                  child: event.time != null
+                  child: event.localTimeLabel != null
                       ? Column(
                           children: [
-                            Text(event.time!,
+                            Text(event.localTimeLabel!,
                                 style: theme.textTheme.titleSmall?.copyWith(
                                     fontWeight: FontWeight.bold,
                                     color: theme.colorScheme.primary)),
@@ -660,7 +652,7 @@ class _EventCard extends StatelessWidget {
                 ),
                 Container(
                   width: 3,
-                  height: event.description != null ? 44 : 24,
+                  height: event.description.isNotEmpty ? 44 : 24,
                   margin: const EdgeInsets.only(right: 12),
                   decoration: BoxDecoration(
                     color: theme.colorScheme.primary,
@@ -674,9 +666,9 @@ class _EventCard extends StatelessWidget {
                       Text(event.title,
                           style: theme.textTheme.bodyLarge
                               ?.copyWith(fontWeight: FontWeight.w600)),
-                      if (event.description != null) ...[
+                      if (event.description.isNotEmpty) ...[
                         const SizedBox(height: 4),
-                        Text(event.description!,
+                        Text(event.description,
                             maxLines: 2,
                             overflow: TextOverflow.ellipsis,
                             style: theme.textTheme.bodySmall?.copyWith(

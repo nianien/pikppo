@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../models/app_state.dart';
 import '../providers/app_state_provider.dart';
-import '../providers/model_service_provider.dart';
 import '../theme/design_tokens.dart';
 import 'memory_screen.dart';
 
@@ -13,132 +13,19 @@ class SettingsScreen extends ConsumerStatefulWidget {
 }
 
 class _SettingsScreenState extends ConsumerState<SettingsScreen> {
-  late TextEditingController _hostController;
   late TextEditingController _nameController;
-  // 两家云厂商各自独立持有 key，切换 provider 时输入框联动当前 provider 的 key。
-  late TextEditingController _anthropicKeyController;
-  late TextEditingController _geminiKeyController;
-  List<String>? _availableModels;
-  bool _isChecking = false;
-  String? _connectionError;
-  bool _showApiKey = false;
 
   @override
   void initState() {
     super.initState();
-    final appState = ref.read(appStateProvider);
-    _hostController = TextEditingController(text: appState.serviceHost);
-    _nameController = TextEditingController(text: appState.userName);
-    _anthropicKeyController = TextEditingController(
-      text: ref.read(anthropicApiKeyProvider) ?? '',
-    );
-    _geminiKeyController = TextEditingController(
-      text: ref.read(geminiApiKeyProvider) ?? '',
-    );
+    _nameController =
+        TextEditingController(text: ref.read(appStateProvider).userName);
   }
 
   @override
   void dispose() {
-    _hostController.dispose();
     _nameController.dispose();
-    _anthropicKeyController.dispose();
-    _geminiKeyController.dispose();
     super.dispose();
-  }
-
-  TextEditingController get _activeApiKeyController =>
-      ref.read(appStateProvider).cloudProvider == 'gemini'
-          ? _geminiKeyController
-          : _anthropicKeyController;
-
-  /// 切服务类型 / provider 的副作用统一在此：同步 host 输入框、清掉旧的模型列
-  /// 表和连接错误，让用户重新检测连接。
-  void _afterProviderChange() {
-    _hostController.text = ref.read(appStateProvider).serviceHost;
-    setState(() {
-      _availableModels = null;
-      _connectionError = null;
-    });
-  }
-
-  void _setServiceType(String type) {
-    ref.read(appStateProvider.notifier).updateServiceType(type);
-    _afterProviderChange();
-  }
-
-  void _setLocalProvider(String provider) {
-    ref.read(appStateProvider.notifier).updateLocalProvider(provider);
-    _afterProviderChange();
-  }
-
-  void _setCloudProvider(String provider) {
-    ref.read(appStateProvider.notifier).updateCloudProvider(provider);
-    _afterProviderChange();
-  }
-
-  Future<void> _checkConnection() async {
-    setState(() {
-      _isChecking = true;
-      _connectionError = null;
-    });
-
-    final notifier = ref.read(appStateProvider.notifier);
-    final appState = ref.read(appStateProvider);
-    final type = appState.serviceType;
-    final storage = ref.read(secureStorageProvider);
-    if (type == 'cloud') {
-      // Persist whichever provider's key is currently showing.
-      if (appState.cloudProvider == 'gemini') {
-        await saveGeminiApiKeyWith(
-          storage: storage,
-          key: _geminiKeyController.text.trim(),
-          setKey: (v) =>
-              ref.read(geminiApiKeyProvider.notifier).state = v,
-        );
-      } else {
-        await saveAnthropicApiKeyWith(
-          storage: storage,
-          key: _anthropicKeyController.text.trim(),
-          setKey: (v) =>
-              ref.read(anthropicApiKeyProvider.notifier).state = v,
-        );
-      }
-    }
-    notifier.updateServiceHost(_hostController.text.trim());
-
-    try {
-      final service = ref.read(modelServiceProvider);
-      if (service == null) {
-        setState(() {
-          _connectionError = type == 'cloud' ? '请先填写 API Key' : '服务配置无效';
-          _isChecking = false;
-        });
-        return;
-      }
-      final models = await service.fetchModels();
-      setState(() {
-        _availableModels = models;
-        _isChecking = false;
-      });
-      if (models.isNotEmpty && mounted) {
-        final currentModel = ref.read(appStateProvider).currentModel;
-        if (currentModel.isEmpty || !models.contains(currentModel)) {
-          notifier.switchModel(models.first);
-        }
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(
-              '连接成功，已选择 ${ref.read(appStateProvider).currentModel}',
-            ),
-          ),
-        );
-      }
-    } catch (e) {
-      setState(() {
-        _connectionError = '无法连接到模型服务，请检查配置';
-        _isChecking = false;
-      });
-    }
   }
 
   @override
@@ -157,165 +44,6 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
           AppSpacing.xxxl,
         ),
         children: [
-          _Section(
-            title: '模型服务',
-            subtitle: '选择并配置驱动对话的 LLM',
-            children: [
-              _Field(
-                label: '服务类型',
-                child: RadioGroup<String>(
-                  groupValue: appState.serviceType,
-                  // Radio 自身的点击通过 ancestor 走这里；InkWell 包住的标签
-                  // 点击走 onPick——两路最终都调 _setServiceType。
-                  onChanged: (v) {
-                    if (v != null) _setServiceType(v);
-                  },
-                  child: Row(
-                    children: [
-                      _RadioOption<String>(
-                        label: '本地',
-                        value: 'local',
-                        onPick: _setServiceType,
-                      ),
-                      const SizedBox(width: AppSpacing.md),
-                      _RadioOption<String>(
-                        label: '云端',
-                        value: 'cloud',
-                        onPick: _setServiceType,
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-              _Field(
-                label: '提供方',
-                child: appState.serviceType == 'local'
-                    ? DropdownButtonFormField<String>(
-                        initialValue: appState.localProvider,
-                        items: const [
-                          DropdownMenuItem(
-                              value: 'ollama', child: Text('Ollama')),
-                        ],
-                        onChanged: (val) {
-                          if (val != null) _setLocalProvider(val);
-                        },
-                      )
-                    : DropdownButtonFormField<String>(
-                        initialValue: appState.cloudProvider,
-                        items: const [
-                          DropdownMenuItem(
-                              value: 'anthropic', child: Text('Anthropic')),
-                          DropdownMenuItem(
-                              value: 'gemini', child: Text('Gemini')),
-                        ],
-                        onChanged: (val) {
-                          if (val != null) _setCloudProvider(val);
-                        },
-                      ),
-              ),
-              _Field(
-                label: '服务地址',
-                child: TextField(
-                  controller: _hostController,
-                  decoration: const InputDecoration(),
-                  onSubmitted: (_) => _checkConnection(),
-                ),
-              ),
-              if (appState.serviceType == 'cloud')
-                _Field(
-                  label: appState.cloudProvider == 'gemini'
-                      ? 'Google AI Studio API Key'
-                      : 'Anthropic API Key',
-                  child: TextField(
-                    controller: _activeApiKeyController,
-                    obscureText: !_showApiKey,
-                    decoration: InputDecoration(
-                      hintText: appState.cloudProvider == 'gemini'
-                          ? 'AIza...'
-                          : 'sk-ant-...',
-                      suffixIcon: IconButton(
-                        icon: Icon(_showApiKey
-                            ? Icons.visibility_off
-                            : Icons.visibility),
-                        onPressed: () => setState(
-                            () => _showApiKey = !_showApiKey),
-                      ),
-                    ),
-                    onChanged: (val) {
-                      final storage = ref.read(secureStorageProvider);
-                      if (appState.cloudProvider == 'gemini') {
-                        saveGeminiApiKeyWith(
-                          storage: storage,
-                          key: val.trim(),
-                          setKey: (v) => ref
-                              .read(geminiApiKeyProvider.notifier)
-                              .state = v,
-                        );
-                      } else {
-                        saveAnthropicApiKeyWith(
-                          storage: storage,
-                          key: val.trim(),
-                          setKey: (v) => ref
-                              .read(anthropicApiKeyProvider.notifier)
-                              .state = v,
-                        );
-                      }
-                    },
-                  ),
-                ),
-              SizedBox(
-                width: double.infinity,
-                child: FilledButton.tonalIcon(
-                  onPressed: _isChecking ? null : _checkConnection,
-                  icon: _isChecking
-                      ? const SizedBox(
-                          width: 16,
-                          height: 16,
-                          child:
-                              CircularProgressIndicator(strokeWidth: 2),
-                        )
-                      : const Icon(Icons.cable_outlined, size: 18),
-                  label: Text(_isChecking ? '连接中…' : '检测连接'),
-                ),
-              ),
-              if (_connectionError != null)
-                Text(
-                  _connectionError!,
-                  style: theme.textTheme.bodySmall?.copyWith(
-                      color: theme.colorScheme.error),
-                ),
-              if (_availableModels != null &&
-                  _availableModels!.isNotEmpty)
-                _Field(
-                  label: '可用模型',
-                  child: DropdownButtonFormField<String>(
-                    initialValue:
-                        _availableModels!.contains(appState.currentModel)
-                            ? appState.currentModel
-                            : null,
-                    decoration: const InputDecoration(),
-                    items: _availableModels!
-                        .map((m) =>
-                            DropdownMenuItem(value: m, child: Text(m)))
-                        .toList(),
-                    onChanged: (val) {
-                      if (val != null) {
-                        notifier.switchModel(val);
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          SnackBar(content: Text('已切换至 $val')),
-                        );
-                      }
-                    },
-                  ),
-                ),
-              if (appState.currentModel.isNotEmpty)
-                _ChipRow(
-                  icon: Icons.smart_toy_outlined,
-                  label: '当前模型',
-                  value: appState.currentModel,
-                ),
-            ],
-          ),
           _Section(
             title: '个人信息',
             children: [
@@ -337,6 +65,54 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                   selected: {appState.preferredLanguage},
                   onSelectionChanged: (val) =>
                       notifier.updateLanguage(val.first),
+                ),
+              ),
+            ],
+          ),
+          _Section(
+            title: '扩展工具',
+            subtitle: '日历等外部工具由 MCP 服务提供',
+            children: [
+              SwitchListTile.adaptive(
+                contentPadding: EdgeInsets.zero,
+                title: const Text('启用 MCP 工具服务'),
+                subtitle: Text(switch (appState.mcpState) {
+                  McpConnectionState.connected => '已连接',
+                  McpConnectionState.connecting => '连接中…',
+                  McpConnectionState.error => '连接失败，对话仍可用（无外部工具）',
+                  McpConnectionState.disconnected =>
+                    appState.mcpEnabled ? '未连接' : '已关闭，对话不使用外部工具',
+                }),
+                value: appState.mcpEnabled,
+                onChanged: (v) => notifier.setMcpEnabled(v),
+              ),
+            ],
+          ),
+          _Section(
+            title: '提醒',
+            subtitle: '日程到点会在对应角色聊天 + 系统通知里出现',
+            children: [
+              SwitchListTile.adaptive(
+                contentPadding: EdgeInsets.zero,
+                title: const Text('锁屏显示提醒详情'),
+                subtitle: const Text(
+                    '关闭后锁屏只显示"角色 · 1 条提醒"，详情进 App 才看。下次调度生效。'),
+                value: appState.showReminderDetailsOnLockScreen,
+                onChanged: notifier.updateShowReminderDetailsOnLockScreen,
+              ),
+              SizedBox(
+                width: double.infinity,
+                child: OutlinedButton.icon(
+                  onPressed: () async {
+                    final ok = await notifier.requestNotificationPermissions();
+                    if (!context.mounted) return;
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(
+                          content: Text(ok ? '通知权限已就绪' : '通知权限被拒绝')),
+                    );
+                  },
+                  icon: const Icon(Icons.notifications_active_outlined, size: 18),
+                  label: const Text('检查 / 请求通知权限'),
                 ),
               ),
             ],
@@ -515,81 +291,4 @@ class _Field extends StatelessWidget {
   }
 }
 
-/// 单选项：Radio + 文字标签整体一个 InkWell，保证标签也是有效点击区域。
-/// 群组状态由外层 [RadioGroup] 统一管理；本组件只负责呈现和点击转发。
-class _RadioOption<T> extends StatelessWidget {
-  final String label;
-  final T value;
-  final ValueChanged<T> onPick;
-
-  const _RadioOption({
-    required this.label,
-    required this.value,
-    required this.onPick,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    return InkWell(
-      borderRadius: BorderRadius.circular(AppRadius.sm),
-      onTap: () => onPick(value),
-      child: Padding(
-        padding: const EdgeInsets.symmetric(vertical: 4, horizontal: 4),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Radio<T>(
-              value: value,
-              visualDensity: VisualDensity.compact,
-              materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
-            ),
-            const SizedBox(width: 2),
-            Text(label, style: theme.textTheme.bodyMedium),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class _ChipRow extends StatelessWidget {
-  final IconData icon;
-  final String label;
-  final String value;
-  const _ChipRow(
-      {required this.icon, required this.label, required this.value});
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final scheme = theme.colorScheme;
-    return Container(
-      padding: const EdgeInsets.symmetric(
-          horizontal: AppSpacing.sm, vertical: AppSpacing.xs),
-      decoration: BoxDecoration(
-        color: scheme.primaryContainer.withValues(alpha: 0.4),
-        borderRadius: BorderRadius.circular(AppRadius.md),
-      ),
-      child: Row(
-        children: [
-          Icon(icon, size: 18, color: scheme.primary),
-          const SizedBox(width: AppSpacing.xs),
-          Text(label,
-              style: theme.textTheme.bodySmall
-                  ?.copyWith(color: scheme.onPrimaryContainer)),
-          const SizedBox(width: AppSpacing.xs),
-          Expanded(
-            child: Text(value,
-                overflow: TextOverflow.ellipsis,
-                textAlign: TextAlign.right,
-                style: theme.textTheme.bodyMedium?.copyWith(
-                    color: scheme.onPrimaryContainer,
-                    fontWeight: FontWeight.w600)),
-          ),
-        ],
-      ),
-    );
-  }
-}
 

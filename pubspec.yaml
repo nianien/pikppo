@@ -25,6 +25,23 @@ dependencies:
   sqlcipher_flutter_libs: ^0.6.4
   path_provider: ^2.1.5
   path: ^1.9.0
+  # 提醒：聊天消息 + 系统通知双轨。zonedSchedule 把日程提前注册到 OS
+  # AlarmManager / UNUserNotificationCenter，App 被杀也能弹。
+  flutter_local_notifications: ^18.0.1
+  # zonedSchedule 需要时区数据库（Android / iOS 都用）。
+  timezone: ^0.10.0
+  flutter_timezone: ^4.0.0
+  # 预置角色配置以 yaml 形态落在 assets/roles/，启动一次性加载
+  # （见 lib/data/role_loader.dart）；运行时数据量小，常驻内存。
+  yaml: ^3.1.2
+  speech_to_text: ^7.4.0
+  image_picker: ^1.2.2
+  file_picker: ^11.0.2
+  open_filex: ^4.7.0
+  # 汇率走势折线图（纯 Dart，无原生依赖）
+  fl_chart: ^1.2.0
+  share_plus: ^12.0.2
+  flutter_tts: ^4.2.5
 
 dev_dependencies:
   flutter_test:
@@ -35,3 +52,10 @@ dev_dependencies:
 
 flutter:
   uses-material-design: true
+  assets:
+    # 预置角色 prompt 配置目录——加新预置角色就往这里丢 yaml。
+    # 文件名与 id 必须保持一致（role_loader.dart 按目录列举）。
+    - assets/roles/work.yaml
+    - assets/roles/life.yaml
+    - assets/roles/finance.yaml
+    - assets/roles/health.yaml

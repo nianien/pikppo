@@ -1,7 +1,6 @@
 import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import '../data/preset_roles.dart';
 import '../models/group.dart';
 import '../models/memory.dart';
 import '../models/message.dart';
@@ -21,7 +20,13 @@ const _kMigratedFlag = 'sqlite_migrated_v1';
 /// - **per-row 容错**：单条坏数据跳过 + 计日志，不让一条脏数据阻断整次迁移。
 /// - **事务一次性写**：要么全成、要么回滚——避免迁移到一半失败留下半残数据。
 /// - **不删 prefs 旧 key**：保留作为"灾难回退"凭据；下个版本再清。
-Future<void> migrateFromPrefsIfNeeded(PikppoDatabase db) async {
+/// [reservedRoleIds] 是当前版本所有预置角色的 id 集合——迁移自定义角色时跳过
+/// 与之冲突的行（防御性设计，正常 prefs 数据不会出现冲突，但预置角色集合可能
+/// 跨版本变动）。由 [AppStateNotifier._loadState] 调用前从 yaml 加载好传入。
+Future<void> migrateFromPrefsIfNeeded(
+  PikppoDatabase db, {
+  required Set<String> reservedRoleIds,
+}) async {
   final prefs = await SharedPreferences.getInstance();
   if (prefs.getBool(_kMigratedFlag) == true) return;
 
@@ -46,7 +51,7 @@ Future<void> migrateFromPrefsIfNeeded(PikppoDatabase db) async {
     }
     for (final r in customRoles) {
       // 与预置角色 id 冲突的自定义角色丢弃（不应该出现，但防御一手）。
-      if (defaultRoles.any((d) => d.id == r.id)) continue;
+      if (reservedRoleIds.contains(r.id)) continue;
       await db
           .into(db.customRoleRows)
           .insertOnConflictUpdate(customRoleToCompanion(r));

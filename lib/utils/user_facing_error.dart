@@ -43,7 +43,8 @@ String _dioMessage(DioException e) {
       return '请求已取消';
     case DioExceptionType.badResponse:
       final code = e.response?.statusCode;
-      if (code == 401 || code == 403) return 'API Key 无效或权限不足，请重新配置';
+      if (code == 401) return 'API Key 无效，请检查后重新输入';
+      if (code == 403) return '访问被拒绝：账号无权限，或当前网络/地区不受该服务支持';
       if (code == 404) return '请求的资源不存在';
       if (code == 429) return '请求过于频繁，请稍后再试';
       if (code != null && code >= 500) return '服务端临时异常，请稍后再试';

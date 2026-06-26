@@ -1,7 +1,5 @@
 import 'dart:async';
-import 'package:drift/drift.dart' show InsertMode;
 import 'package:flutter/foundation.dart';
-import 'package:flutter/material.dart' show Icons;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:uuid/uuid.dart';
@@ -12,29 +10,35 @@ import '../models/memory.dart';
 import '../models/group.dart';
 import '../models/calendar_event.dart';
 import '../models/conversation_summary.dart';
-import '../data/preset_roles.dart';
+import '../data/role_loader.dart';
 import '../db/database.dart';
 import '../db/mappers.dart';
 import '../db/migration.dart';
+import '../services/cloud_provider_catalog.dart';
 import '../services/model_service.dart';
+import '../services/attachment_store.dart';
 import '../services/mcp_service.dart';
+import '../services/reminder_router.dart';
 import '../services/tool_registry.dart';
+import '../services/tools/calendar_tools.dart';
+import '../utils/chart_cards.dart';
 import '../utils/time_format.dart';
 import '../utils/user_facing_error.dart';
-import '../widgets/app_toast.dart';
+import 'calendar_repository_provider.dart';
 import 'database_provider.dart';
+import 'memory_repository_provider.dart';
 import 'memory_summarizer.dart';
 import 'messaging_controller.dart';
+import 'notification_service_provider.dart';
+import 'reminder_router_provider.dart';
 import 'reminder_scheduler.dart';
+import 'reminder_scheduler_provider.dart';
 import '../services/location_service.dart';
 import 'mcp_service_provider.dart';
 import 'model_service_provider.dart';
 import 'location_service_provider.dart';
 
 const _uuid = Uuid();
-
-/// Frequency at which we re-check upcoming calendar events for reminders.
-const _kReminderInterval = Duration(seconds: 30);
 
 /// How often the background memory summarizer wakes up.
 const _kMemorySummaryInterval = Duration(hours: 1);
@@ -51,8 +55,9 @@ final appStateProvider =
 class AppStateNotifier extends StateNotifier<AppState> {
   final Ref _ref;
   StreamSubscription<McpConnectionState>? _mcpSub;
+  ProviderSubscription<AsyncValue<List<CalendarEvent>>>? _calendarSub;
+  StreamSubscription<ReminderEvent>? _reminderSub;
   late final ToolRegistry _localTools;
-  late final ReminderScheduler _reminderScheduler;
   late final MemorySummarizer _summarizer;
   late final MessagingController _messaging;
 
@@ -64,28 +69,32 @@ class AppStateNotifier extends StateNotifier<AppState> {
   /// 当前可用的 ModelService（按 settings + apiKey 决定）。
   ModelService? modelService() => _modelService();
 
+  /// 公共暴露 state，给 MessagingController 等子组件读——避免它们走
+  /// `ref.read(appStateProvider)`（Riverpod debug 模式拦截 provider 自读自）。
+  AppState get currentState => state;
+
   /// 防抖落盘：连续 state 改动只触发一次实际写。`_pendingSave` 串联防止并发，
   /// `dispose` 时 flush 保最后一次变更不丢。
   Timer? _saveDebounce;
   Future<void> _pendingSave = Future.value();
   static const _kSaveDebounce = Duration(milliseconds: 120);
 
+  /// 启动放行兜底定时器——就绪或 dispose 时取消，避免悬挂。
+  Timer? _readyWatchdog;
+
   AppStateNotifier(this._ref)
       : super(const AppState(
-          roles: defaultRoles,
+          // 启动时为空——_loadState 里 await loadDefaultRoles() 后注入。
+          // _AppRoot 用 isReady 守住 UI，期间不会渲染依赖 currentRole 的页面。
+          roles: [],
           messages: [],
           memories: [],
           currentRoleId: 'work',
           currentModel: '',
-          serviceType: 'local',
-          serviceHost: 'http://localhost:11434',
+          serviceType: 'cloud',
+          serviceHost: 'https://api.anthropic.com',
         )) {
     _localTools = _buildLocalTools();
-    _reminderScheduler = ReminderScheduler(
-      interval: _kReminderInterval,
-      getEvents: () => state.calendarEvents,
-      onReminder: _onReminderDue,
-    );
     _summarizer = MemorySummarizer(
       _ref,
       interval: _kMemorySummaryInterval,
@@ -93,25 +102,29 @@ class AppStateNotifier extends StateNotifier<AppState> {
     );
     _messaging = MessagingController(this, _ref);
     _loadState();
-    _reminderScheduler.start();
+    _startReadyWatchdog();
     _summarizer.start();
     _wireMcpListener();
+    _wireCalendarStream();
+    _wireReminderStream();
     // Fire-and-forget: 不阻塞首屏；权限弹窗会自然出现在首次 GPS 请求时。
     unawaited(_ref.read(locationServiceProvider).refresh());
   }
 
   /// 进程内工具表。这里的工具直接在 Flutter 端运行，不走 MCP——用于本地数据
-  /// 操作或纯计算。pikppo-mcp 维护远程/外部工具（云日历、Drive 等），两者在
-  /// agent loop 里合并暴露给模型，dispatch 时按名分流。
-  ///
-  /// 目前为空——等 `note_add` / `note_search` 等本地操作迁入时再注册。
-  ToolRegistry _buildLocalTools() => ToolRegistry(const []);
+  /// 操作（calendar、未来的 notes 等）或纯计算。pikppo-mcp 维护远程/外部工具
+  /// （Drive 等），两者在 agent loop 里合并暴露给模型，dispatch 时按名分流。
+  ToolRegistry _buildLocalTools() => ToolRegistry([
+        ...buildCalendarTools(_ref),
+      ]);
 
   @override
   Future<void> dispose() async {
-    _reminderScheduler.stop();
     _summarizer.stop();
+    _readyWatchdog?.cancel();
     _mcpSub?.cancel();
+    _calendarSub?.close();
+    _reminderSub?.cancel();
     // Flush 待落盘的变更——避免最后一次 setState 因防抖窗口未到而丢失。
     _saveDebounce?.cancel();
     _saveDebounce = null;
@@ -130,33 +143,168 @@ class AppStateNotifier extends StateNotifier<AppState> {
         mcpError: _mcp.lastError,
         clearMcpError: _mcp.lastError == null,
       );
-      if (s == McpConnectionState.connected) {
-        refreshCalendarCache();
-      }
     });
   }
 
   /// 重新连接 MCP——程序内部使用（如网络恢复后），不接受外部 host 参数。
   /// host 来自 [defaultMcpHost]（编译期默认 + dart-define 覆盖）。
   Future<void> reconnectMcp() async {
+    if (!state.mcpEnabled) return;
     await _mcp.connect(defaultMcpHost);
   }
 
-  // ---- Reminder hook ----
+  /// 直接调一个 MCP 工具并拿到原始 JSON 字符串——给需要主动查外部数据的 UI 页
+  /// （如汇率页）用，不经 agent loop。未连接时 [McpService.callTool] 抛
+  /// [McpUnavailableException]，调用方负责兜底（提示 + reconnectMcp）。
+  Future<String> callMcpTool(String name, Map<String, dynamic> args) =>
+      _mcp.callTool(name, args);
 
-  /// [ReminderScheduler] 命中提醒窗口时回调到这里。
-  /// **不进对话流**——提醒可能在任何屏幕触发，跟"在跟谁聊天"无关；瞬时 toast
-  /// 即可，过去就过去，不留存。详细事件本身已经在日历里。
-  void _onReminderDue(CalendarEvent event, int diffMinutes) {
-    final timeHint = diffMinutes >= 60
-        ? '约${diffMinutes ~/ 60}小时后开始'
-        : '$diffMinutes 分钟后开始';
-    final timeLabel = event.time != null ? '${event.time} ' : '';
-    showAppToast(
-      '$timeLabel${event.title}（$timeHint）',
-      icon: Icons.alarm,
-      duration: const Duration(seconds: 5),
+  /// MCP 总开关。开 → 立即连接；关 → 断开并清空工具目录。
+  Future<void> setMcpEnabled(bool enabled) async {
+    state = state.copyWith(mcpEnabled: enabled);
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool('mcpEnabled', enabled);
+    if (enabled) {
+      unawaited(_mcp.connect(defaultMcpHost).catchError((Object e) {
+        debugPrint('MCP connect failed (non-fatal): ${debugReason(e)}');
+      }));
+    } else {
+      await _mcp.disconnect();
+    }
+  }
+
+  // ---- Calendar stream ----
+
+  /// 订阅 [upcomingCalendarEventsProvider]，把 30 天内的事件推给
+  /// [reminderSchedulerProvider]——这是 scheduler 唯一的事件来源。
+  /// Repository 写入后 drift 自动通知，无需手动 refresh。
+  void _wireCalendarStream() {
+    final scheduler = _ref.read(reminderSchedulerProvider);
+    _calendarSub = _ref.listen<AsyncValue<List<CalendarEvent>>>(
+      upcomingCalendarEventsProvider,
+      (_, next) {
+        next.whenData(scheduler.setEvents);
+      },
+      fireImmediately: true,
     );
+  }
+
+  // ---- Reminder stream ----
+
+  /// 订阅 [reminderSchedulerProvider.events]：每条到点的 [ReminderEvent] →
+  /// [ReminderRouter] 路由到 1–N 个角色 → 在每个角色私聊里 append 一条
+  /// `kind='reminder'` 消息（v3.2 §4 / 产品方案 §3.2 提醒以聊天形态呈现）。
+  void _wireReminderStream() {
+    final scheduler = _ref.read(reminderSchedulerProvider);
+    _reminderSub = scheduler.events.listen(_dispatchReminder);
+  }
+
+  /// 单角色分发（v3.2）：优先用事件上的 routedRoleId（事件写入时已路由），
+  /// 不存在则用 router 做一次兜底（兼容 v3.1 老行 + LLM 失败场景）。
+  Future<void> _dispatchReminder(ReminderEvent reminder) async {
+    final event = reminder.event;
+    final router = _ref.read(reminderRouterProvider);
+    String roleId = event.routedRoleId ?? '';
+    if (roleId.isEmpty || state.getRoleById(roleId) == null) {
+      try {
+        roleId = await router.route(
+          event: event,
+          candidates: state.roles,
+          llmService: _modelService(),
+          llmModel: state.currentModel.isEmpty ? null : state.currentModel,
+        );
+      } catch (e) {
+        debugPrint('reminder route failed: ${debugReason(e)}');
+        roleId = router.defaultRoleId;
+      }
+    }
+    if (state.getRoleById(roleId) == null) return; // 角色已被删，放弃
+    _appendReminderMessage(roleId, reminder);
+  }
+
+  /// 在指定角色私聊里 append 一条 reminder 消息——内容措辞先简洁兜底，未来可
+  /// 升级为"按角色 system prompt 生成措辞"（需要一次 LLM 调用，延迟暂不引入）。
+  ///
+  /// 同时调 NotificationService.showImmediate 兜底——OS 通知预调度在某些厂商
+  /// 极端省电下可能漏触发，前台到点时再发一条确保用户被打扰一次（同 id 调度
+  /// 已发过的情况，OS 会自动 dedupe）。
+  void _appendReminderMessage(String roleId, ReminderEvent reminder) {
+    final event = reminder.event;
+    final timeHint = reminder.diffMinutes >= 60
+        ? '约 ${reminder.diffMinutes ~/ 60} 小时后开始'
+        : '${reminder.diffMinutes} 分钟后开始';
+    final timeLabel =
+        event.localTimeLabel != null ? '${event.localTimeLabel} ' : '';
+    final content = '⏰ $timeLabel${event.title}（$timeHint）';
+
+    final msg = Message(
+      id: _uuid.v4(),
+      roleId: roleId,
+      content: content,
+      isUser: false,
+      timestamp: DateTime.now().millisecondsSinceEpoch,
+      kind: 'reminder',
+    );
+    state = state.copyWith(messages: [...state.messages, msg]);
+    _persistMessage(msg);
+
+    // 系统通知兜底——只在前台触发时调，因为后台时这条路径不会被执行（App
+    // 进程不在），OS 已经按预调度独立弹出。
+    final role = state.getRoleById(roleId);
+    if (role != null) {
+      unawaited(
+          _ref.read(notificationServiceProvider).showImmediate(event, role));
+    }
+  }
+
+  // ---- Attachments & forwarding ----
+
+  /// 发送附件消息（不触发 AI 回复——模型暂不消费文件内容，喂给 LLM 的多模态
+  /// 链路后续单独做）。[groupId] 非空 = 发到群聊。
+  Future<void> sendAttachment({
+    required String type,
+    required String sourcePath,
+    required String name,
+    String? groupId,
+  }) async {
+    final copy = await AttachmentStore.import(sourcePath);
+    final size = await copy.length();
+    final msg = Message(
+      id: _uuid.v4(),
+      // 群聊的用户消息 roleId 为空串（与 MessagingController 的群发一致）。
+      roleId: groupId == null ? state.currentRoleId : '',
+      content: '',
+      isUser: true,
+      timestamp: DateTime.now().millisecondsSinceEpoch,
+      groupId: groupId,
+      attachmentType: type,
+      attachmentPath: copy.path,
+      attachmentName: name,
+      attachmentSize: size,
+    );
+    state = state.copyWith(messages: [...state.messages, msg]);
+    _persistMessage(msg);
+  }
+
+  /// 把一条消息转发到目标会话（角色私聊或群聊）。复制为**当前用户发出的新
+  /// 消息**，不触发 AI 回复；附件复用同一份私有副本（引用计数式删除暂不做，
+  /// 删除会话时按路径清理，另一会话引用同文件时该气泡退化为"文件已清理"）。
+  void forwardMessage(Message source, {String? toRoleId, String? toGroupId}) {
+    assert((toRoleId == null) != (toGroupId == null));
+    final msg = Message(
+      id: _uuid.v4(),
+      roleId: toRoleId ?? '',
+      content: source.content,
+      isUser: true,
+      timestamp: DateTime.now().millisecondsSinceEpoch,
+      groupId: toGroupId,
+      attachmentType: source.attachmentType,
+      attachmentPath: source.attachmentPath,
+      attachmentName: source.attachmentName,
+      attachmentSize: source.attachmentSize,
+    );
+    state = state.copyWith(messages: [...state.messages, msg]);
+    _persistMessage(msg);
   }
 
   // ---- Persistence ----
@@ -164,43 +312,117 @@ class AppStateNotifier extends StateNotifier<AppState> {
   /// 当前数据库实例——首次访问时打开 + 解密 + （首次启动）迁移旧 prefs 数据。
   Future<PikppoDatabase> get _db => _ref.read(databaseProvider.future);
 
+  /// 终极兜底：极端情况下 [_loadState] 的某个 await 真正挂起（连 finally 都跑不
+  /// 到，如 SharedPreferences / 兜底 loadDefaultRoles 卡死），这个定时器到点强制
+  /// 放行进入页面。正常路径（含 db 超时）远在它之前就 ready 了，watchdog 不触发。
+  void _startReadyWatchdog() {
+    _readyWatchdog = Timer(const Duration(seconds: 9), () {
+      _readyWatchdog = null;
+      if (!state.isReady) {
+        debugPrint('loadState watchdog fired (9s) — forcing app entry');
+        state = state.copyWith(isReady: true);
+      }
+    });
+  }
+
+  /// 启动加载的**总闸**：无论内部发生什么（异常 / 部分超时），finally 都把
+  /// `isReady` 置 true，让 App 进入页面——开屏不该因任何初始化失败而卡死。
+  /// 真正的步骤在 [_loadStateInner]；这里只负责"无论如何都放行"。
   Future<void> _loadState() async {
+    try {
+      await _loadStateInner();
+    } catch (e) {
+      debugPrint('loadState failed: ${debugReason(e)}');
+    } finally {
+      if (!state.isReady) {
+        // 兜底：内部在设置 roles 前就挂了（prefs / 预置角色读取失败），再试一次
+        // 预置角色，至少让聊天列表有东西渲染。
+        if (state.roles.isEmpty) {
+          try {
+            state = state.copyWith(roles: await loadDefaultRoles());
+          } catch (e) {
+            debugPrint('fallback loadDefaultRoles failed: ${debugReason(e)}');
+          }
+        }
+        state = state.copyWith(isReady: true);
+      }
+      // 已就绪，watchdog 没用了——取消，别悬挂（也让 widget 测试不报 pending timer）。
+      _readyWatchdog?.cancel();
+      _readyWatchdog = null;
+    }
+  }
+
+  Future<void> _loadStateInner() async {
     final prefs = await SharedPreferences.getInstance();
     final roleId = prefs.getString('currentRoleId') ?? 'work';
     final model = prefs.getString('currentModel') ?? '';
     // 旧版本可能存的是 `'ollama'` 或 `'lmstudio'`——归一到 `'local'`。
     // LM Studio 已下线，localProvider 全部当作 ollama 处理。
-    var serviceType = prefs.getString('serviceType') ?? 'local';
-    if (serviceType == 'ollama' || serviceType == 'lmstudio') {
-      serviceType = 'local';
+    var storedType = prefs.getString('serviceType') ?? 'cloud';
+    if (storedType == 'ollama' || storedType == 'lmstudio') {
+      storedType = 'local';
     }
+    // 本地推理（Ollama）是开发期测试通道：release 锁定云端，设置页的
+    // 本地/云端选择也只在 debug 构建显示。
+    final serviceType = kDebugMode ? storedType : 'cloud';
     final localProvider = prefs.getString('localProvider') ?? 'ollama';
     final cloudProvider = prefs.getString('cloudProvider') ?? 'anthropic';
     // 首次启动 / 旧版本没存过 host 时，按当前 type/provider + 当前平台给默认。
     final defaultHost = serviceType == 'cloud'
         ? _cloudDefaultHost(cloudProvider)
         : _localDefaultHost(localProvider);
-    final serviceHost = prefs.getString('serviceHost') ?? defaultHost;
+    // 被锁定切到云端时（debug 存的是 local、跑的是 release），存量 host 指向
+    // 本地服务已无意义，跟着归位到云端默认。
+    final serviceHost = serviceType == storedType
+        ? (prefs.getString('serviceHost') ?? defaultHost)
+        : defaultHost;
     final userName = prefs.getString('userName') ?? '';
     final language = prefs.getString('preferredLanguage') ?? '中文';
     final onboardingCompleted = prefs.getBool('onboardingCompleted') ?? false;
+    final showLockDetails =
+        prefs.getBool('showReminderDetailsOnLockScreen') ?? true;
+    final mcpEnabled = prefs.getBool('mcpEnabled') ?? true;
+    // 汇率"常用"收藏：首次启动种入默认对，之后以用户增删结果为准。
+    final exchangeFavoritePairs =
+        prefs.getStringList('exchangeFavoritePairs') ?? kDefaultExchangePairs;
+    // 模型列表缓存——切换面板秒开，不用每次现拉 API。
+    _ref.read(modelCacheProvider.notifier).state =
+        decodeModelCache(prefs.getString(modelCachePrefsKey));
+    // 同步到 NotificationService，让首批 scheduleFor 用对的 visibility。
+    _ref
+        .read(notificationServiceProvider)
+        .setShowDetailsOnLockScreen(showLockDetails);
 
-    // 打开 db + 迁移旧 prefs JSON（幂等，第二次启动跳过）。
-    final db = await _db;
-    await migrateFromPrefsIfNeeded(db);
+    // 预置角色优先就绪——这是渲染 MainShell 的最低要求，必须先于 db 拿到。
+    // 从 assets/roles/*.yaml 一次性加载；失败会向上抛到 [_loadState] 的兜底。
+    final defaultRoles = await loadDefaultRoles();
 
-    // 启动时只加载小集合：角色、群聊、记忆、会话摘要——后两类用来渲染聊天
-    // 列表，不需要 messages 全表。**messages 按会话懒加载**，进入某个聊天页
-    // 时由 [ensureRoleMessagesLoaded] / [ensureGroupMessagesLoaded] 填进 state。
-    final customRoles = (await db.allCustomRoles()).map(customRoleFromRow);
-    final roles = <Role>[...defaultRoles, ...customRoles];
-    final memories = (await db.allMemories()).map(memoryFromRow).toList();
-    final groups = (await db.allGroups()).map(groupFromRow).toList();
-    final summaries = await _loadConversationSummaries(db);
+    // **db 阶段整体 try + 超时**：开库（含 SQLCipher 解密）/ 迁移 / 查询任一失败
+    // 或卡住，都退化成"只有预置角色、空记忆/群组/摘要"，绝不阻断启动。db 一旦
+    // 卡住，后续懒加载（进聊天页）再失败由各自路径兜底，不影响进入页面。
+    var roles = <Role>[...defaultRoles];
+    var memories = const <Memory>[];
+    var groups = const <Group>[];
+    var summaries = const <String, ConversationSummary>{};
+    try {
+      final db = await _db.timeout(const Duration(seconds: 6));
+      await migrateFromPrefsIfNeeded(
+        db,
+        reservedRoleIds: defaultRoles.map((r) => r.id).toSet(),
+      );
+      // 启动只加载小集合：自定义角色、群聊、记忆、会话摘要——messages 按会话懒加载。
+      final customRoles = (await db.allCustomRoles()).map(customRoleFromRow);
+      roles = <Role>[...defaultRoles, ...customRoles];
+      memories = (await db.allMemories()).map(memoryFromRow).toList();
+      groups = (await db.allGroups()).map(groupFromRow).toList();
+      summaries = await _loadConversationSummaries(db);
+    } catch (e) {
+      debugPrint('loadState db phase failed/timeout: ${debugReason(e)}');
+    }
 
+    // 注：不写 messages: const []——保留 ready 前用户可能误操作产生的输入。
     state = state.copyWith(
       roles: roles,
-      messages: const [],
       memories: memories,
       groups: groups,
       currentRoleId: roleId,
@@ -212,30 +434,103 @@ class AppStateNotifier extends StateNotifier<AppState> {
       userName: userName,
       preferredLanguage: language,
       onboardingCompleted: onboardingCompleted,
+      showReminderDetailsOnLockScreen: showLockDetails,
+      mcpEnabled: mcpEnabled,
+      exchangeFavoritePairs: exchangeFavoritePairs,
       conversationSummaries: summaries,
     );
 
-    // Load cloud API keys (no-op if storage absent), then start MCP connection.
-    final storage = _ref.read(secureStorageProvider);
-    try {
-      await loadAnthropicApiKeyWith(
-        storage: storage,
-        setKey: (v) =>
-            _ref.read(anthropicApiKeyProvider.notifier).state = v,
-      );
-    } catch (e) {
-      debugPrint('loadAnthropicApiKey failed: ${debugReason(e)}');
-    }
-    try {
-      await loadGeminiApiKeyWith(
-        storage: storage,
-        setKey: (v) => _ref.read(geminiApiKeyProvider.notifier).state = v,
-      );
-    } catch (e) {
-      debugPrint('loadGeminiApiKey failed: ${debugReason(e)}');
+    // 下面这些都**不该阻塞进入页面**——全部 fire-and-forget，本方法随即返回，
+    // isReady 由 [_loadState] 的 finally 立即置位。哪怕 keychain 读取卡住也不卡开屏。
+    unawaited(_loadCloudKeysThenBootstrap());
+
+    // 显式吃掉 MCP 初始连接失败——非致命，UI 会按 mcpState 自己处理（banner /
+    // 日历页提示），不能让一条 unawaited future error 在控制台飘红误导调试。
+    if (mcpEnabled) {
+      unawaited(_mcp.connect(defaultMcpHost).catchError((Object e) {
+        debugPrint('MCP initial connect failed (non-fatal): ${debugReason(e)}');
+      }));
     }
 
-    unawaited(_mcp.connect(defaultMcpHost));
+    // Calendar 写副作用钩子——Repository 写入 / 删除事件时调用，触发路由 +
+    // 系统通知调度。绑定时机点：state.roles 已就绪，db 已开。
+    unawaited(_bindCalendarWriteHooks());
+
+    // isReady 由 [_loadState] 的 finally 统一置位（保证异常路径也放行），这里不设。
+  }
+
+  /// 读云端 API key（keychain）→ 若 currentModel 还空，给默认 provider 拉一次模型
+  /// 列表取首个当默认。整条都不阻塞启动：keychain 卡/失败不影响进入页面，
+  /// currentModel 留空时聊天页横幅兜底提示。
+  Future<void> _loadCloudKeysThenBootstrap() async {
+    try {
+      await loadAllCloudApiKeys(
+        storage: _ref.read(secureStorageProvider),
+        setKeys: (m) => _ref.read(cloudApiKeysProvider.notifier).state = m,
+      );
+    } catch (e) {
+      debugPrint('loadAllCloudApiKeys failed: ${debugReason(e)}');
+    }
+    if (state.currentModel.isEmpty) {
+      unawaited(_bootstrapDefaultModel());
+    }
+  }
+
+  /// 把 Calendar 写副作用接到 ReminderRouter + NotificationService 上。
+  /// 创建/修改事件时：路由出 roleId → 写回 routedRoleId → schedule OS 通知。
+  /// 删除时：cancel 已注册的通知。
+  Future<void> _bindCalendarWriteHooks() async {
+    try {
+      final repo = await _ref.read(calendarRepositoryProvider.future);
+      final router = _ref.read(reminderRouterProvider);
+      final notif = _ref.read(notificationServiceProvider);
+
+      repo.bindHooks(
+        onWrite: (event) async {
+          final reminderMinutes = event.reminderMinutes;
+          if (reminderMinutes == null) {
+            // 没设提醒：取消可能存在的旧调度（编辑事件去掉提醒的场景）。
+            await notif.cancelFor(event.id);
+            return;
+          }
+          // 路由：优先用事件已有 routedRoleId（用户在 UI 显式改过角色时尊重），
+          // 否则跑路由器。
+          String roleId = event.routedRoleId ?? '';
+          if (roleId.isEmpty || state.getRoleById(roleId) == null) {
+            try {
+              roleId = await router.route(
+                event: event,
+                candidates: state.roles,
+                llmService: _modelService(),
+                llmModel:
+                    state.currentModel.isEmpty ? null : state.currentModel,
+              );
+            } catch (e) {
+              debugPrint(
+                  'reminder route on write failed: ${debugReason(e)}');
+              roleId = router.defaultRoleId;
+            }
+            // cache 到事件行（dirty=true 让 P2 备份带走）
+            await repo.setRoutedRoleId(event.id, roleId);
+          }
+          final role = state.getRoleById(roleId);
+          if (role == null) return;
+          // 先取消旧，再注册新（OS 自己也会覆盖，显式 cancel 保险）
+          await notif.cancelFor(event.id);
+          // 用最新的事件态（含 routedRoleId）调度。这里直接拼一个 minimal copy
+          // 即可（NotificationService 只读 startTime / reminderMinutes / title 等）
+          await notif.scheduleFor(
+            event.copyWith(routedRoleId: roleId),
+            role,
+          );
+        },
+        onDelete: (eventId) async {
+          await notif.cancelFor(eventId);
+        },
+      );
+    } catch (e) {
+      debugPrint('bind calendar hooks failed: ${debugReason(e)}');
+    }
   }
 
   /// 启动时一次 SQL 查询拿到所有会话末条消息——给聊天列表渲染用。
@@ -436,6 +731,10 @@ class AppStateNotifier extends StateNotifier<AppState> {
     await prefs.setString('userName', state.userName);
     await prefs.setString('preferredLanguage', state.preferredLanguage);
     await prefs.setBool('onboardingCompleted', state.onboardingCompleted);
+    await prefs.setBool(
+        'showReminderDetailsOnLockScreen', state.showReminderDetailsOnLockScreen);
+    await prefs.setStringList(
+        'exchangeFavoritePairs', state.exchangeFavoritePairs);
   }
 
   // ---- DB write helpers（fire-and-forget；失败入日志，不阻塞 UI）----
@@ -446,23 +745,49 @@ class AppStateNotifier extends StateNotifier<AppState> {
   }
 
   void _persistMessagesForRoleDelete(String roleId) {
-    unawaited(_db.then((db) => db.deleteMessagesForRole(roleId)));
+    unawaited(_db.then((db) async {
+      final paths = await db.attachmentPathsForRole(roleId);
+      await db.deleteMessagesForRole(roleId);
+      await _cleanupOrphanAttachments(db, paths);
+    }));
   }
 
   void _persistMessagesForGroupDelete(String groupId) {
-    unawaited(_db.then((db) => db.deleteMessagesForGroup(groupId)));
+    unawaited(_db.then((db) async {
+      final paths = await db.attachmentPathsForGroup(groupId);
+      await db.deleteMessagesForGroup(groupId);
+      await _cleanupOrphanAttachments(db, paths);
+    }));
   }
 
+  /// 删完消息后清理私有附件副本：转发会共享同一路径，仅当库里再无引用才删文件。
+  Future<void> _cleanupOrphanAttachments(
+      PikppoDatabase db, List<String> paths) async {
+    for (final path in paths.toSet()) {
+      if (await db.countMessagesWithAttachment(path) == 0) {
+        await AttachmentStore.delete(path);
+      }
+    }
+  }
+
+  // ---- Memory writes（统一委托 MemoryRepository，盖戳 + 软删 + 副作用编排）----
+
   void _persistMemory(Memory m) {
-    unawaited(_db.then((db) => db.insertMemory(memoryToCompanion(m))));
+    unawaited(_ref
+        .read(memoryRepositoryProvider.future)
+        .then((repo) => repo.add(m)));
   }
 
   void _persistMemoryDelete(String id) {
-    unawaited(_db.then((db) => db.deleteMemory(id)));
+    unawaited(_ref
+        .read(memoryRepositoryProvider.future)
+        .then((repo) => repo.delete(id)));
   }
 
   void _persistMemoriesClear() {
-    unawaited(_db.then((db) => db.clearAllMemories()));
+    unawaited(_ref
+        .read(memoryRepositoryProvider.future)
+        .then((repo) => repo.clearAll()));
   }
 
   void _persistGroup(Group g) {
@@ -471,8 +796,10 @@ class AppStateNotifier extends StateNotifier<AppState> {
 
   void _persistGroupDelete(String id) {
     unawaited(_db.then((db) async {
+      final paths = await db.attachmentPathsForGroup(id);
       await db.deleteGroup(id);
       await db.deleteMessagesForGroup(id);
+      await _cleanupOrphanAttachments(db, paths);
     }));
   }
 
@@ -480,26 +807,15 @@ class AppStateNotifier extends StateNotifier<AppState> {
     unawaited(_db.then((db) => db.insertCustomRole(customRoleToCompanion(role))));
   }
 
-  /// 批量提交 memory diff——updated + added 一次事务，减少 IO。
+  /// 批量提交 memory diff——委托 [MemoryRepository.applyDiff]，事务内一次落盘
+  /// 并共用同一 updatedAt 时间戳。
   void _persistMemoryDiff({
     required Map<String, Memory> updated,
     required List<Memory> added,
   }) {
     if (updated.isEmpty && added.isEmpty) return;
-    unawaited(_db.then((db) async {
-      await db.batch((batch) {
-        for (final m in updated.values) {
-          batch.insert(
-            db.memoryRows,
-            memoryToCompanion(m),
-            mode: InsertMode.insertOrReplace,
-          );
-        }
-        for (final m in added) {
-          batch.insert(db.memoryRows, memoryToCompanion(m));
-        }
-      });
-    }));
+    unawaited(_ref.read(memoryRepositoryProvider.future).then((repo) =>
+        repo.applyDiff(updated: updated.values, added: added)));
   }
 
   // ---- Settings mutations ----
@@ -511,6 +827,60 @@ class AppStateNotifier extends StateNotifier<AppState> {
 
   void switchModel(String model) {
     state = state.copyWith(currentModel: model);
+    _saveState();
+  }
+
+  /// 用当前模型把 [text] 翻译成用户首选语言（本身已是该语言则译成英文）。
+  /// **一次性调用，不进对话历史**——供消息选择菜单"翻译"的弹窗用。
+  /// 未配置模型时抛 [StateError]（调用方在弹窗里转成友好提示）。
+  Future<String> translateText(String text) async {
+    final service = modelService();
+    if (service == null || state.currentModel.isEmpty) {
+      throw StateError('未配置模型');
+    }
+    final lang = state.preferredLanguage;
+    final prompt = '把下面的文本翻译成$lang；如果它本身就是$lang，则翻译成英文。'
+        '只输出译文，不要解释、不要加引号或任何额外说明：\n\n$text';
+    return service.chat([
+      {'role': 'user', 'content': prompt},
+    ], state.currentModel);
+  }
+
+  /// 用当前模型解释 [term] 在 [context]（它所在的一两句）里的含义。**一次性调用，
+  /// 只带词 + 最小必要语境，不拖整段对话历史、不进对话历史**——供消息选择菜单
+  /// "解释"的弹窗用。归属：这是用户显式触发的、需要知识广度的外部 LLM 查询，
+  /// 本就该走模型，不是被错塞外部的本地能力。未配置模型时抛 [StateError]。
+  Future<String> explainInContext(String term, String context) async {
+    final service = modelService();
+    if (service == null || state.currentModel.isEmpty) {
+      throw StateError('未配置模型');
+    }
+    final lang = state.preferredLanguage;
+    final prompt = '用$lang简洁解释下面这段话里"$term"指什么。'
+        '只解释它在该语境中的含义，必要时补一句背景；不要复述原文，不要展开无关内容。\n\n'
+        '语境：$context';
+    return service.chat([
+      {'role': 'user', 'content': prompt},
+    ], state.currentModel);
+  }
+
+  /// 收藏一个汇率对（[from]/[to]）到"常用"。已存在则不重复，新对追加到末尾。
+  void addExchangePair(String from, String to) {
+    final pair = '$from/$to';
+    if (state.exchangeFavoritePairs.contains(pair)) return;
+    state = state.copyWith(
+      exchangeFavoritePairs: [...state.exchangeFavoritePairs, pair],
+    );
+    _saveState();
+  }
+
+  /// 从"常用"移除一个汇率对（`FROM/TO`）。
+  void removeExchangePair(String pair) {
+    if (!state.exchangeFavoritePairs.contains(pair)) return;
+    state = state.copyWith(
+      exchangeFavoritePairs:
+          state.exchangeFavoritePairs.where((p) => p != pair).toList(),
+    );
     _saveState();
   }
 
@@ -542,10 +912,27 @@ class AppStateNotifier extends StateNotifier<AppState> {
     _saveState();
   }
 
-  static String _cloudDefaultHost(String provider) => switch (provider) {
-        'gemini' => 'https://generativelanguage.googleapis.com',
-        _ => 'https://api.anthropic.com',
-      };
+  /// 对话内一步切换云端 provider + 模型——单次 state 更新避免中间态（如
+  /// provider 已切、model 还是旧家的）被 UI/请求读到。provider 未变则只换
+  /// 模型，不重置用户自定义 host。
+  void switchCloudProviderAndModel(String provider, String model) {
+    if (state.serviceType != 'cloud' || state.cloudProvider != provider) {
+      state = state.copyWith(
+        serviceType: 'cloud',
+        cloudProvider: provider,
+        serviceHost: _cloudDefaultHost(provider),
+        currentModel: model,
+      );
+    } else {
+      state = state.copyWith(currentModel: model);
+    }
+    _saveState();
+  }
+
+  /// 从 [cloudProviderCatalog] 取该 provider 的默认 host——加新 provider 时
+  /// 只改 catalog，本函数不动。
+  static String _cloudDefaultHost(String provider) =>
+      cloudProviderSpec(provider).defaultHost;
 
   /// 本地推理默认 host。**按平台自适应**：
   /// - Android 模拟器里 `localhost` 指模拟器自身、连不到宿主机，需要 `10.0.2.2`。
@@ -575,6 +962,20 @@ class AppStateNotifier extends StateNotifier<AppState> {
     _saveState();
   }
 
+  /// 锁屏显示提醒详情开关——同步到 NotificationService（下次 schedule 生效，
+  /// 已注册的不回头改；产品决定）+ 持久化。
+  void updateShowReminderDetailsOnLockScreen(bool show) {
+    state = state.copyWith(showReminderDetailsOnLockScreen: show);
+    _ref.read(notificationServiceProvider).setShowDetailsOnLockScreen(show);
+    _saveState();
+  }
+
+  /// 显式请求通知权限——首次打开设置页 / 首次创建带提醒事件时调。
+  /// 返回 true 表示用户授权（或 OS 不需要授权）。
+  Future<bool> requestNotificationPermissions() {
+    return _ref.read(notificationServiceProvider).requestPermissions();
+  }
+
   void addRole(Role role) {
     state = state.copyWith(roles: [...state.roles, role]);
     _persistCustomRole(role);
@@ -602,9 +1003,37 @@ class AppStateNotifier extends StateNotifier<AppState> {
       host: state.serviceHost,
       localProvider: state.localProvider,
       cloudProvider: state.cloudProvider,
-      anthropicKey: _ref.read(anthropicApiKeyProvider),
-      geminiKey: _ref.read(geminiApiKeyProvider),
+      cloudApiKeys: _ref.read(cloudApiKeysProvider),
     );
+  }
+
+  /// 启动兜底：currentModel 为空时给当前 cloud provider 拉一次模型列表、取首个
+  /// 作默认，顺手写回缓存（切换面板秒开）。任何失败都静默——零配置体验不能因
+  /// 网络抖动卡死，留空由聊天页横幅提示。
+  Future<void> _bootstrapDefaultModel() async {
+    try {
+      final provider = state.cloudProvider;
+      final service = buildModelService(
+        type: 'cloud',
+        host: _cloudDefaultHost(provider),
+        localProvider: '',
+        cloudProvider: provider,
+        cloudApiKeys: _ref.read(cloudApiKeysProvider),
+      );
+      if (service == null) return; // key 缺失
+      final models = await service.fetchModels();
+      if (models.isEmpty) return;
+      // 期间用户可能已手动选过模型，别覆盖。
+      if (state.currentModel.isEmpty) {
+        state = state.copyWith(currentModel: models.first);
+        _saveState();
+      }
+      final updated = {..._ref.read(modelCacheProvider), provider: models};
+      _ref.read(modelCacheProvider.notifier).state = updated;
+      unawaited(persistModelCache(updated));
+    } catch (e) {
+      debugPrint('bootstrap default model failed: ${debugReason(e)}');
+    }
   }
 
   // ---- Chat entry points（委托给 MessagingController）----
@@ -621,38 +1050,76 @@ class AppStateNotifier extends StateNotifier<AppState> {
   }
 
   /// Append AI 最终回复并退出 loading 态——MessagingController 拿到模型回复后调。
-  void appendAiMessage(String content) {
+  /// [charts] 非空时把图表卡片挂在这条消息上，与文字同气泡渲染（图在上、文字在下）。
+  void appendAiMessage(String content, {List<String>? charts}) {
     final aiMsg = Message(
       id: _uuid.v4(),
       roleId: state.currentRoleId,
       content: content,
       isUser: false,
       timestamp: DateTime.now().millisecondsSinceEpoch,
+      chartData: encodeChartData(charts),
     );
     state = state.copyWith(
       messages: [...state.messages, aiMsg],
       isLoading: false,
+      clearToolStatus: true,
     );
     _persistMessage(aiMsg);
   }
 
-  /// agent loop 中间态气泡——不退出 loading，区别于 [appendAiMessage]。
-  void appendAiStreamPart(String content, {String kind = 'chat'}) {
-    final msg = Message(
+  /// 失败回复气泡——kind='error'。**不落库、不进 LLM 历史**（history 只取
+  /// kind=='chat'），仅当次会话展示，气泡下方带"重试"。退出 loading。
+  void appendAiError(String content) {
+    final errMsg = Message(
       id: _uuid.v4(),
       roleId: state.currentRoleId,
       content: content,
       isUser: false,
       timestamp: DateTime.now().millisecondsSinceEpoch,
-      kind: kind,
+      kind: 'error',
     );
-    state = state.copyWith(messages: [...state.messages, msg]);
-    _persistMessage(msg);
+    state = state.copyWith(
+      messages: [...state.messages, errMsg],
+      isLoading: false,
+      clearToolStatus: true,
+    );
+  }
+
+  /// 重试：抹掉当前私聊尾部的 error 气泡 + 重新进入 loading，再委托
+  /// MessagingController 用现有历史（末条仍是那条用户消息）重新生成。
+  Future<void> retryLastReply() {
+    removeTrailingErrorForRetry();
+    return _messaging.retryLastReply();
+  }
+
+  /// 移除当前私聊会话尾部连续的 error 气泡，并重新进入 loading 态。
+  /// 给 [MessagingController.retryLastReply] 用——error 气泡未落库，只在内存清。
+  void removeTrailingErrorForRetry() {
+    final errorIds = state.currentRoleMessages
+        .where((m) => m.kind == 'error')
+        .map((m) => m.id)
+        .toSet();
+    state = state.copyWith(
+      messages:
+          state.messages.where((m) => !errorIds.contains(m.id)).toList(),
+      isLoading: true,
+      clearToolStatus: true,
+    );
+  }
+
+  /// agent loop 执行工具期间的瞬时提示。[label] 为 null 时清空。
+  void setToolStatus(String? label) {
+    if (label == null) {
+      state = state.copyWith(clearToolStatus: true);
+    } else {
+      state = state.copyWith(toolStatus: label);
+    }
   }
 
   /// 退出 loading 但不追加消息（如：currentModel 为空时直接 return）。
   void setIdle() {
-    state = state.copyWith(isLoading: false);
+    state = state.copyWith(isLoading: false, clearToolStatus: true);
   }
 
   /// 组装某个 [role] 的 system prompt——私聊和群聊共用。
@@ -723,6 +1190,30 @@ class AppStateNotifier extends StateNotifier<AppState> {
       lines.add('- 当前位置：正在获取，暂未知');
     }
     lines.add('- "今天"、"明天"、"现在"、"附近"等相对表达，必须基于上述实时信息换算。');
+
+    // 明确告知模型哪些工具可用——避免它在 MCP 离线时编造"我帮你查到的"日程
+    // 等不存在的用户数据。
+    final toolNames = <String>[
+      ..._localTools.definitions().map((t) => t.name),
+      if (_mcp.isConnected) ..._mcp.tools.map((t) => t.name),
+    ];
+    if (toolNames.isEmpty) {
+      lines.add('- 当前**没有任何外部工具可用**（日历/邮件/搜索 等均不可调用）。');
+    } else {
+      lines.add('- 当前可调用工具：${toolNames.join('、')}');
+    }
+
+    // 反编造硬约束——这是必须存在的护栏，无论工具是否可用都加。
+    lines.add(
+      '\n【关于用户特定数据的硬约束】\n'
+      '用户的日程、邮件、记忆、联系人、账单等**用户私有数据**，你只能通过上面'
+      '列出的工具实际查询得到。**绝对禁止**以下行为：\n'
+      '- 在没有工具返回结果的情况下，编造任何具体日程/邮件/事件\n'
+      '- 用"可能"、"也许"、"猜测"等措辞包装编造的具体内容\n'
+      '- 假装你已经查过用户的数据\n'
+      '当用户问及这类数据而工具不可用或未调用时，**必须直接说明"我目前没有访问'
+      '<日历/邮件/...>的工具，无法查到具体内容"**，让用户决定下一步。',
+    );
     return lines.join('\n');
   }
 
@@ -744,79 +1235,62 @@ class AppStateNotifier extends StateNotifier<AppState> {
     _persistMemoriesClear();
   }
 
-  // ---- Calendar (via MCP) ----
+  // ---- Calendar（委托给 [CalendarRepository]） ----
 
-  Future<void> addCalendarEvent(CalendarEvent event) async {
-    await _mcp.createEvent(event);
-    await refreshCalendarCache();
+  Future<void> addCalendarEvent(CalendarEventDraft draft) async {
+    final repo = await _ref.read(calendarRepositoryProvider.future);
+    await repo.create(draft);
   }
 
-  Future<void> updateCalendarEvent(CalendarEvent updated) async {
-    await _mcp.updateEvent(updated);
-    // 时间/提醒可能被调整，需要重新进入提醒窗口。
-    _reminderScheduler.forget(updated.id);
-    await refreshCalendarCache();
+  Future<void> updateCalendarEvent(
+      String id, CalendarEventPatch patch) async {
+    final repo = await _ref.read(calendarRepositoryProvider.future);
+    await repo.update(id, patch);
   }
 
   Future<void> deleteCalendarEvent(String id) async {
-    await _mcp.deleteEvent(id);
-    _reminderScheduler.forget(id);
-    await refreshCalendarCache();
+    final repo = await _ref.read(calendarRepositoryProvider.future);
+    await repo.delete(id);
   }
 
-  Future<List<CalendarEvent>> getEventsForDay(DateTime day) async {
-    if (!_mcp.isConnected) return [];
-    final dateStr = fmtDate(day);
-    return _mcp.listEvents(startDate: dateStr, endDate: dateStr);
-  }
-
-  Future<List<CalendarEvent>> getEventsForRange(
-      DateTime start, DateTime end) async {
-    if (!_mcp.isConnected) return [];
-    return _mcp.listEvents(
-        startDate: fmtDate(start), endDate: fmtDate(end));
-  }
-
-  Future<void> refreshCalendarCache() async {
-    if (!_mcp.isConnected) {
-      state = state.copyWith(calendarEvents: const []);
-      return;
-    }
-    try {
-      final now = DateTime.now();
-      final today = DateTime(now.year, now.month, now.day);
-      final end = today.add(const Duration(days: 30));
-      final events = await getEventsForRange(today, end);
-      // 窗口外的事件清出去重表——避免长期累积。
-      final liveIds = events.map((e) => e.id).toSet();
-      for (final e in state.calendarEvents) {
-        if (!liveIds.contains(e.id)) _reminderScheduler.forget(e.id);
-      }
-      state = state.copyWith(calendarEvents: events);
-    } catch (e) {
-      debugPrint('refreshCalendarCache failed: ${debugReason(e)}');
-    }
-  }
-
+  /// 给 system prompt 拼"近 7 天日历"段——从本地实时流读，与 UI 一致。
+  /// 流尚未发出第一个值时回退到 listRange 兜底（首次启动场景）。
   Future<String> _buildCalendarContext() async {
-    if (!_mcp.isConnected) return '';
     final now = DateTime.now();
     final today = DateTime(now.year, now.month, now.day);
     final end = today.add(const Duration(days: 7));
-    final upcoming = await getEventsForRange(today, end);
-    if (upcoming.isEmpty) return '\n\n用户日历：近7天无日程。';
+
+    List<CalendarEvent> events;
+    try {
+      final cached = _ref.read(upcomingCalendarEventsProvider).valueOrNull;
+      if (cached != null) {
+        events = cached
+            .where((e) =>
+                !e.localStart.isBefore(today) && !e.localStart.isAfter(end))
+            .toList();
+      } else {
+        final repo = await _ref.read(calendarRepositoryProvider.future);
+        events = await repo.listRange(today.toUtc(), end.toUtc());
+      }
+    } catch (e) {
+      debugPrint('build calendar context failed: ${debugReason(e)}');
+      return '';
+    }
+
+    if (events.isEmpty) return '\n\n用户日历：近7天无日程。';
 
     final weekdays = ['周一', '周二', '周三', '周四', '周五', '周六', '周日'];
     final buf = StringBuffer('\n\n用户日历（近7天）：');
-    for (final e in upcoming) {
-      final dayLabel = e.date == today
+    for (final e in events) {
+      final localDate = e.localDate;
+      final dayLabel = localDate == today
           ? '今天'
-          : e.date == today.add(const Duration(days: 1))
+          : localDate == today.add(const Duration(days: 1))
               ? '明天'
-              : '${e.date.month}/${e.date.day}(${weekdays[e.date.weekday - 1]})';
-      final time = e.time ?? '全天';
+              : '${localDate.month}/${localDate.day}(${weekdays[localDate.weekday - 1]})';
+      final time = e.localTimeLabel ?? '全天';
       final reminder = e.reminderMinutes != null ? ' [${e.reminderText}提醒]' : '';
-      final desc = e.description != null ? ' - ${e.description}' : '';
+      final desc = e.description.isNotEmpty ? ' - ${e.description}' : '';
       buf.write('\n- $dayLabel $time ${e.title}$reminder$desc');
     }
     return buf.toString();
@@ -843,6 +1317,75 @@ class AppStateNotifier extends StateNotifier<AppState> {
     );
     _persistMessagesForRoleDelete(roleId);
     _clearConversationSummary(ConversationSummary.keyForRole(roleId));
+  }
+
+  /// 删除选中的若干条消息（多选删除）——删的是单/多条，不是整个会话。
+  /// 同步抹掉内存 + drift；附件副本按"库里再无引用"清理。删后重算受影响
+  /// 会话的摘要（聊天列表的末条预览），空会话则清掉摘要。
+  Future<void> deleteMessages(Set<String> ids) async {
+    if (ids.isEmpty) return;
+    final removed =
+        state.messages.where((m) => ids.contains(m.id)).toList();
+    if (removed.isEmpty) return;
+    // 受影响的会话 scope key——删完要重算其摘要。
+    final affectedRoleIds = removed
+        .where((m) => m.groupId == null)
+        .map((m) => m.roleId)
+        .toSet();
+    final affectedGroupIds =
+        removed.map((m) => m.groupId).whereType<String>().toSet();
+
+    state = state.copyWith(
+      messages: state.messages.where((m) => !ids.contains(m.id)).toList(),
+    );
+
+    final db = await _db;
+    final attachmentPaths =
+        removed.map((m) => m.attachmentPath).whereType<String>().toList();
+    for (final id in ids) {
+      await db.deleteMessage(id);
+    }
+    await _cleanupOrphanAttachments(db, attachmentPaths);
+
+    for (final roleId in affectedRoleIds) {
+      await _recomputeRoleSummary(db, roleId);
+    }
+    for (final groupId in affectedGroupIds) {
+      await _recomputeGroupSummary(db, groupId);
+    }
+  }
+
+  /// 删消息后重算某私聊会话的摘要：取库里现存末条；空会话则清掉摘要。
+  Future<void> _recomputeRoleSummary(PikppoDatabase db, String roleId) async {
+    final rows = await db.messagesForRoleLatest(roleId, limit: 1);
+    final key = ConversationSummary.keyForRole(roleId);
+    if (rows.isEmpty) {
+      _clearConversationSummary(key);
+      return;
+    }
+    _setConversationSummary(key, rows.last.timestamp, rows.last.content);
+  }
+
+  Future<void> _recomputeGroupSummary(
+      PikppoDatabase db, String groupId) async {
+    final rows = await db.messagesForGroupLatest(groupId, limit: 1);
+    final key = ConversationSummary.keyForGroup(groupId);
+    if (rows.isEmpty) {
+      _clearConversationSummary(key);
+      return;
+    }
+    _setConversationSummary(key, rows.last.timestamp, rows.last.content);
+  }
+
+  void _setConversationSummary(String key, int timestamp, String content) {
+    final next = Map<String, ConversationSummary>.from(
+        state.conversationSummaries)
+      ..[key] = ConversationSummary(
+        scopeKey: key,
+        lastTimestamp: timestamp,
+        lastContent: content,
+      );
+    state = state.copyWith(conversationSummaries: next);
   }
 
   // ---- Groups ----
@@ -898,8 +1441,9 @@ class AppStateNotifier extends StateNotifier<AppState> {
     _persistMessage(msg);
   }
 
-  /// 群聊里某个角色回复。
-  void appendGroupAiMessage(String groupId, String roleId, String content) {
+  /// 群聊里某个角色回复。[charts] 非空时把图表卡片挂在这条消息上同气泡渲染。
+  void appendGroupAiMessage(String groupId, String roleId, String content,
+      {List<String>? charts}) {
     final aiMsg = Message(
       id: _uuid.v4(),
       roleId: roleId,
@@ -907,14 +1451,42 @@ class AppStateNotifier extends StateNotifier<AppState> {
       isUser: false,
       timestamp: DateTime.now().millisecondsSinceEpoch,
       groupId: groupId,
+      chartData: encodeChartData(charts),
     );
     state = state.copyWith(messages: [...state.messages, aiMsg]);
     _persistMessage(aiMsg);
   }
 
+  /// 群聊里某个角色回复失败的 error 气泡——kind='error'，带发言人 roleId。
+  /// **不落库、不进 LLM 历史**，仅当次会话展示，气泡下方"重试"重跑该角色。
+  /// 不动 loading（多角色循环里逐个调，loading 由 [clearGroupLoading] 统一收尾）。
+  void appendGroupAiError(String groupId, String roleId, String content) {
+    final errMsg = Message(
+      id: _uuid.v4(),
+      roleId: roleId,
+      content: content,
+      isUser: false,
+      timestamp: DateTime.now().millisecondsSinceEpoch,
+      groupId: groupId,
+      kind: 'error',
+    );
+    state = state.copyWith(messages: [...state.messages, errMsg]);
+  }
+
   /// 群聊全部角色回复完后退出 loading。
   void clearGroupLoading() {
     state = state.copyWith(clearLoadingGroupId: true);
+  }
+
+  /// 重试群聊里某条失败回复：抹掉那条 error 气泡 + 进入 loading，再委托
+  /// MessagingController 只重跑该角色（其余已成功的回复不动）。
+  Future<void> retryGroupReply(
+      String groupId, String roleId, String errorMsgId) {
+    state = state.copyWith(
+      messages: state.messages.where((m) => m.id != errorMsgId).toList(),
+      loadingGroupId: groupId,
+    );
+    return _messaging.retryGroupRoleReply(groupId, roleId);
   }
 
   // ---- Memory auto-summary hooks ----

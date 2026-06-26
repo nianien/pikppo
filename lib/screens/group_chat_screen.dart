@@ -4,9 +4,11 @@ import '../models/group.dart';
 import '../models/role.dart';
 import '../providers/app_state_provider.dart';
 import '../utils/color_hex.dart';
+import '../widgets/chat_input_buttons.dart';
+import '../widgets/chat_message_list.dart';
 import '../widgets/info_banner.dart';
-import '../widgets/message_bubble.dart';
-import 'settings_screen.dart';
+import '../widgets/model_switcher_sheet.dart';
+import 'chat_selection_mixin.dart';
 
 class GroupChatScreen extends ConsumerStatefulWidget {
   final Group group;
@@ -17,7 +19,8 @@ class GroupChatScreen extends ConsumerStatefulWidget {
   ConsumerState<GroupChatScreen> createState() => _GroupChatScreenState();
 }
 
-class _GroupChatScreenState extends ConsumerState<GroupChatScreen> {
+class _GroupChatScreenState extends ConsumerState<GroupChatScreen>
+    with ChatSelectionMixin {
   final _controller = TextEditingController();
   final _scrollController = ScrollController();
   final _focusNode = FocusNode();
@@ -159,7 +162,11 @@ class _GroupChatScreenState extends ConsumerState<GroupChatScreen> {
   @override
   Widget build(BuildContext context) {
     final appState = ref.watch(appStateProvider);
-    final messages = appState.groupMessages(widget.group.id);
+    // 与私聊一致：剔除旧版本残留的 tool_status 气泡（群聊不跑 agent，正常不会有）。
+    final messages = appState
+        .groupMessages(widget.group.id)
+        .where((m) => m.kind != 'tool_status')
+        .toList();
     final isLoading = appState.loadingGroupId == widget.group.id;
     final theme = Theme.of(context);
 
@@ -180,32 +187,40 @@ class _GroupChatScreenState extends ConsumerState<GroupChatScreen> {
     );
 
     return Scaffold(
-      appBar: AppBar(
+      appBar: selectionMode
+          ? buildSelectionAppBar(context)
+          : AppBar(
         title: Row(
           children: [
             _GroupAvatar(roles: roles, size: 36),
             const SizedBox(width: 10),
             Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(group.name,
-                      overflow: TextOverflow.ellipsis,
-                      maxLines: 1,
-                      style: theme.textTheme.titleMedium
-                          ?.copyWith(fontWeight: FontWeight.w600)),
-                  Text(
-                    appState.currentModel.isNotEmpty
-                        ? '${roles.length}人 · ${appState.currentModel}'
-                        : '${roles.length}人 · 未选择模型',
-                    overflow: TextOverflow.ellipsis,
-                    maxLines: 1,
-                    style: theme.textTheme.labelSmall?.copyWith(
-                        color: appState.currentModel.isNotEmpty
-                            ? theme.colorScheme.onSurface.withValues(alpha: 0.4)
-                            : theme.colorScheme.error),
-                  ),
-                ],
+              child: InkWell(
+                onTap: () => showModelSwitcherSheet(context, ref),
+                borderRadius: BorderRadius.circular(8),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(group.name,
+                        overflow: TextOverflow.ellipsis,
+                        maxLines: 1,
+                        style: theme.textTheme.titleMedium
+                            ?.copyWith(fontWeight: FontWeight.w600)),
+                    Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text('${roles.length}人',
+                            style: theme.textTheme.labelSmall?.copyWith(
+                                color: theme.colorScheme.onSurface
+                                    .withValues(alpha: 0.4))),
+                        const SizedBox(width: 6),
+                        Flexible(
+                            child:
+                                ModelChip(model: appState.currentModel)),
+                      ],
+                    ),
+                  ],
+                ),
               ),
             ),
           ],
@@ -220,53 +235,35 @@ class _GroupChatScreenState extends ConsumerState<GroupChatScreen> {
       body: Column(
         children: [
           if (appState.currentModel.isEmpty)
-            InfoBanner(
-              message: '请先在设置中配置并选择模型',
-              actionLabel: '去设置',
-              onAction: () => Navigator.push(
-                context,
-                MaterialPageRoute(
-                    builder: (_) => const SettingsScreen()),
-              ),
+            const InfoBanner(
+              message: '模型加载中…若长时间无响应，请检查网络后重启应用',
+              icon: Icons.cloud_off_outlined,
             ),
           Expanded(
-            child: messages.isEmpty
-                ? _buildEmptyState(theme, roles)
-                : ListView.builder(
-                    controller: _scrollController,
-                    padding: const EdgeInsets.only(top: 8, bottom: 8),
-                    itemCount: messages.length + (isLoading ? 1 : 0),
-                    itemBuilder: (context, index) {
-                      if (index == messages.length && isLoading) {
-                        return _GroupThinkingBubble(roles: roles);
-                      }
-                      final msg = messages[index];
-                      final prev = index == 0 ? null : messages[index - 1];
-                      final showSeparator =
-                          MessageTimeSeparator.shouldInsertBefore(msg, prev);
-                      // 用户气泡 role 不参与渲染——取群里任一成员占位即可；
-                      // 角色气泡按发言人 roleId 解析。
-                      final bubbleRole = msg.isUser
-                          ? (roles.isNotEmpty ? roles.first : null)
-                          : appState.getRoleById(msg.roleId);
-                      if (bubbleRole == null) {
-                        return const SizedBox.shrink();
-                      }
-                      final bubble = MessageBubble(
-                        message: msg,
-                        role: bubbleRole,
-                      );
-                      if (!showSeparator) return bubble;
-                      return Column(
-                        children: [
-                          MessageTimeSeparator(timestamp: msg.timestamp),
-                          bubble,
-                        ],
-                      );
-                    },
-                  ),
+            child: ChatMessageList(
+              scrollController: _scrollController,
+              messages: messages,
+              isLoading: isLoading,
+              thinkingBubble: _GroupThinkingBubble(
+                roles: roles,
+                statusText: appState.toolStatus,
+              ),
+              // 用户气泡取群里任一成员占位；角色气泡按发言人 roleId 解析。
+              roleForMessage: (msg) => msg.isUser
+                  ? (roles.isNotEmpty ? roles.first : null)
+                  : appState.getRoleById(msg.roleId),
+              emptyState: _buildEmptyState(theme, roles),
+              selectionMode: selectionMode,
+              selectedIds: selectedIds,
+              onToggleSelect: toggleSelect,
+              onEnterSelection: (seed) => enterSelection(seed.id),
+              onRetry: (m) => ref
+                  .read(appStateProvider.notifier)
+                  .retryGroupReply(m.groupId!, m.roleId, m.id),
+            ),
           ),
-          _buildInputBar(context, appState, isLoading, theme, roles),
+          if (!selectionMode)
+            _buildInputBar(context, appState, isLoading, theme, roles),
         ],
       ),
     );
@@ -349,6 +346,7 @@ class _GroupChatScreenState extends ConsumerState<GroupChatScreen> {
           ),
           child: Row(
             children: [
+              VoiceInputButton(controller: _controller),
               Expanded(
                 child: TextField(
                   controller: _controller,
@@ -369,7 +367,7 @@ class _GroupChatScreenState extends ConsumerState<GroupChatScreen> {
                   ),
                 ),
               ),
-              const SizedBox(width: 8),
+              AttachmentButton(groupId: widget.group.id),
               isLoading
                   ? const SizedBox(
                       width: 40,
@@ -505,7 +503,11 @@ class _GroupAvatar extends StatelessWidget {
 class _GroupThinkingBubble extends StatefulWidget {
   final List<Role> roles;
 
-  const _GroupThinkingBubble({required this.roles});
+  /// agent loop 工具执行期间的瞬时状态（如"正在调用工具：货币换算"）。
+  /// null = 普通圆点动画。
+  final String? statusText;
+
+  const _GroupThinkingBubble({required this.roles, this.statusText});
 
   @override
   State<_GroupThinkingBubble> createState() => _GroupThinkingBubbleState();
@@ -561,7 +563,30 @@ class _GroupThinkingBubbleState extends State<_GroupThinkingBubble>
                 bottomRight: Radius.circular(16),
               ),
             ),
-            child: AnimatedBuilder(
+            child: widget.statusText != null
+                ? Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      SizedBox(
+                        width: 14,
+                        height: 14,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          color: theme.colorScheme.onSurface
+                              .withValues(alpha: 0.5),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Text(
+                        widget.statusText!,
+                        style: theme.textTheme.bodyMedium?.copyWith(
+                          color: theme.colorScheme.onSurface
+                              .withValues(alpha: 0.7),
+                        ),
+                      ),
+                    ],
+                  )
+                : AnimatedBuilder(
               animation: _controller,
               builder: (context, _) {
                 final dots =

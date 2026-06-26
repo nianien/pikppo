@@ -2,18 +2,18 @@ import 'package:flutter/material.dart';
 import '../theme/design_tokens.dart';
 
 /// 信息提示条——内容区顶端的轻量横幅，引导用户处理某种状态（如未配置模型）。
-/// 不阻塞内容、可带一个行动按钮。
+/// 不阻塞内容、可带一个行动按钮（[actionLabel] / [onAction] 同时给才显示）。
 class InfoBanner extends StatelessWidget {
   final String message;
-  final String actionLabel;
-  final VoidCallback onAction;
+  final String? actionLabel;
+  final VoidCallback? onAction;
   final IconData icon;
 
   const InfoBanner({
     super.key,
     required this.message,
-    required this.actionLabel,
-    required this.onAction,
+    this.actionLabel,
+    this.onAction,
     this.icon = Icons.info_outline,
   });
 
@@ -21,6 +21,7 @@ class InfoBanner extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
+    final hasAction = actionLabel != null && onAction != null;
     return Container(
       margin: const EdgeInsets.fromLTRB(
           AppSpacing.md, AppSpacing.xs, AppSpacing.md, 0),
@@ -41,15 +42,16 @@ class InfoBanner extends StatelessWidget {
                   ?.copyWith(color: scheme.onTertiaryContainer),
             ),
           ),
-          TextButton(
-            onPressed: onAction,
-            style: TextButton.styleFrom(
-              foregroundColor: scheme.onTertiaryContainer,
-              padding: const EdgeInsets.symmetric(horizontal: 12),
-              minimumSize: const Size(0, 32),
+          if (hasAction)
+            TextButton(
+              onPressed: onAction,
+              style: TextButton.styleFrom(
+                foregroundColor: scheme.onTertiaryContainer,
+                padding: const EdgeInsets.symmetric(horizontal: 12),
+                minimumSize: const Size(0, 32),
+              ),
+              child: Text(actionLabel!),
             ),
-            child: Text(actionLabel),
-          ),
         ],
       ),
     );
