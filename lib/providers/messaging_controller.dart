@@ -147,13 +147,14 @@ class MessagingController {
   Future<void> _generateReply({required String roleId, Group? group}) async {
     final groupId = group?.id;
     try {
+      // "无可用模型服务"是**持续状态**，按反馈漏斗（见 CLAUDE.md）走顶部
+      // InfoBanner，这里静默中止即可——不灌气泡、也不弹 toast。
       if (_notifier.currentState.currentModel.isEmpty) {
         _abortQuietly(groupId);
         return;
       }
       final service = _notifier.modelService();
       if (service == null) {
-        // 顶部常驻 InfoBanner 已提示"未配置模型 + 去设置"，不再灌气泡污染对话流。
         _abortQuietly(groupId);
         return;
       }

@@ -156,6 +156,70 @@ class SyncStateRows extends Table {
   String get tableName => 'sync_state';
 }
 
+/// 知识卡片——用户从对话里收藏下来的释义/译文，本地学习笔记本（local-first，
+/// 不走 MCP）。`term` 词条/原文、`content` 释义/译文、`source` 来源（存而不显）、
+/// `importance` 重要程度（0/1，收藏）。话题标签经 `card_tags` 关联到 `tags` 实体表，
+/// 不内联本表。同步元数据 updatedAt / deleted 按 data-architecture 惯例维护。
+@DataClassName('KnowledgeCardRow')
+class KnowledgeCardRows extends Table {
+  TextColumn get id => text()();
+  TextColumn get term => text()();
+  TextColumn get content => text()();
+  // v9：来源分类（释义 / 翻译），存储但 UI 不展示（B 方案），留作未来过滤/统计。
+  TextColumn get source => text().withDefault(const Constant(''))();
+  // v10：重要程度。0=普通，>0=收藏（v1 仅 0/1，列存 int 预留分级）。标签迁到 card_tags。
+  IntColumn get importance => integer().withDefault(const Constant(0))();
+  IntColumn get createdAt => integer()();
+
+  DateTimeColumn get updatedAt =>
+      dateTime().withDefault(Constant(DateTime.fromMillisecondsSinceEpoch(0)))();
+  BoolColumn get deleted => boolean().withDefault(const Constant(false))();
+
+  @override
+  Set<Column> get primaryKey => {id};
+
+  @override
+  String get tableName => 'knowledge_cards';
+}
+
+/// 标签实体表——主键 [id]（uuid），[name] 唯一。[usageCount] 是被多少张卡引用的
+/// **去规范化缓存**（弱一致：随关联增删 ±1，容忍偶发漂移，仅用于候选排序）；
+/// 引用关系的真相在 [CardTagRows]。孤儿标签（无任何 card_tags 引用）按实表判定后删除。
+@DataClassName('TagRow')
+class TagRows extends Table {
+  TextColumn get id => text()();
+  TextColumn get name => text()();
+  IntColumn get usageCount => integer().withDefault(const Constant(0))();
+  DateTimeColumn get updatedAt =>
+      dateTime().withDefault(Constant(DateTime.fromMillisecondsSinceEpoch(0)))();
+
+  @override
+  Set<Column> get primaryKey => {id};
+
+  @override
+  List<Set<Column>> get uniqueKeys => [
+        {name}
+      ];
+
+  @override
+  String get tableName => 'tags';
+}
+
+/// 卡片↔标签关联表（多对多真相）。主键 (cardId, tagId)；tagId 建索引，支撑按标签
+/// 过滤 `WHERE tag_id=?` 与引用判定。v1 单机：解除关联/删卡走硬删，Phase 2 同步
+/// 再议关联墓碑。
+@DataClassName('CardTagRow')
+class CardTagRows extends Table {
+  TextColumn get cardId => text()();
+  TextColumn get tagId => text()();
+
+  @override
+  Set<Column> get primaryKey => {cardId, tagId};
+
+  @override
+  String get tableName => 'card_tags';
+}
+
 @DriftDatabase(tables: [
   MessageRows,
   MemoryRows,
@@ -163,12 +227,15 @@ class SyncStateRows extends Table {
   CustomRoleRows,
   CalendarEventRows,
   SyncStateRows,
+  KnowledgeCardRows,
+  TagRows,
+  CardTagRows,
 ])
 class PikppoDatabase extends _$PikppoDatabase {
   PikppoDatabase(super.executor);
 
   @override
-  int get schemaVersion => 6;
+  int get schemaVersion => 10;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -189,6 +256,9 @@ class PikppoDatabase extends _$PikppoDatabase {
           // 同步推送热路径：扫描 dirty 行。
           await customStatement(
               'CREATE INDEX IF NOT EXISTS cal_dirty ON calendar_events(dirty) WHERE dirty = 1');
+          // 按标签过滤热路径：card_tags 上按 tag_id 查所属卡片。
+          await customStatement(
+              'CREATE INDEX IF NOT EXISTS card_tags_tag ON card_tags(tag_id)');
         },
         onUpgrade: (m, from, to) async {
           if (from < 2) {
@@ -227,6 +297,38 @@ class PikppoDatabase extends _$PikppoDatabase {
           if (from < 6) {
             // v6：messages 补 chart_data（富图表卡片 JSON），存量行全 NULL。
             await m.addColumn(messageRows, messageRows.chartData);
+          }
+          if (from < 7) {
+            // v7：新增 knowledge_cards 表（用户收藏的释义/译文知识卡片）。
+            await m.createTable(knowledgeCardRows);
+          }
+          if (from < 8) {
+            // v8：新增 tags 注册表（知识卡片标签词表，软约束收敛用）。派生自
+            // 卡片 tagsJson，存量卡片的标签在下次保存时增量回填，无需迁移期 backfill。
+            await m.createTable(tagRows);
+          }
+          if (from < 9) {
+            // v9：knowledge_cards 补 source 列（来源分类，从 tags 拆出）。存量行
+            // source = ''（未分类）；卡片是未上线新功能、无正式数据，不做数据反解。
+            await m.addColumn(knowledgeCardRows, knowledgeCardRows.source);
+          }
+          if (from < 10) {
+            // v10：标签关联规范化——tags 改为带 id 的实体表（name 唯一）、新增
+            // card_tags 关联表；knowledge_cards 加 importance（收藏）、去掉内联
+            // tagsJson（标签迁到 card_tags）。**纯结构调整**：未上线、无正式数据，
+            // 旧 tags 计数与卡片内联标签不做反解搬运，留给产品"整理标签"自然重建。
+            await m.deleteTable('tags');
+            await m.createTable(tagRows);
+            await m.createTable(cardTagRows);
+            await customStatement(
+                'CREATE INDEX IF NOT EXISTS card_tags_tag ON card_tags(tag_id)');
+            await m.alterTable(TableMigration(
+              knowledgeCardRows,
+              newColumns: [knowledgeCardRows.importance],
+              columnTransformer: {
+                knowledgeCardRows.importance: const Constant(0),
+              },
+            ));
           }
         },
       );

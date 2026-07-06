@@ -1,9 +1,11 @@
 import 'dart:async';
+import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:uuid/uuid.dart';
 import '../models/app_state.dart';
+import '../models/knowledge_card.dart';
 import '../models/role.dart';
 import '../models/message.dart';
 import '../models/memory.dart';
@@ -26,6 +28,7 @@ import '../utils/time_format.dart';
 import '../utils/user_facing_error.dart';
 import 'calendar_repository_provider.dart';
 import 'database_provider.dart';
+import 'knowledge_repository_provider.dart';
 import 'memory_repository_provider.dart';
 import 'memory_summarizer.dart';
 import 'messaging_controller.dart';
@@ -833,35 +836,145 @@ class AppStateNotifier extends StateNotifier<AppState> {
   /// 用当前模型把 [text] 翻译成用户首选语言（本身已是该语言则译成英文）。
   /// **一次性调用，不进对话历史**——供消息选择菜单"翻译"的弹窗用。
   /// 未配置模型时抛 [StateError]（调用方在弹窗里转成友好提示）。
-  Future<String> translateText(String text) async {
+  /// 翻译选中/整条文本——返回译文 + 推荐标签（供"保存到知识卡片"用）。
+  Future<LlmCardResult> translateText(String text) async {
     final service = modelService();
     if (service == null || state.currentModel.isEmpty) {
       throw StateError('未配置模型');
     }
     final lang = state.preferredLanguage;
-    final prompt = '把下面的文本翻译成$lang；如果它本身就是$lang，则翻译成英文。'
-        '只输出译文，不要解释、不要加引号或任何额外说明：\n\n$text';
-    return service.chat([
+    final hint = await _tagReuseHint(text);
+    final prompt = '把下面的文本翻译成$lang；如果它本身就是$lang，则翻译成英文。\n'
+        '只输出 JSON，不要任何额外说明：{"text":"译文","tags":["主题/领域标签"]}\n'
+        'tags 给 1-3 个简短标签（如 英语、商务、技术），无合适标签给空数组。\n'
+        '$hint'
+        '\n原文：$text';
+    final raw = await service.chat([
       {'role': 'user', 'content': prompt},
     ], state.currentModel);
+    return _parseCardResult(raw);
   }
 
   /// 用当前模型解释 [term] 在 [context]（它所在的一两句）里的含义。**一次性调用，
   /// 只带词 + 最小必要语境，不拖整段对话历史、不进对话历史**——供消息选择菜单
   /// "解释"的弹窗用。归属：这是用户显式触发的、需要知识广度的外部 LLM 查询，
   /// 本就该走模型，不是被错塞外部的本地能力。未配置模型时抛 [StateError]。
-  Future<String> explainInContext(String term, String context) async {
+  /// 解释 [term] 在 [context] 里的含义——返回释义 + 推荐标签。
+  Future<LlmCardResult> explainInContext(String term, String context) async {
     final service = modelService();
     if (service == null || state.currentModel.isEmpty) {
       throw StateError('未配置模型');
     }
     final lang = state.preferredLanguage;
-    final prompt = '用$lang简洁解释下面这段话里"$term"指什么。'
-        '只解释它在该语境中的含义，必要时补一句背景；不要复述原文，不要展开无关内容。\n\n'
-        '语境：$context';
-    return service.chat([
+    final hint = await _tagReuseHint('$term $context');
+    final prompt = '用$lang简洁解释下面这段话里"$term"指什么——只解释它在该语境中的'
+        '含义，必要时补一句背景，不要复述原文、不要展开无关内容。\n'
+        '只输出 JSON，不要任何额外说明：{"text":"释义正文","tags":["主题/领域标签"]}\n'
+        'tags 给 1-3 个简短标签（如 金融、英语、编程），无合适标签给空数组。\n'
+        '$hint'
+        '\n语境：$context';
+    final raw = await service.chat([
       {'role': 'user', 'content': prompt},
     ], state.currentModel);
+    return _parseCardResult(raw);
+  }
+
+  /// 一键优化某张知识卡片——把释义改写得更清晰精炼，同时重新推荐标签。返回供
+  /// UI 预览，用户确认后再 [updateKnowledgeCard] 落库。
+  Future<LlmCardResult> optimizeKnowledgeCard(KnowledgeCard card) async {
+    final service = modelService();
+    if (service == null || state.currentModel.isEmpty) {
+      throw StateError('未配置模型');
+    }
+    final lang = state.preferredLanguage;
+    final hint = await _tagReuseHint('${card.term} ${card.content}');
+    final prompt = '下面是一张知识卡片的词条与释义。用$lang把释义改写得更清晰、准确、'
+        '精炼（保持原意，去冗余、补必要背景），并重新推荐标签。\n'
+        '只输出 JSON：{"text":"优化后的释义","tags":["标签"]}\n'
+        'tags 给 1-3 个简短主题/领域标签。\n'
+        '$hint'
+        '\n词条：${card.term}\n释义：${card.content}';
+    final raw = await service.chat([
+      {'role': 'user', 'content': prompt},
+    ], state.currentModel);
+    return _parseCardResult(raw);
+  }
+
+  /// 候选标签软约束行——取已有标签里与当前文本相关的（[KnowledgeRepository.
+  /// candidateTags]：字面命中 + 频次兜底），拼成提示让 LLM 优先复用、收敛词表。
+  /// 空词表返回空串（不污染 prompt）。纯本地，无额外请求。
+  Future<String> _tagReuseHint(String text) async {
+    try {
+      final repo = await _ref.read(knowledgeRepositoryProvider.future);
+      final candidates = await repo.candidateTags(text);
+      if (candidates.isEmpty) return '';
+      return '已有标签（尽量复用下列，确无合适再新建）：${candidates.join('、')}\n';
+    } catch (_) {
+      // 标签收敛是锦上添花——取不到候选就退化成无约束推荐，绝不阻断释义/翻译。
+      return '';
+    }
+  }
+
+  /// 宽容解析 LLM 的 `{"text":..,"tags":[..]}` 返回——剥代码围栏、取首个 JSON 对象；
+  /// 解析失败则整段当正文、无标签（绝不让一次格式抖动毁掉结果）。
+  LlmCardResult _parseCardResult(String raw) {
+    final s = raw.trim();
+    final start = s.indexOf('{');
+    final end = s.lastIndexOf('}');
+    if (start >= 0 && end > start) {
+      try {
+        final m = jsonDecode(s.substring(start, end + 1)) as Map;
+        final text =
+            (m['text'] ?? m['explanation'] ?? m['translation'] ?? '')
+                .toString()
+                .trim();
+        final tags = (m['tags'] as List?)
+                ?.map((e) => e.toString().trim())
+                .where((t) => t.isNotEmpty)
+                .take(5)
+                .toList() ??
+            const <String>[];
+        if (text.isNotEmpty) return LlmCardResult(text, tags);
+      } catch (_) {}
+    }
+    return LlmCardResult(s, const []);
+  }
+
+  // ---- 知识卡片（委托 [KnowledgeRepository]）----
+
+  /// 保存一张知识卡片（释义/翻译弹窗的"保存到知识卡片"）。id/createdAt 在此生成。
+  /// [source] 来源分类（释义/翻译），[tags] 仅话题标签（用户勾选的 LLM 推荐）。
+  Future<void> saveKnowledgeCard({
+    required String term,
+    required String content,
+    required String source,
+    required List<String> tags,
+  }) async {
+    final repo = await _ref.read(knowledgeRepositoryProvider.future);
+    await repo.add(KnowledgeCard(
+      id: _uuid.v4(),
+      term: term.trim(),
+      content: content.trim(),
+      source: source,
+      tags: tags,
+      createdAt: DateTime.now().millisecondsSinceEpoch,
+    ));
+  }
+
+  Future<void> updateKnowledgeCard(KnowledgeCard card) async {
+    final repo = await _ref.read(knowledgeRepositoryProvider.future);
+    await repo.update(card);
+  }
+
+  Future<void> deleteKnowledgeCard(String id) async {
+    final repo = await _ref.read(knowledgeRepositoryProvider.future);
+    await repo.delete(id);
+  }
+
+  /// 设置卡片重要程度（收藏切换：0/1）——只动 importance，不碰标签关联。
+  Future<void> setKnowledgeCardImportance(String id, int importance) async {
+    final repo = await _ref.read(knowledgeRepositoryProvider.future);
+    await repo.setImportance(id, importance);
   }
 
   /// 收藏一个汇率对（[from]/[to]）到"常用"。已存在则不重复，新对追加到末尾。

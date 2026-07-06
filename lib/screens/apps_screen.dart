@@ -5,6 +5,7 @@ import '../providers/app_state_provider.dart';
 import '../providers/calendar_repository_provider.dart';
 import '../theme/design_tokens.dart';
 import 'exchange_screen.dart';
+import 'knowledge_cards_screen.dart';
 
 /// 应用入口页。每个卡片对应一个可独立打开的子页面。日历是 Phase 1 的本地化
 /// 域，未来加 notes / inbox / etc. 时往 `_apps` 追加即可。
@@ -25,6 +26,13 @@ class AppsScreen extends ConsumerWidget {
       color: const Color(0xFF10B981),
       category: '工具',
       builder: (_) => const ExchangeScreen(),
+    ),
+    _AppItem(
+      icon: Icons.bookmarks_rounded,
+      name: '知识卡片',
+      color: const Color(0xFF8B5CF6),
+      category: '效率',
+      builder: (_) => const KnowledgeCardsScreen(),
     ),
   ];
 

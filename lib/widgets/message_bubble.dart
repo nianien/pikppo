@@ -1,7 +1,9 @@
 import 'dart:convert';
 import 'dart:math' as math;
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:gpt_markdown/gpt_markdown.dart';
 import '../models/message.dart';
 import '../models/role.dart';
 import '../services/tts_service.dart';
@@ -153,7 +155,7 @@ class MessageBubble extends ConsumerWidget {
           if (message.content.isNotEmpty)
             Padding(
               padding: const EdgeInsets.only(top: 6),
-              child: Text(
+              child: GptMarkdown(
                 message.content,
                 style: theme.textTheme.bodyMedium?.copyWith(
                   color: isUser
@@ -166,8 +168,8 @@ class MessageBubble extends ConsumerWidget {
         ],
       )
           : selectionMode
-      // 多选模式下用普通 Text——SelectableText 会抢走点按手势导致勾选失效。
-          ? Text(
+      // 多选模式下不可选——SelectionArea 会抢走点按手势导致勾选失效，用静态渲染。
+          ? GptMarkdown(
         message.content,
         style: theme.textTheme.bodyMedium?.copyWith(
           color: isUser
@@ -734,6 +736,9 @@ class _SelectableMessageTextState
   // 选区收起时复位，下次长按重新默认全选。
   bool _didAutoSelectAll = false;
 
+  // 当前选中的**渲染后纯文本**（markdown 标记已剥离）——SelectionArea 回调给出。
+  String _selectedText = '';
+
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
@@ -744,75 +749,71 @@ class _SelectableMessageTextState
       selectionColor: isUser
           ? scheme.onPrimary.withValues(alpha: 0.45)
           : scheme.primary.withValues(alpha: 0.30),
-      child: SelectableText(
-        message.content,
-        style: widget.baseStyle,
-        onSelectionChanged: (selection, cause) {
+      child: SelectionArea(
+        onSelectionChanged: (content) {
+          final text = content?.plainText ?? '';
+          _selectedText = text;
           // 选区收起（点别处）→ 复位，下次长按重新默认全选。
-          if (selection.isCollapsed) _didAutoSelectAll = false;
+          if (text.isEmpty) _didAutoSelectAll = false;
         },
-        contextMenuBuilder: (context, editableTextState) {
-          final value = editableTextState.textEditingValue;
-          final text = value.text;
-          final sel = value.selection;
-          final selectedText = sel.textInside(text);
-          final isAll =
-              text.isNotEmpty && sel.start == 0 && sel.end == text.length;
+        contextMenuBuilder: (context, selectableRegionState) {
+          final selectedText = _selectedText;
           // 默认整条选中：本次会话**仅第一次**把长按选中的那个词扩成全选；之后用户
           // 拖手柄缩小不再回弹（contextMenuBuilder 每次选区变化都重建，无标志位就会
-          // 反复强制全选 = bug）。已是全选态也置位，覆盖"单词=整条"的短消息。
-          if (isAll) {
-            _didAutoSelectAll = true;
-          } else if (!sel.isCollapsed && !_didAutoSelectAll) {
+          // 反复强制全选 = bug）。
+          if (!_didAutoSelectAll && selectedText.isNotEmpty) {
             _didAutoSelectAll = true;
             WidgetsBinding.instance.addPostFrameCallback((_) {
-              if (editableTextState.mounted) {
-                editableTextState.selectAll(SelectionChangedCause.toolbar);
+              if (mounted) {
+                selectableRegionState.selectAll(SelectionChangedCause.toolbar);
               }
             });
           }
           // 完全自建菜单（像微信）：固定中文标签 + 图标，不取系统注入项。
           final actions = <_ToolbarAction>[
             _ToolbarAction('复制', Icons.copy_rounded, () {
-              editableTextState.copySelection(SelectionChangedCause.toolbar);
-              editableTextState.hideToolbar();
+              if (selectedText.isNotEmpty) {
+                Clipboard.setData(ClipboardData(text: selectedText));
+              }
+              selectableRegionState.hideToolbar();
             }),
             _ToolbarAction('全选', Icons.select_all_rounded, () {
-              editableTextState.selectAll(SelectionChangedCause.toolbar);
+              selectableRegionState.selectAll(SelectionChangedCause.toolbar);
             }),
             _ToolbarAction('朗读', Icons.volume_up_rounded, () {
-              editableTextState.hideToolbar();
+              selectableRegionState.hideToolbar();
               TtsService.instance.speak(
                   selectedText.isNotEmpty ? selectedText : message.content);
             }),
             if (selectedText.isNotEmpty)
               _ToolbarAction('释义', Icons.menu_book_rounded, () {
-                editableTextState.hideToolbar();
+                selectableRegionState.hideToolbar();
                 showExplainDialog(context, ref, selectedText, message.content);
               }),
             _ToolbarAction('翻译', Icons.translate_rounded, () {
-              editableTextState.hideToolbar();
+              selectableRegionState.hideToolbar();
               showTranslateDialog(context, ref, message.content);
             }),
             _ToolbarAction('转发', Icons.forward_rounded, () {
-              editableTextState.hideToolbar();
+              selectableRegionState.hideToolbar();
               showForwardPicker(context, ref, message);
             }),
             _ToolbarAction('分享', Icons.ios_share_rounded, () {
-              editableTextState.hideToolbar();
+              selectableRegionState.hideToolbar();
               shareText(message.content);
             }),
             if (widget.onEnterSelection != null)
               _ToolbarAction('多选', Icons.checklist_rounded, () {
-                editableTextState.hideToolbar();
+                selectableRegionState.hideToolbar();
                 widget.onEnterSelection!(message);
               }),
           ];
           return _SelectionToolbar(
-            anchors: editableTextState.contextMenuAnchors,
+            anchors: selectableRegionState.contextMenuAnchors,
             actions: actions,
           );
         },
+        child: GptMarkdown(message.content, style: widget.baseStyle),
       ),
     );
   }

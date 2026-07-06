@@ -175,9 +175,17 @@ class _ChatDetailScreenState extends ConsumerState<ChatDetailScreen>
       ),
       body: Column(
         children: [
+          // 反馈漏斗（见 CLAUDE.md）：「无可用模型服务」是持续状态 → 顶部 Banner。
+          // 未选模型（加载中）与「选了模型但拿不到可用服务（无凭据/网关）」都覆盖，
+          // 否则发送会静默无反应。
           if (appState.currentModel.isEmpty)
             const InfoBanner(
               message: '模型加载中…若长时间无响应，请检查网络后重启应用',
+              icon: Icons.cloud_off_outlined,
+            )
+          else if (ref.read(appStateProvider.notifier).modelService() == null)
+            const InfoBanner(
+              message: '模型不可用，请检查网络后重试',
               icon: Icons.cloud_off_outlined,
             ),
           Expanded(

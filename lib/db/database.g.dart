@@ -2968,6 +2968,1029 @@ class SyncStateRowsCompanion extends UpdateCompanion<SyncStateRow> {
   }
 }
 
+class $KnowledgeCardRowsTable extends KnowledgeCardRows
+    with TableInfo<$KnowledgeCardRowsTable, KnowledgeCardRow> {
+  @override
+  final GeneratedDatabase attachedDatabase;
+  final String? _alias;
+  $KnowledgeCardRowsTable(this.attachedDatabase, [this._alias]);
+  static const VerificationMeta _idMeta = const VerificationMeta('id');
+  @override
+  late final GeneratedColumn<String> id = GeneratedColumn<String>(
+    'id',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _termMeta = const VerificationMeta('term');
+  @override
+  late final GeneratedColumn<String> term = GeneratedColumn<String>(
+    'term',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _contentMeta = const VerificationMeta(
+    'content',
+  );
+  @override
+  late final GeneratedColumn<String> content = GeneratedColumn<String>(
+    'content',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _sourceMeta = const VerificationMeta('source');
+  @override
+  late final GeneratedColumn<String> source = GeneratedColumn<String>(
+    'source',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    defaultValue: const Constant(''),
+  );
+  static const VerificationMeta _importanceMeta = const VerificationMeta(
+    'importance',
+  );
+  @override
+  late final GeneratedColumn<int> importance = GeneratedColumn<int>(
+    'importance',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: false,
+    defaultValue: const Constant(0),
+  );
+  static const VerificationMeta _createdAtMeta = const VerificationMeta(
+    'createdAt',
+  );
+  @override
+  late final GeneratedColumn<int> createdAt = GeneratedColumn<int>(
+    'created_at',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _updatedAtMeta = const VerificationMeta(
+    'updatedAt',
+  );
+  @override
+  late final GeneratedColumn<DateTime> updatedAt = GeneratedColumn<DateTime>(
+    'updated_at',
+    aliasedName,
+    false,
+    type: DriftSqlType.dateTime,
+    requiredDuringInsert: false,
+    defaultValue: Constant(DateTime.fromMillisecondsSinceEpoch(0)),
+  );
+  static const VerificationMeta _deletedMeta = const VerificationMeta(
+    'deleted',
+  );
+  @override
+  late final GeneratedColumn<bool> deleted = GeneratedColumn<bool>(
+    'deleted',
+    aliasedName,
+    false,
+    type: DriftSqlType.bool,
+    requiredDuringInsert: false,
+    defaultConstraints: GeneratedColumn.constraintIsAlways(
+      'CHECK ("deleted" IN (0, 1))',
+    ),
+    defaultValue: const Constant(false),
+  );
+  @override
+  List<GeneratedColumn> get $columns => [
+    id,
+    term,
+    content,
+    source,
+    importance,
+    createdAt,
+    updatedAt,
+    deleted,
+  ];
+  @override
+  String get aliasedName => _alias ?? actualTableName;
+  @override
+  String get actualTableName => $name;
+  static const String $name = 'knowledge_cards';
+  @override
+  VerificationContext validateIntegrity(
+    Insertable<KnowledgeCardRow> instance, {
+    bool isInserting = false,
+  }) {
+    final context = VerificationContext();
+    final data = instance.toColumns(true);
+    if (data.containsKey('id')) {
+      context.handle(_idMeta, id.isAcceptableOrUnknown(data['id']!, _idMeta));
+    } else if (isInserting) {
+      context.missing(_idMeta);
+    }
+    if (data.containsKey('term')) {
+      context.handle(
+        _termMeta,
+        term.isAcceptableOrUnknown(data['term']!, _termMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_termMeta);
+    }
+    if (data.containsKey('content')) {
+      context.handle(
+        _contentMeta,
+        content.isAcceptableOrUnknown(data['content']!, _contentMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_contentMeta);
+    }
+    if (data.containsKey('source')) {
+      context.handle(
+        _sourceMeta,
+        source.isAcceptableOrUnknown(data['source']!, _sourceMeta),
+      );
+    }
+    if (data.containsKey('importance')) {
+      context.handle(
+        _importanceMeta,
+        importance.isAcceptableOrUnknown(data['importance']!, _importanceMeta),
+      );
+    }
+    if (data.containsKey('created_at')) {
+      context.handle(
+        _createdAtMeta,
+        createdAt.isAcceptableOrUnknown(data['created_at']!, _createdAtMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_createdAtMeta);
+    }
+    if (data.containsKey('updated_at')) {
+      context.handle(
+        _updatedAtMeta,
+        updatedAt.isAcceptableOrUnknown(data['updated_at']!, _updatedAtMeta),
+      );
+    }
+    if (data.containsKey('deleted')) {
+      context.handle(
+        _deletedMeta,
+        deleted.isAcceptableOrUnknown(data['deleted']!, _deletedMeta),
+      );
+    }
+    return context;
+  }
+
+  @override
+  Set<GeneratedColumn> get $primaryKey => {id};
+  @override
+  KnowledgeCardRow map(Map<String, dynamic> data, {String? tablePrefix}) {
+    final effectivePrefix = tablePrefix != null ? '$tablePrefix.' : '';
+    return KnowledgeCardRow(
+      id: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}id'],
+      )!,
+      term: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}term'],
+      )!,
+      content: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}content'],
+      )!,
+      source: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}source'],
+      )!,
+      importance: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}importance'],
+      )!,
+      createdAt: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}created_at'],
+      )!,
+      updatedAt: attachedDatabase.typeMapping.read(
+        DriftSqlType.dateTime,
+        data['${effectivePrefix}updated_at'],
+      )!,
+      deleted: attachedDatabase.typeMapping.read(
+        DriftSqlType.bool,
+        data['${effectivePrefix}deleted'],
+      )!,
+    );
+  }
+
+  @override
+  $KnowledgeCardRowsTable createAlias(String alias) {
+    return $KnowledgeCardRowsTable(attachedDatabase, alias);
+  }
+}
+
+class KnowledgeCardRow extends DataClass
+    implements Insertable<KnowledgeCardRow> {
+  final String id;
+  final String term;
+  final String content;
+  final String source;
+  final int importance;
+  final int createdAt;
+  final DateTime updatedAt;
+  final bool deleted;
+  const KnowledgeCardRow({
+    required this.id,
+    required this.term,
+    required this.content,
+    required this.source,
+    required this.importance,
+    required this.createdAt,
+    required this.updatedAt,
+    required this.deleted,
+  });
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    map['id'] = Variable<String>(id);
+    map['term'] = Variable<String>(term);
+    map['content'] = Variable<String>(content);
+    map['source'] = Variable<String>(source);
+    map['importance'] = Variable<int>(importance);
+    map['created_at'] = Variable<int>(createdAt);
+    map['updated_at'] = Variable<DateTime>(updatedAt);
+    map['deleted'] = Variable<bool>(deleted);
+    return map;
+  }
+
+  KnowledgeCardRowsCompanion toCompanion(bool nullToAbsent) {
+    return KnowledgeCardRowsCompanion(
+      id: Value(id),
+      term: Value(term),
+      content: Value(content),
+      source: Value(source),
+      importance: Value(importance),
+      createdAt: Value(createdAt),
+      updatedAt: Value(updatedAt),
+      deleted: Value(deleted),
+    );
+  }
+
+  factory KnowledgeCardRow.fromJson(
+    Map<String, dynamic> json, {
+    ValueSerializer? serializer,
+  }) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return KnowledgeCardRow(
+      id: serializer.fromJson<String>(json['id']),
+      term: serializer.fromJson<String>(json['term']),
+      content: serializer.fromJson<String>(json['content']),
+      source: serializer.fromJson<String>(json['source']),
+      importance: serializer.fromJson<int>(json['importance']),
+      createdAt: serializer.fromJson<int>(json['createdAt']),
+      updatedAt: serializer.fromJson<DateTime>(json['updatedAt']),
+      deleted: serializer.fromJson<bool>(json['deleted']),
+    );
+  }
+  @override
+  Map<String, dynamic> toJson({ValueSerializer? serializer}) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return <String, dynamic>{
+      'id': serializer.toJson<String>(id),
+      'term': serializer.toJson<String>(term),
+      'content': serializer.toJson<String>(content),
+      'source': serializer.toJson<String>(source),
+      'importance': serializer.toJson<int>(importance),
+      'createdAt': serializer.toJson<int>(createdAt),
+      'updatedAt': serializer.toJson<DateTime>(updatedAt),
+      'deleted': serializer.toJson<bool>(deleted),
+    };
+  }
+
+  KnowledgeCardRow copyWith({
+    String? id,
+    String? term,
+    String? content,
+    String? source,
+    int? importance,
+    int? createdAt,
+    DateTime? updatedAt,
+    bool? deleted,
+  }) => KnowledgeCardRow(
+    id: id ?? this.id,
+    term: term ?? this.term,
+    content: content ?? this.content,
+    source: source ?? this.source,
+    importance: importance ?? this.importance,
+    createdAt: createdAt ?? this.createdAt,
+    updatedAt: updatedAt ?? this.updatedAt,
+    deleted: deleted ?? this.deleted,
+  );
+  KnowledgeCardRow copyWithCompanion(KnowledgeCardRowsCompanion data) {
+    return KnowledgeCardRow(
+      id: data.id.present ? data.id.value : this.id,
+      term: data.term.present ? data.term.value : this.term,
+      content: data.content.present ? data.content.value : this.content,
+      source: data.source.present ? data.source.value : this.source,
+      importance: data.importance.present
+          ? data.importance.value
+          : this.importance,
+      createdAt: data.createdAt.present ? data.createdAt.value : this.createdAt,
+      updatedAt: data.updatedAt.present ? data.updatedAt.value : this.updatedAt,
+      deleted: data.deleted.present ? data.deleted.value : this.deleted,
+    );
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('KnowledgeCardRow(')
+          ..write('id: $id, ')
+          ..write('term: $term, ')
+          ..write('content: $content, ')
+          ..write('source: $source, ')
+          ..write('importance: $importance, ')
+          ..write('createdAt: $createdAt, ')
+          ..write('updatedAt: $updatedAt, ')
+          ..write('deleted: $deleted')
+          ..write(')'))
+        .toString();
+  }
+
+  @override
+  int get hashCode => Object.hash(
+    id,
+    term,
+    content,
+    source,
+    importance,
+    createdAt,
+    updatedAt,
+    deleted,
+  );
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      (other is KnowledgeCardRow &&
+          other.id == this.id &&
+          other.term == this.term &&
+          other.content == this.content &&
+          other.source == this.source &&
+          other.importance == this.importance &&
+          other.createdAt == this.createdAt &&
+          other.updatedAt == this.updatedAt &&
+          other.deleted == this.deleted);
+}
+
+class KnowledgeCardRowsCompanion extends UpdateCompanion<KnowledgeCardRow> {
+  final Value<String> id;
+  final Value<String> term;
+  final Value<String> content;
+  final Value<String> source;
+  final Value<int> importance;
+  final Value<int> createdAt;
+  final Value<DateTime> updatedAt;
+  final Value<bool> deleted;
+  final Value<int> rowid;
+  const KnowledgeCardRowsCompanion({
+    this.id = const Value.absent(),
+    this.term = const Value.absent(),
+    this.content = const Value.absent(),
+    this.source = const Value.absent(),
+    this.importance = const Value.absent(),
+    this.createdAt = const Value.absent(),
+    this.updatedAt = const Value.absent(),
+    this.deleted = const Value.absent(),
+    this.rowid = const Value.absent(),
+  });
+  KnowledgeCardRowsCompanion.insert({
+    required String id,
+    required String term,
+    required String content,
+    this.source = const Value.absent(),
+    this.importance = const Value.absent(),
+    required int createdAt,
+    this.updatedAt = const Value.absent(),
+    this.deleted = const Value.absent(),
+    this.rowid = const Value.absent(),
+  }) : id = Value(id),
+       term = Value(term),
+       content = Value(content),
+       createdAt = Value(createdAt);
+  static Insertable<KnowledgeCardRow> custom({
+    Expression<String>? id,
+    Expression<String>? term,
+    Expression<String>? content,
+    Expression<String>? source,
+    Expression<int>? importance,
+    Expression<int>? createdAt,
+    Expression<DateTime>? updatedAt,
+    Expression<bool>? deleted,
+    Expression<int>? rowid,
+  }) {
+    return RawValuesInsertable({
+      if (id != null) 'id': id,
+      if (term != null) 'term': term,
+      if (content != null) 'content': content,
+      if (source != null) 'source': source,
+      if (importance != null) 'importance': importance,
+      if (createdAt != null) 'created_at': createdAt,
+      if (updatedAt != null) 'updated_at': updatedAt,
+      if (deleted != null) 'deleted': deleted,
+      if (rowid != null) 'rowid': rowid,
+    });
+  }
+
+  KnowledgeCardRowsCompanion copyWith({
+    Value<String>? id,
+    Value<String>? term,
+    Value<String>? content,
+    Value<String>? source,
+    Value<int>? importance,
+    Value<int>? createdAt,
+    Value<DateTime>? updatedAt,
+    Value<bool>? deleted,
+    Value<int>? rowid,
+  }) {
+    return KnowledgeCardRowsCompanion(
+      id: id ?? this.id,
+      term: term ?? this.term,
+      content: content ?? this.content,
+      source: source ?? this.source,
+      importance: importance ?? this.importance,
+      createdAt: createdAt ?? this.createdAt,
+      updatedAt: updatedAt ?? this.updatedAt,
+      deleted: deleted ?? this.deleted,
+      rowid: rowid ?? this.rowid,
+    );
+  }
+
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    if (id.present) {
+      map['id'] = Variable<String>(id.value);
+    }
+    if (term.present) {
+      map['term'] = Variable<String>(term.value);
+    }
+    if (content.present) {
+      map['content'] = Variable<String>(content.value);
+    }
+    if (source.present) {
+      map['source'] = Variable<String>(source.value);
+    }
+    if (importance.present) {
+      map['importance'] = Variable<int>(importance.value);
+    }
+    if (createdAt.present) {
+      map['created_at'] = Variable<int>(createdAt.value);
+    }
+    if (updatedAt.present) {
+      map['updated_at'] = Variable<DateTime>(updatedAt.value);
+    }
+    if (deleted.present) {
+      map['deleted'] = Variable<bool>(deleted.value);
+    }
+    if (rowid.present) {
+      map['rowid'] = Variable<int>(rowid.value);
+    }
+    return map;
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('KnowledgeCardRowsCompanion(')
+          ..write('id: $id, ')
+          ..write('term: $term, ')
+          ..write('content: $content, ')
+          ..write('source: $source, ')
+          ..write('importance: $importance, ')
+          ..write('createdAt: $createdAt, ')
+          ..write('updatedAt: $updatedAt, ')
+          ..write('deleted: $deleted, ')
+          ..write('rowid: $rowid')
+          ..write(')'))
+        .toString();
+  }
+}
+
+class $TagRowsTable extends TagRows with TableInfo<$TagRowsTable, TagRow> {
+  @override
+  final GeneratedDatabase attachedDatabase;
+  final String? _alias;
+  $TagRowsTable(this.attachedDatabase, [this._alias]);
+  static const VerificationMeta _idMeta = const VerificationMeta('id');
+  @override
+  late final GeneratedColumn<String> id = GeneratedColumn<String>(
+    'id',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _nameMeta = const VerificationMeta('name');
+  @override
+  late final GeneratedColumn<String> name = GeneratedColumn<String>(
+    'name',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _usageCountMeta = const VerificationMeta(
+    'usageCount',
+  );
+  @override
+  late final GeneratedColumn<int> usageCount = GeneratedColumn<int>(
+    'usage_count',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: false,
+    defaultValue: const Constant(0),
+  );
+  static const VerificationMeta _updatedAtMeta = const VerificationMeta(
+    'updatedAt',
+  );
+  @override
+  late final GeneratedColumn<DateTime> updatedAt = GeneratedColumn<DateTime>(
+    'updated_at',
+    aliasedName,
+    false,
+    type: DriftSqlType.dateTime,
+    requiredDuringInsert: false,
+    defaultValue: Constant(DateTime.fromMillisecondsSinceEpoch(0)),
+  );
+  @override
+  List<GeneratedColumn> get $columns => [id, name, usageCount, updatedAt];
+  @override
+  String get aliasedName => _alias ?? actualTableName;
+  @override
+  String get actualTableName => $name;
+  static const String $name = 'tags';
+  @override
+  VerificationContext validateIntegrity(
+    Insertable<TagRow> instance, {
+    bool isInserting = false,
+  }) {
+    final context = VerificationContext();
+    final data = instance.toColumns(true);
+    if (data.containsKey('id')) {
+      context.handle(_idMeta, id.isAcceptableOrUnknown(data['id']!, _idMeta));
+    } else if (isInserting) {
+      context.missing(_idMeta);
+    }
+    if (data.containsKey('name')) {
+      context.handle(
+        _nameMeta,
+        name.isAcceptableOrUnknown(data['name']!, _nameMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_nameMeta);
+    }
+    if (data.containsKey('usage_count')) {
+      context.handle(
+        _usageCountMeta,
+        usageCount.isAcceptableOrUnknown(data['usage_count']!, _usageCountMeta),
+      );
+    }
+    if (data.containsKey('updated_at')) {
+      context.handle(
+        _updatedAtMeta,
+        updatedAt.isAcceptableOrUnknown(data['updated_at']!, _updatedAtMeta),
+      );
+    }
+    return context;
+  }
+
+  @override
+  Set<GeneratedColumn> get $primaryKey => {id};
+  @override
+  List<Set<GeneratedColumn>> get uniqueKeys => [
+    {name},
+  ];
+  @override
+  TagRow map(Map<String, dynamic> data, {String? tablePrefix}) {
+    final effectivePrefix = tablePrefix != null ? '$tablePrefix.' : '';
+    return TagRow(
+      id: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}id'],
+      )!,
+      name: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}name'],
+      )!,
+      usageCount: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}usage_count'],
+      )!,
+      updatedAt: attachedDatabase.typeMapping.read(
+        DriftSqlType.dateTime,
+        data['${effectivePrefix}updated_at'],
+      )!,
+    );
+  }
+
+  @override
+  $TagRowsTable createAlias(String alias) {
+    return $TagRowsTable(attachedDatabase, alias);
+  }
+}
+
+class TagRow extends DataClass implements Insertable<TagRow> {
+  final String id;
+  final String name;
+  final int usageCount;
+  final DateTime updatedAt;
+  const TagRow({
+    required this.id,
+    required this.name,
+    required this.usageCount,
+    required this.updatedAt,
+  });
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    map['id'] = Variable<String>(id);
+    map['name'] = Variable<String>(name);
+    map['usage_count'] = Variable<int>(usageCount);
+    map['updated_at'] = Variable<DateTime>(updatedAt);
+    return map;
+  }
+
+  TagRowsCompanion toCompanion(bool nullToAbsent) {
+    return TagRowsCompanion(
+      id: Value(id),
+      name: Value(name),
+      usageCount: Value(usageCount),
+      updatedAt: Value(updatedAt),
+    );
+  }
+
+  factory TagRow.fromJson(
+    Map<String, dynamic> json, {
+    ValueSerializer? serializer,
+  }) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return TagRow(
+      id: serializer.fromJson<String>(json['id']),
+      name: serializer.fromJson<String>(json['name']),
+      usageCount: serializer.fromJson<int>(json['usageCount']),
+      updatedAt: serializer.fromJson<DateTime>(json['updatedAt']),
+    );
+  }
+  @override
+  Map<String, dynamic> toJson({ValueSerializer? serializer}) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return <String, dynamic>{
+      'id': serializer.toJson<String>(id),
+      'name': serializer.toJson<String>(name),
+      'usageCount': serializer.toJson<int>(usageCount),
+      'updatedAt': serializer.toJson<DateTime>(updatedAt),
+    };
+  }
+
+  TagRow copyWith({
+    String? id,
+    String? name,
+    int? usageCount,
+    DateTime? updatedAt,
+  }) => TagRow(
+    id: id ?? this.id,
+    name: name ?? this.name,
+    usageCount: usageCount ?? this.usageCount,
+    updatedAt: updatedAt ?? this.updatedAt,
+  );
+  TagRow copyWithCompanion(TagRowsCompanion data) {
+    return TagRow(
+      id: data.id.present ? data.id.value : this.id,
+      name: data.name.present ? data.name.value : this.name,
+      usageCount: data.usageCount.present
+          ? data.usageCount.value
+          : this.usageCount,
+      updatedAt: data.updatedAt.present ? data.updatedAt.value : this.updatedAt,
+    );
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('TagRow(')
+          ..write('id: $id, ')
+          ..write('name: $name, ')
+          ..write('usageCount: $usageCount, ')
+          ..write('updatedAt: $updatedAt')
+          ..write(')'))
+        .toString();
+  }
+
+  @override
+  int get hashCode => Object.hash(id, name, usageCount, updatedAt);
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      (other is TagRow &&
+          other.id == this.id &&
+          other.name == this.name &&
+          other.usageCount == this.usageCount &&
+          other.updatedAt == this.updatedAt);
+}
+
+class TagRowsCompanion extends UpdateCompanion<TagRow> {
+  final Value<String> id;
+  final Value<String> name;
+  final Value<int> usageCount;
+  final Value<DateTime> updatedAt;
+  final Value<int> rowid;
+  const TagRowsCompanion({
+    this.id = const Value.absent(),
+    this.name = const Value.absent(),
+    this.usageCount = const Value.absent(),
+    this.updatedAt = const Value.absent(),
+    this.rowid = const Value.absent(),
+  });
+  TagRowsCompanion.insert({
+    required String id,
+    required String name,
+    this.usageCount = const Value.absent(),
+    this.updatedAt = const Value.absent(),
+    this.rowid = const Value.absent(),
+  }) : id = Value(id),
+       name = Value(name);
+  static Insertable<TagRow> custom({
+    Expression<String>? id,
+    Expression<String>? name,
+    Expression<int>? usageCount,
+    Expression<DateTime>? updatedAt,
+    Expression<int>? rowid,
+  }) {
+    return RawValuesInsertable({
+      if (id != null) 'id': id,
+      if (name != null) 'name': name,
+      if (usageCount != null) 'usage_count': usageCount,
+      if (updatedAt != null) 'updated_at': updatedAt,
+      if (rowid != null) 'rowid': rowid,
+    });
+  }
+
+  TagRowsCompanion copyWith({
+    Value<String>? id,
+    Value<String>? name,
+    Value<int>? usageCount,
+    Value<DateTime>? updatedAt,
+    Value<int>? rowid,
+  }) {
+    return TagRowsCompanion(
+      id: id ?? this.id,
+      name: name ?? this.name,
+      usageCount: usageCount ?? this.usageCount,
+      updatedAt: updatedAt ?? this.updatedAt,
+      rowid: rowid ?? this.rowid,
+    );
+  }
+
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    if (id.present) {
+      map['id'] = Variable<String>(id.value);
+    }
+    if (name.present) {
+      map['name'] = Variable<String>(name.value);
+    }
+    if (usageCount.present) {
+      map['usage_count'] = Variable<int>(usageCount.value);
+    }
+    if (updatedAt.present) {
+      map['updated_at'] = Variable<DateTime>(updatedAt.value);
+    }
+    if (rowid.present) {
+      map['rowid'] = Variable<int>(rowid.value);
+    }
+    return map;
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('TagRowsCompanion(')
+          ..write('id: $id, ')
+          ..write('name: $name, ')
+          ..write('usageCount: $usageCount, ')
+          ..write('updatedAt: $updatedAt, ')
+          ..write('rowid: $rowid')
+          ..write(')'))
+        .toString();
+  }
+}
+
+class $CardTagRowsTable extends CardTagRows
+    with TableInfo<$CardTagRowsTable, CardTagRow> {
+  @override
+  final GeneratedDatabase attachedDatabase;
+  final String? _alias;
+  $CardTagRowsTable(this.attachedDatabase, [this._alias]);
+  static const VerificationMeta _cardIdMeta = const VerificationMeta('cardId');
+  @override
+  late final GeneratedColumn<String> cardId = GeneratedColumn<String>(
+    'card_id',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _tagIdMeta = const VerificationMeta('tagId');
+  @override
+  late final GeneratedColumn<String> tagId = GeneratedColumn<String>(
+    'tag_id',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  @override
+  List<GeneratedColumn> get $columns => [cardId, tagId];
+  @override
+  String get aliasedName => _alias ?? actualTableName;
+  @override
+  String get actualTableName => $name;
+  static const String $name = 'card_tags';
+  @override
+  VerificationContext validateIntegrity(
+    Insertable<CardTagRow> instance, {
+    bool isInserting = false,
+  }) {
+    final context = VerificationContext();
+    final data = instance.toColumns(true);
+    if (data.containsKey('card_id')) {
+      context.handle(
+        _cardIdMeta,
+        cardId.isAcceptableOrUnknown(data['card_id']!, _cardIdMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_cardIdMeta);
+    }
+    if (data.containsKey('tag_id')) {
+      context.handle(
+        _tagIdMeta,
+        tagId.isAcceptableOrUnknown(data['tag_id']!, _tagIdMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_tagIdMeta);
+    }
+    return context;
+  }
+
+  @override
+  Set<GeneratedColumn> get $primaryKey => {cardId, tagId};
+  @override
+  CardTagRow map(Map<String, dynamic> data, {String? tablePrefix}) {
+    final effectivePrefix = tablePrefix != null ? '$tablePrefix.' : '';
+    return CardTagRow(
+      cardId: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}card_id'],
+      )!,
+      tagId: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}tag_id'],
+      )!,
+    );
+  }
+
+  @override
+  $CardTagRowsTable createAlias(String alias) {
+    return $CardTagRowsTable(attachedDatabase, alias);
+  }
+}
+
+class CardTagRow extends DataClass implements Insertable<CardTagRow> {
+  final String cardId;
+  final String tagId;
+  const CardTagRow({required this.cardId, required this.tagId});
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    map['card_id'] = Variable<String>(cardId);
+    map['tag_id'] = Variable<String>(tagId);
+    return map;
+  }
+
+  CardTagRowsCompanion toCompanion(bool nullToAbsent) {
+    return CardTagRowsCompanion(cardId: Value(cardId), tagId: Value(tagId));
+  }
+
+  factory CardTagRow.fromJson(
+    Map<String, dynamic> json, {
+    ValueSerializer? serializer,
+  }) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return CardTagRow(
+      cardId: serializer.fromJson<String>(json['cardId']),
+      tagId: serializer.fromJson<String>(json['tagId']),
+    );
+  }
+  @override
+  Map<String, dynamic> toJson({ValueSerializer? serializer}) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return <String, dynamic>{
+      'cardId': serializer.toJson<String>(cardId),
+      'tagId': serializer.toJson<String>(tagId),
+    };
+  }
+
+  CardTagRow copyWith({String? cardId, String? tagId}) =>
+      CardTagRow(cardId: cardId ?? this.cardId, tagId: tagId ?? this.tagId);
+  CardTagRow copyWithCompanion(CardTagRowsCompanion data) {
+    return CardTagRow(
+      cardId: data.cardId.present ? data.cardId.value : this.cardId,
+      tagId: data.tagId.present ? data.tagId.value : this.tagId,
+    );
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('CardTagRow(')
+          ..write('cardId: $cardId, ')
+          ..write('tagId: $tagId')
+          ..write(')'))
+        .toString();
+  }
+
+  @override
+  int get hashCode => Object.hash(cardId, tagId);
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      (other is CardTagRow &&
+          other.cardId == this.cardId &&
+          other.tagId == this.tagId);
+}
+
+class CardTagRowsCompanion extends UpdateCompanion<CardTagRow> {
+  final Value<String> cardId;
+  final Value<String> tagId;
+  final Value<int> rowid;
+  const CardTagRowsCompanion({
+    this.cardId = const Value.absent(),
+    this.tagId = const Value.absent(),
+    this.rowid = const Value.absent(),
+  });
+  CardTagRowsCompanion.insert({
+    required String cardId,
+    required String tagId,
+    this.rowid = const Value.absent(),
+  }) : cardId = Value(cardId),
+       tagId = Value(tagId);
+  static Insertable<CardTagRow> custom({
+    Expression<String>? cardId,
+    Expression<String>? tagId,
+    Expression<int>? rowid,
+  }) {
+    return RawValuesInsertable({
+      if (cardId != null) 'card_id': cardId,
+      if (tagId != null) 'tag_id': tagId,
+      if (rowid != null) 'rowid': rowid,
+    });
+  }
+
+  CardTagRowsCompanion copyWith({
+    Value<String>? cardId,
+    Value<String>? tagId,
+    Value<int>? rowid,
+  }) {
+    return CardTagRowsCompanion(
+      cardId: cardId ?? this.cardId,
+      tagId: tagId ?? this.tagId,
+      rowid: rowid ?? this.rowid,
+    );
+  }
+
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    if (cardId.present) {
+      map['card_id'] = Variable<String>(cardId.value);
+    }
+    if (tagId.present) {
+      map['tag_id'] = Variable<String>(tagId.value);
+    }
+    if (rowid.present) {
+      map['rowid'] = Variable<int>(rowid.value);
+    }
+    return map;
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('CardTagRowsCompanion(')
+          ..write('cardId: $cardId, ')
+          ..write('tagId: $tagId, ')
+          ..write('rowid: $rowid')
+          ..write(')'))
+        .toString();
+  }
+}
+
 abstract class _$PikppoDatabase extends GeneratedDatabase {
   _$PikppoDatabase(QueryExecutor e) : super(e);
   $PikppoDatabaseManager get managers => $PikppoDatabaseManager(this);
@@ -2978,6 +4001,10 @@ abstract class _$PikppoDatabase extends GeneratedDatabase {
   late final $CalendarEventRowsTable calendarEventRows =
       $CalendarEventRowsTable(this);
   late final $SyncStateRowsTable syncStateRows = $SyncStateRowsTable(this);
+  late final $KnowledgeCardRowsTable knowledgeCardRows =
+      $KnowledgeCardRowsTable(this);
+  late final $TagRowsTable tagRows = $TagRowsTable(this);
+  late final $CardTagRowsTable cardTagRows = $CardTagRowsTable(this);
   @override
   Iterable<TableInfo<Table, Object?>> get allTables =>
       allSchemaEntities.whereType<TableInfo<Table, Object?>>();
@@ -2989,6 +4016,9 @@ abstract class _$PikppoDatabase extends GeneratedDatabase {
     customRoleRows,
     calendarEventRows,
     syncStateRows,
+    knowledgeCardRows,
+    tagRows,
+    cardTagRows,
   ];
 }
 
@@ -4519,6 +5549,598 @@ typedef $$SyncStateRowsTableProcessedTableManager =
       SyncStateRow,
       PrefetchHooks Function()
     >;
+typedef $$KnowledgeCardRowsTableCreateCompanionBuilder =
+    KnowledgeCardRowsCompanion Function({
+      required String id,
+      required String term,
+      required String content,
+      Value<String> source,
+      Value<int> importance,
+      required int createdAt,
+      Value<DateTime> updatedAt,
+      Value<bool> deleted,
+      Value<int> rowid,
+    });
+typedef $$KnowledgeCardRowsTableUpdateCompanionBuilder =
+    KnowledgeCardRowsCompanion Function({
+      Value<String> id,
+      Value<String> term,
+      Value<String> content,
+      Value<String> source,
+      Value<int> importance,
+      Value<int> createdAt,
+      Value<DateTime> updatedAt,
+      Value<bool> deleted,
+      Value<int> rowid,
+    });
+
+class $$KnowledgeCardRowsTableFilterComposer
+    extends Composer<_$PikppoDatabase, $KnowledgeCardRowsTable> {
+  $$KnowledgeCardRowsTableFilterComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnFilters<String> get id => $composableBuilder(
+    column: $table.id,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get term => $composableBuilder(
+    column: $table.term,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get content => $composableBuilder(
+    column: $table.content,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get source => $composableBuilder(
+    column: $table.source,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get importance => $composableBuilder(
+    column: $table.importance,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get createdAt => $composableBuilder(
+    column: $table.createdAt,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<DateTime> get updatedAt => $composableBuilder(
+    column: $table.updatedAt,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<bool> get deleted => $composableBuilder(
+    column: $table.deleted,
+    builder: (column) => ColumnFilters(column),
+  );
+}
+
+class $$KnowledgeCardRowsTableOrderingComposer
+    extends Composer<_$PikppoDatabase, $KnowledgeCardRowsTable> {
+  $$KnowledgeCardRowsTableOrderingComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnOrderings<String> get id => $composableBuilder(
+    column: $table.id,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get term => $composableBuilder(
+    column: $table.term,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get content => $composableBuilder(
+    column: $table.content,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get source => $composableBuilder(
+    column: $table.source,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<int> get importance => $composableBuilder(
+    column: $table.importance,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<int> get createdAt => $composableBuilder(
+    column: $table.createdAt,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<DateTime> get updatedAt => $composableBuilder(
+    column: $table.updatedAt,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<bool> get deleted => $composableBuilder(
+    column: $table.deleted,
+    builder: (column) => ColumnOrderings(column),
+  );
+}
+
+class $$KnowledgeCardRowsTableAnnotationComposer
+    extends Composer<_$PikppoDatabase, $KnowledgeCardRowsTable> {
+  $$KnowledgeCardRowsTableAnnotationComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  GeneratedColumn<String> get id =>
+      $composableBuilder(column: $table.id, builder: (column) => column);
+
+  GeneratedColumn<String> get term =>
+      $composableBuilder(column: $table.term, builder: (column) => column);
+
+  GeneratedColumn<String> get content =>
+      $composableBuilder(column: $table.content, builder: (column) => column);
+
+  GeneratedColumn<String> get source =>
+      $composableBuilder(column: $table.source, builder: (column) => column);
+
+  GeneratedColumn<int> get importance => $composableBuilder(
+    column: $table.importance,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<int> get createdAt =>
+      $composableBuilder(column: $table.createdAt, builder: (column) => column);
+
+  GeneratedColumn<DateTime> get updatedAt =>
+      $composableBuilder(column: $table.updatedAt, builder: (column) => column);
+
+  GeneratedColumn<bool> get deleted =>
+      $composableBuilder(column: $table.deleted, builder: (column) => column);
+}
+
+class $$KnowledgeCardRowsTableTableManager
+    extends
+        RootTableManager<
+          _$PikppoDatabase,
+          $KnowledgeCardRowsTable,
+          KnowledgeCardRow,
+          $$KnowledgeCardRowsTableFilterComposer,
+          $$KnowledgeCardRowsTableOrderingComposer,
+          $$KnowledgeCardRowsTableAnnotationComposer,
+          $$KnowledgeCardRowsTableCreateCompanionBuilder,
+          $$KnowledgeCardRowsTableUpdateCompanionBuilder,
+          (
+            KnowledgeCardRow,
+            BaseReferences<
+              _$PikppoDatabase,
+              $KnowledgeCardRowsTable,
+              KnowledgeCardRow
+            >,
+          ),
+          KnowledgeCardRow,
+          PrefetchHooks Function()
+        > {
+  $$KnowledgeCardRowsTableTableManager(
+    _$PikppoDatabase db,
+    $KnowledgeCardRowsTable table,
+  ) : super(
+        TableManagerState(
+          db: db,
+          table: table,
+          createFilteringComposer: () =>
+              $$KnowledgeCardRowsTableFilterComposer($db: db, $table: table),
+          createOrderingComposer: () =>
+              $$KnowledgeCardRowsTableOrderingComposer($db: db, $table: table),
+          createComputedFieldComposer: () =>
+              $$KnowledgeCardRowsTableAnnotationComposer(
+                $db: db,
+                $table: table,
+              ),
+          updateCompanionCallback:
+              ({
+                Value<String> id = const Value.absent(),
+                Value<String> term = const Value.absent(),
+                Value<String> content = const Value.absent(),
+                Value<String> source = const Value.absent(),
+                Value<int> importance = const Value.absent(),
+                Value<int> createdAt = const Value.absent(),
+                Value<DateTime> updatedAt = const Value.absent(),
+                Value<bool> deleted = const Value.absent(),
+                Value<int> rowid = const Value.absent(),
+              }) => KnowledgeCardRowsCompanion(
+                id: id,
+                term: term,
+                content: content,
+                source: source,
+                importance: importance,
+                createdAt: createdAt,
+                updatedAt: updatedAt,
+                deleted: deleted,
+                rowid: rowid,
+              ),
+          createCompanionCallback:
+              ({
+                required String id,
+                required String term,
+                required String content,
+                Value<String> source = const Value.absent(),
+                Value<int> importance = const Value.absent(),
+                required int createdAt,
+                Value<DateTime> updatedAt = const Value.absent(),
+                Value<bool> deleted = const Value.absent(),
+                Value<int> rowid = const Value.absent(),
+              }) => KnowledgeCardRowsCompanion.insert(
+                id: id,
+                term: term,
+                content: content,
+                source: source,
+                importance: importance,
+                createdAt: createdAt,
+                updatedAt: updatedAt,
+                deleted: deleted,
+                rowid: rowid,
+              ),
+          withReferenceMapper: (p0) => p0
+              .map((e) => (e.readTable(table), BaseReferences(db, table, e)))
+              .toList(),
+          prefetchHooksCallback: null,
+        ),
+      );
+}
+
+typedef $$KnowledgeCardRowsTableProcessedTableManager =
+    ProcessedTableManager<
+      _$PikppoDatabase,
+      $KnowledgeCardRowsTable,
+      KnowledgeCardRow,
+      $$KnowledgeCardRowsTableFilterComposer,
+      $$KnowledgeCardRowsTableOrderingComposer,
+      $$KnowledgeCardRowsTableAnnotationComposer,
+      $$KnowledgeCardRowsTableCreateCompanionBuilder,
+      $$KnowledgeCardRowsTableUpdateCompanionBuilder,
+      (
+        KnowledgeCardRow,
+        BaseReferences<
+          _$PikppoDatabase,
+          $KnowledgeCardRowsTable,
+          KnowledgeCardRow
+        >,
+      ),
+      KnowledgeCardRow,
+      PrefetchHooks Function()
+    >;
+typedef $$TagRowsTableCreateCompanionBuilder =
+    TagRowsCompanion Function({
+      required String id,
+      required String name,
+      Value<int> usageCount,
+      Value<DateTime> updatedAt,
+      Value<int> rowid,
+    });
+typedef $$TagRowsTableUpdateCompanionBuilder =
+    TagRowsCompanion Function({
+      Value<String> id,
+      Value<String> name,
+      Value<int> usageCount,
+      Value<DateTime> updatedAt,
+      Value<int> rowid,
+    });
+
+class $$TagRowsTableFilterComposer
+    extends Composer<_$PikppoDatabase, $TagRowsTable> {
+  $$TagRowsTableFilterComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnFilters<String> get id => $composableBuilder(
+    column: $table.id,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get name => $composableBuilder(
+    column: $table.name,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get usageCount => $composableBuilder(
+    column: $table.usageCount,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<DateTime> get updatedAt => $composableBuilder(
+    column: $table.updatedAt,
+    builder: (column) => ColumnFilters(column),
+  );
+}
+
+class $$TagRowsTableOrderingComposer
+    extends Composer<_$PikppoDatabase, $TagRowsTable> {
+  $$TagRowsTableOrderingComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnOrderings<String> get id => $composableBuilder(
+    column: $table.id,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get name => $composableBuilder(
+    column: $table.name,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<int> get usageCount => $composableBuilder(
+    column: $table.usageCount,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<DateTime> get updatedAt => $composableBuilder(
+    column: $table.updatedAt,
+    builder: (column) => ColumnOrderings(column),
+  );
+}
+
+class $$TagRowsTableAnnotationComposer
+    extends Composer<_$PikppoDatabase, $TagRowsTable> {
+  $$TagRowsTableAnnotationComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  GeneratedColumn<String> get id =>
+      $composableBuilder(column: $table.id, builder: (column) => column);
+
+  GeneratedColumn<String> get name =>
+      $composableBuilder(column: $table.name, builder: (column) => column);
+
+  GeneratedColumn<int> get usageCount => $composableBuilder(
+    column: $table.usageCount,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<DateTime> get updatedAt =>
+      $composableBuilder(column: $table.updatedAt, builder: (column) => column);
+}
+
+class $$TagRowsTableTableManager
+    extends
+        RootTableManager<
+          _$PikppoDatabase,
+          $TagRowsTable,
+          TagRow,
+          $$TagRowsTableFilterComposer,
+          $$TagRowsTableOrderingComposer,
+          $$TagRowsTableAnnotationComposer,
+          $$TagRowsTableCreateCompanionBuilder,
+          $$TagRowsTableUpdateCompanionBuilder,
+          (TagRow, BaseReferences<_$PikppoDatabase, $TagRowsTable, TagRow>),
+          TagRow,
+          PrefetchHooks Function()
+        > {
+  $$TagRowsTableTableManager(_$PikppoDatabase db, $TagRowsTable table)
+    : super(
+        TableManagerState(
+          db: db,
+          table: table,
+          createFilteringComposer: () =>
+              $$TagRowsTableFilterComposer($db: db, $table: table),
+          createOrderingComposer: () =>
+              $$TagRowsTableOrderingComposer($db: db, $table: table),
+          createComputedFieldComposer: () =>
+              $$TagRowsTableAnnotationComposer($db: db, $table: table),
+          updateCompanionCallback:
+              ({
+                Value<String> id = const Value.absent(),
+                Value<String> name = const Value.absent(),
+                Value<int> usageCount = const Value.absent(),
+                Value<DateTime> updatedAt = const Value.absent(),
+                Value<int> rowid = const Value.absent(),
+              }) => TagRowsCompanion(
+                id: id,
+                name: name,
+                usageCount: usageCount,
+                updatedAt: updatedAt,
+                rowid: rowid,
+              ),
+          createCompanionCallback:
+              ({
+                required String id,
+                required String name,
+                Value<int> usageCount = const Value.absent(),
+                Value<DateTime> updatedAt = const Value.absent(),
+                Value<int> rowid = const Value.absent(),
+              }) => TagRowsCompanion.insert(
+                id: id,
+                name: name,
+                usageCount: usageCount,
+                updatedAt: updatedAt,
+                rowid: rowid,
+              ),
+          withReferenceMapper: (p0) => p0
+              .map((e) => (e.readTable(table), BaseReferences(db, table, e)))
+              .toList(),
+          prefetchHooksCallback: null,
+        ),
+      );
+}
+
+typedef $$TagRowsTableProcessedTableManager =
+    ProcessedTableManager<
+      _$PikppoDatabase,
+      $TagRowsTable,
+      TagRow,
+      $$TagRowsTableFilterComposer,
+      $$TagRowsTableOrderingComposer,
+      $$TagRowsTableAnnotationComposer,
+      $$TagRowsTableCreateCompanionBuilder,
+      $$TagRowsTableUpdateCompanionBuilder,
+      (TagRow, BaseReferences<_$PikppoDatabase, $TagRowsTable, TagRow>),
+      TagRow,
+      PrefetchHooks Function()
+    >;
+typedef $$CardTagRowsTableCreateCompanionBuilder =
+    CardTagRowsCompanion Function({
+      required String cardId,
+      required String tagId,
+      Value<int> rowid,
+    });
+typedef $$CardTagRowsTableUpdateCompanionBuilder =
+    CardTagRowsCompanion Function({
+      Value<String> cardId,
+      Value<String> tagId,
+      Value<int> rowid,
+    });
+
+class $$CardTagRowsTableFilterComposer
+    extends Composer<_$PikppoDatabase, $CardTagRowsTable> {
+  $$CardTagRowsTableFilterComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnFilters<String> get cardId => $composableBuilder(
+    column: $table.cardId,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get tagId => $composableBuilder(
+    column: $table.tagId,
+    builder: (column) => ColumnFilters(column),
+  );
+}
+
+class $$CardTagRowsTableOrderingComposer
+    extends Composer<_$PikppoDatabase, $CardTagRowsTable> {
+  $$CardTagRowsTableOrderingComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnOrderings<String> get cardId => $composableBuilder(
+    column: $table.cardId,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get tagId => $composableBuilder(
+    column: $table.tagId,
+    builder: (column) => ColumnOrderings(column),
+  );
+}
+
+class $$CardTagRowsTableAnnotationComposer
+    extends Composer<_$PikppoDatabase, $CardTagRowsTable> {
+  $$CardTagRowsTableAnnotationComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  GeneratedColumn<String> get cardId =>
+      $composableBuilder(column: $table.cardId, builder: (column) => column);
+
+  GeneratedColumn<String> get tagId =>
+      $composableBuilder(column: $table.tagId, builder: (column) => column);
+}
+
+class $$CardTagRowsTableTableManager
+    extends
+        RootTableManager<
+          _$PikppoDatabase,
+          $CardTagRowsTable,
+          CardTagRow,
+          $$CardTagRowsTableFilterComposer,
+          $$CardTagRowsTableOrderingComposer,
+          $$CardTagRowsTableAnnotationComposer,
+          $$CardTagRowsTableCreateCompanionBuilder,
+          $$CardTagRowsTableUpdateCompanionBuilder,
+          (
+            CardTagRow,
+            BaseReferences<_$PikppoDatabase, $CardTagRowsTable, CardTagRow>,
+          ),
+          CardTagRow,
+          PrefetchHooks Function()
+        > {
+  $$CardTagRowsTableTableManager(_$PikppoDatabase db, $CardTagRowsTable table)
+    : super(
+        TableManagerState(
+          db: db,
+          table: table,
+          createFilteringComposer: () =>
+              $$CardTagRowsTableFilterComposer($db: db, $table: table),
+          createOrderingComposer: () =>
+              $$CardTagRowsTableOrderingComposer($db: db, $table: table),
+          createComputedFieldComposer: () =>
+              $$CardTagRowsTableAnnotationComposer($db: db, $table: table),
+          updateCompanionCallback:
+              ({
+                Value<String> cardId = const Value.absent(),
+                Value<String> tagId = const Value.absent(),
+                Value<int> rowid = const Value.absent(),
+              }) => CardTagRowsCompanion(
+                cardId: cardId,
+                tagId: tagId,
+                rowid: rowid,
+              ),
+          createCompanionCallback:
+              ({
+                required String cardId,
+                required String tagId,
+                Value<int> rowid = const Value.absent(),
+              }) => CardTagRowsCompanion.insert(
+                cardId: cardId,
+                tagId: tagId,
+                rowid: rowid,
+              ),
+          withReferenceMapper: (p0) => p0
+              .map((e) => (e.readTable(table), BaseReferences(db, table, e)))
+              .toList(),
+          prefetchHooksCallback: null,
+        ),
+      );
+}
+
+typedef $$CardTagRowsTableProcessedTableManager =
+    ProcessedTableManager<
+      _$PikppoDatabase,
+      $CardTagRowsTable,
+      CardTagRow,
+      $$CardTagRowsTableFilterComposer,
+      $$CardTagRowsTableOrderingComposer,
+      $$CardTagRowsTableAnnotationComposer,
+      $$CardTagRowsTableCreateCompanionBuilder,
+      $$CardTagRowsTableUpdateCompanionBuilder,
+      (
+        CardTagRow,
+        BaseReferences<_$PikppoDatabase, $CardTagRowsTable, CardTagRow>,
+      ),
+      CardTagRow,
+      PrefetchHooks Function()
+    >;
 
 class $PikppoDatabaseManager {
   final _$PikppoDatabase _db;
@@ -4535,4 +6157,10 @@ class $PikppoDatabaseManager {
       $$CalendarEventRowsTableTableManager(_db, _db.calendarEventRows);
   $$SyncStateRowsTableTableManager get syncStateRows =>
       $$SyncStateRowsTableTableManager(_db, _db.syncStateRows);
+  $$KnowledgeCardRowsTableTableManager get knowledgeCardRows =>
+      $$KnowledgeCardRowsTableTableManager(_db, _db.knowledgeCardRows);
+  $$TagRowsTableTableManager get tagRows =>
+      $$TagRowsTableTableManager(_db, _db.tagRows);
+  $$CardTagRowsTableTableManager get cardTagRows =>
+      $$CardTagRowsTableTableManager(_db, _db.cardTagRows);
 }

@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:share_plus/share_plus.dart';
+import '../models/knowledge_card.dart';
 import '../models/message.dart';
 import '../providers/app_state_provider.dart';
 import '../theme/design_tokens.dart';
@@ -157,7 +158,8 @@ void showTranslateDialog(BuildContext context, WidgetRef ref, String text) {
   final future = ref.read(appStateProvider.notifier).translateText(text);
   showDialog(
     context: context,
-    builder: (_) => _LlmResultDialog(title: '翻译', source: text, future: future),
+    builder: (_) => _LlmResultDialog(
+        title: '翻译', source: text, sourceTag: '翻译', future: future),
   );
 }
 
@@ -175,7 +177,8 @@ void showExplainDialog(
   final future = ref.read(appStateProvider.notifier).explainInContext(term, ctx);
   showDialog(
     context: context,
-    builder: (_) => _LlmResultDialog(title: '解释', source: term, future: future),
+    builder: (_) => _LlmResultDialog(
+        title: '解释', source: term, sourceTag: '释义', future: future),
   );
 }
 
@@ -206,78 +209,170 @@ String _surroundingContext(String full, String selection) {
   return sentence;
 }
 
-class _LlmResultDialog extends StatelessWidget {
+/// 释义/翻译结果弹窗——展示正文 + LLM 推荐标签（可多选），可「保存到知识卡片」。
+/// [sourceTag]（释义/翻译）作为卡片的**来源分类**单独存，不混进话题标签；
+/// 保存时只存用户勾选的推荐标签。
+class _LlmResultDialog extends ConsumerStatefulWidget {
   final String title;
   final String source;
-  final Future<String> future;
-  const _LlmResultDialog(
-      {required this.title, required this.source, required this.future});
+  final String sourceTag;
+  final Future<LlmCardResult> future;
+  const _LlmResultDialog({
+    required this.title,
+    required this.source,
+    required this.sourceTag,
+    required this.future,
+  });
+
+  @override
+  ConsumerState<_LlmResultDialog> createState() => _LlmResultDialogState();
+}
+
+class _LlmResultDialogState extends ConsumerState<_LlmResultDialog> {
+  LlmCardResult? _result;
+  Object? _error;
+  bool _saved = false;
+
+  /// 勾选要保存的标签——结果就绪时默认全选。
+  final Set<String> _selected = {};
+
+  @override
+  void initState() {
+    super.initState();
+    widget.future.then((r) {
+      if (!mounted) return;
+      setState(() {
+        _result = r;
+        _selected
+          ..clear()
+          ..addAll(r.tags);
+      });
+    }).catchError((Object e) {
+      if (!mounted) return;
+      setState(() => _error = e);
+    });
+  }
+
+  Future<void> _save() async {
+    final r = _result;
+    if (r == null) return;
+    try {
+      await ref.read(appStateProvider.notifier).saveKnowledgeCard(
+            term: widget.source,
+            content: r.text,
+            source: widget.sourceTag,
+            tags: _selected.toList(),
+          );
+      if (!mounted) return;
+      setState(() => _saved = true);
+      showAppToast('已存入知识卡片', icon: Icons.bookmark_added_rounded);
+    } catch (e) {
+      showAppToast(userFacingError(e), icon: Icons.error_outline_rounded);
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final r = _result;
     return AlertDialog(
-      title: Text(title),
+      title: Text(widget.title),
       content: ConstrainedBox(
         constraints: BoxConstraints(
           maxHeight: MediaQuery.of(context).size.height * 0.5,
         ),
-        child: FutureBuilder<String>(
-          future: future,
-          builder: (context, snap) {
-            if (snap.connectionState != ConnectionState.done) {
-              return const SizedBox(
-                height: 72,
-                child: Center(child: CircularProgressIndicator()),
-              );
-            }
-            if (snap.hasError) {
-              return Text(
-                userFacingError(snap.error!),
-                style:
-                    theme.textTheme.bodyMedium?.copyWith(color: theme.colorScheme.error),
-              );
-            }
-            final translated = (snap.data ?? '').trim();
-            return SingleChildScrollView(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Text(source,
-                      style: theme.textTheme.bodySmall?.copyWith(
-                          color: theme.colorScheme.onSurfaceVariant)),
-                  const Divider(height: AppSpacing.lg),
-                  SelectableText(translated,
-                      style: theme.textTheme.bodyLarge),
-                ],
-              ),
-            );
-          },
-        ),
+        child: _error != null
+            ? Text(userFacingError(_error!),
+                style: theme.textTheme.bodyMedium
+                    ?.copyWith(color: theme.colorScheme.error))
+            : r == null
+                ? const SizedBox(
+                    height: 72,
+                    child: Center(child: CircularProgressIndicator()),
+                  )
+                : SingleChildScrollView(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(widget.source,
+                            style: theme.textTheme.bodySmall?.copyWith(
+                                color: theme.colorScheme.onSurfaceVariant)),
+                        const Divider(height: AppSpacing.lg),
+                        SelectableText(r.text,
+                            style: theme.textTheme.bodyLarge),
+                        if (r.tags.isNotEmpty) ...[
+                          const SizedBox(height: AppSpacing.md),
+                          Text('标签（点选要保存的）',
+                              style: theme.textTheme.labelSmall?.copyWith(
+                                  color: theme.colorScheme.onSurfaceVariant)),
+                          const SizedBox(height: AppSpacing.xs),
+                          Wrap(
+                            spacing: AppSpacing.sm,
+                            runSpacing: AppSpacing.xs,
+                            children: [
+                              for (final t in r.tags)
+                                () {
+                                  final sel = _selected.contains(t);
+                                  return FilterChip(
+                                    label: Text(t),
+                                    selected: sel,
+                                    showCheckmark: false,
+                                    selectedColor: theme.colorScheme.primary,
+                                    backgroundColor: theme
+                                        .colorScheme.surfaceContainerHighest,
+                                    side: BorderSide.none,
+                                    labelStyle:
+                                        theme.textTheme.labelMedium?.copyWith(
+                                      color: sel
+                                          ? theme.colorScheme.onPrimary
+                                          : theme.colorScheme.onSurfaceVariant,
+                                    ),
+                                    visualDensity: VisualDensity.compact,
+                                    materialTapTargetSize:
+                                        MaterialTapTargetSize.shrinkWrap,
+                                    onSelected: _saved
+                                        ? null
+                                        : (on) => setState(() => on
+                                            ? _selected.add(t)
+                                            : _selected.remove(t)),
+                                  );
+                                }(),
+                            ],
+                          ),
+                        ],
+                      ],
+                    ),
+                  ),
       ),
       actions: [
-        FutureBuilder<String>(
-          future: future,
-          builder: (context, snap) {
-            final ready = snap.connectionState == ConnectionState.done &&
-                !snap.hasError &&
-                (snap.data ?? '').trim().isNotEmpty;
-            return TextButton(
-              onPressed: ready
+        Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            TextButton.icon(
+              onPressed: (r != null && !_saved) ? _save : null,
+              icon: Icon(
+                _saved
+                    ? Icons.bookmark_added_rounded
+                    : Icons.bookmark_add_outlined,
+                size: 18,
+              ),
+              label: Text(_saved ? '已保存' : '保存到知识卡片'),
+            ),
+            TextButton(
+              onPressed: r != null
                   ? () {
-                      Clipboard.setData(
-                          ClipboardData(text: snap.data!.trim()));
+                      Clipboard.setData(ClipboardData(text: r.text.trim()));
                       showAppToast('已复制', icon: Icons.copy_rounded);
                     }
                   : null,
               child: const Text('复制'),
-            );
-          },
-        ),
-        TextButton(
-          onPressed: () => Navigator.pop(context),
-          child: const Text('关闭'),
+            ),
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('关闭'),
+            ),
+          ],
         ),
       ],
     );
